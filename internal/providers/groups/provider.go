@@ -2,10 +2,10 @@ package groups
 
 import (
 	"context"
-	"fmt"
+	"net/url"
+	"strings"
 	"time"
 
-	"github.com/mathwro/pim-manager/internal/graph"
 	"github.com/mathwro/pim-manager/internal/pim"
 )
 
@@ -36,7 +36,8 @@ type eligibilityScheduleInstance struct {
 
 func (p Provider) Discover(ctx context.Context) ([]pim.EligibleAssignment, error) {
 	var response eligibilityResponse
-	filter := graph.EscapeFilterValue(fmt.Sprintf("principalId eq '%s'", p.principalID))
+	principalID := strings.ReplaceAll(p.principalID, "'", "''")
+	filter := url.QueryEscape("principalId eq '" + principalID + "'")
 	path := "/identityGovernance/privilegedAccess/group/eligibilityScheduleInstances?$filter=" + filter
 	if err := p.graph.Get(ctx, path, &response); err != nil {
 		return nil, err
