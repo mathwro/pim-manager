@@ -19,7 +19,8 @@ func NewScopeDiscoverer(arm ARMClient) ScopeDiscoverer {
 }
 
 type managementGroupsResponse struct {
-	Value []managementGroup `json:"value"`
+	Value    []managementGroup `json:"value"`
+	NextLink string            `json:"nextLink"`
 }
 
 type managementGroup struct {
@@ -27,7 +28,8 @@ type managementGroup struct {
 }
 
 type subscriptionsResponse struct {
-	Value []subscription `json:"value"`
+	Value    []subscription `json:"value"`
+	NextLink string         `json:"nextLink"`
 }
 
 type subscription struct {
@@ -35,7 +37,8 @@ type subscription struct {
 }
 
 type resourceGroupsResponse struct {
-	Value []resourceGroup `json:"value"`
+	Value    []resourceGroup `json:"value"`
+	NextLink string          `json:"nextLink"`
 }
 
 type resourceGroup struct {
@@ -45,30 +48,41 @@ type resourceGroup struct {
 func (d ScopeDiscoverer) Discover(ctx context.Context) ([]string, error) {
 	var scopes []string
 
-	var managementGroups managementGroupsResponse
-	if err := d.arm.Get(ctx, "/providers/Microsoft.Management/managementGroups?api-version=2020-05-01", &managementGroups); err != nil {
-		return nil, err
-	}
-	for _, group := range managementGroups.Value {
-		scopes = append(scopes, "/providers/Microsoft.Management/managementGroups/"+group.Name)
-	}
-
-	var subscriptions subscriptionsResponse
-	if err := d.arm.Get(ctx, "/subscriptions?api-version=2020-01-01", &subscriptions); err != nil {
-		return nil, err
-	}
-	for _, sub := range subscriptions.Value {
-		subScope := "/subscriptions/" + sub.SubscriptionID
-		scopes = append(scopes, subScope)
-
-		var resourceGroups resourceGroupsResponse
-		path := fmt.Sprintf("/subscriptions/%s/resourcegroups?api-version=2021-04-01", sub.SubscriptionID)
-		if err := d.arm.Get(ctx, path, &resourceGroups); err != nil {
+	managementGroupPath := "/providers/Microsoft.Management/managementGroups?api-version=2020-05-01"
+	for managementGroupPath != "" {
+		var managementGroups managementGroupsResponse
+		if err := d.arm.Get(ctx, managementGroupPath, &managementGroups); err != nil {
 			return nil, err
 		}
-		for _, rg := range resourceGroups.Value {
-			scopes = append(scopes, rg.ID)
+		for _, group := range managementGroups.Value {
+			scopes = append(scopes, "/providers/Microsoft.Management/managementGroups/"+group.Name)
 		}
+		managementGroupPath = managementGroups.NextLink
+	}
+
+	subscriptionPath := "/subscriptions?api-version=2020-01-01"
+	for subscriptionPath != "" {
+		var subscriptions subscriptionsResponse
+		if err := d.arm.Get(ctx, subscriptionPath, &subscriptions); err != nil {
+			return nil, err
+		}
+		for _, sub := range subscriptions.Value {
+			subScope := "/subscriptions/" + sub.SubscriptionID
+			scopes = append(scopes, subScope)
+
+			resourceGroupPath := fmt.Sprintf("/subscriptions/%s/resourcegroups?api-version=2021-04-01", sub.SubscriptionID)
+			for resourceGroupPath != "" {
+				var resourceGroups resourceGroupsResponse
+				if err := d.arm.Get(ctx, resourceGroupPath, &resourceGroups); err != nil {
+					return nil, err
+				}
+				for _, rg := range resourceGroups.Value {
+					scopes = append(scopes, rg.ID)
+				}
+				resourceGroupPath = resourceGroups.NextLink
+			}
+		}
+		subscriptionPath = subscriptions.NextLink
 	}
 
 	return scopes, nil
