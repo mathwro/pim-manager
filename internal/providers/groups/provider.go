@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mathwro/pim-manager/internal/activation"
 	"github.com/mathwro/pim-manager/internal/pim"
 )
 
@@ -102,7 +103,7 @@ func (p Provider) Activate(ctx context.Context, request pim.ActivationRequest) (
 	var response activationResponse
 	err := p.graph.Post(ctx, "/identityGovernance/privilegedAccess/group/assignmentScheduleRequests", activationBody(request), &response)
 	if err != nil {
-		return pim.ActivationResult{}, err
+		return pim.ActivationResult{}, activation.WrapRetryable(err)
 	}
 	switch response.Status {
 	case "Granted", "Provisioned":

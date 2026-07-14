@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/mathwro/pim-manager/internal/activation"
 	"github.com/mathwro/pim-manager/internal/pim"
 )
 
@@ -106,7 +107,7 @@ func (p Provider) Activate(ctx context.Context, request pim.ActivationRequest) (
 	var response activationResponse
 	err := p.graph.Post(ctx, "/roleManagement/directory/roleAssignmentScheduleRequests", activationBody(request), &response)
 	if err != nil {
-		return pim.ActivationResult{}, err
+		return pim.ActivationResult{}, activation.WrapRetryable(err)
 	}
 	return p.mapStatus(request.Assignment, response.Status, ""), nil
 }

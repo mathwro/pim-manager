@@ -310,3 +310,37 @@ func TestHomeShowsLoginGuidanceAndRetriesAccountLookup(t *testing.T) {
 		t.Fatalf("expected two account calls, got %d", account.calls)
 	}
 }
+
+func TestSummaryViewListsPerAssignmentStatuses(t *testing.T) {
+	model := NewModel(Runtime{})
+	model.screen = ScreenSummary
+	model.activeSection = SectionEntra
+	model.summary = newSummary([]pim.ActivationResult{
+		{
+			Assignment: pim.EligibleAssignment{DisplayName: "Global Reader"},
+			Status:     pim.ActivationStatusActivated,
+			Message:    "Granted",
+		},
+		{
+			Assignment: pim.EligibleAssignment{DisplayName: "Privileged Role Administrator"},
+			Status:     pim.ActivationStatusPendingApproval,
+			Message:    "PendingApproval",
+		},
+		{
+			Assignment: pim.EligibleAssignment{DisplayName: "Billing Reader"},
+			Status:     pim.ActivationStatusFailed,
+			Message:    "PolicyBlocked",
+		},
+	})
+
+	view := model.View()
+	if !strings.Contains(view, "- Global Reader: activated (Granted)") {
+		t.Fatalf("expected activated row in summary, got %q", view)
+	}
+	if !strings.Contains(view, "- Privileged Role Administrator: pending_approval (PendingApproval)") {
+		t.Fatalf("expected pending_approval row in summary, got %q", view)
+	}
+	if !strings.Contains(view, "- Billing Reader: failed (PolicyBlocked)") {
+		t.Fatalf("expected failed row in summary, got %q", view)
+	}
+}

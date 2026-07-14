@@ -24,6 +24,18 @@ type Client struct {
 	baseURL     string
 }
 
+type ResponseError struct {
+	Method     string
+	URL        string
+	StatusCode int
+	Status     string
+	Body       string
+}
+
+func (e ResponseError) Error() string {
+	return fmt.Sprintf("Graph %s %s failed: %s: %s", e.Method, e.URL, e.Status, e.Body)
+}
+
 func NewClient(httpClient *http.Client, tokenSource TokenSource) Client {
 	if httpClient == nil {
 		httpClient = http.DefaultClient
@@ -70,7 +82,13 @@ func (c Client) do(ctx context.Context, method string, path string, body any, ou
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		b, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("Graph %s %s failed: %s: %s", method, u, resp.Status, string(b))
+		return ResponseError{
+			Method:     method,
+			URL:        u,
+			StatusCode: resp.StatusCode,
+			Status:     resp.Status,
+			Body:       strings.TrimSpace(string(b)),
+		}
 	}
 	if out == nil {
 		return nil

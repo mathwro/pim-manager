@@ -574,10 +574,22 @@ func (m Model) viewSummary() string {
 	fmt.Fprintf(&b, "failed: %d\n", len(m.summary.failed))
 	fmt.Fprintf(&b, "retryable_failures: %d\n", len(m.summary.retryableFailures()))
 
-	if len(m.summary.failed) > 0 {
-		b.WriteString("\nFailures:\n")
-		for _, result := range m.summary.failed {
-			fmt.Fprintf(&b, "- %s: %s\n", result.Assignment.DisplayName, result.Message)
+	if len(m.summary.results) > 0 {
+		b.WriteString("\nResults:\n")
+		for _, result := range m.summary.results {
+			displayName := strings.TrimSpace(result.Assignment.DisplayName)
+			if displayName == "" {
+				displayName = strings.TrimSpace(result.Assignment.ID)
+			}
+			if displayName == "" {
+				displayName = "assignment"
+			}
+			message := strings.TrimSpace(result.Message)
+			if message != "" {
+				fmt.Fprintf(&b, "- %s: %s (%s)\n", displayName, result.Status, message)
+				continue
+			}
+			fmt.Fprintf(&b, "- %s: %s\n", displayName, result.Status)
 		}
 	}
 	if len(m.summary.retryableFailures()) > 0 {

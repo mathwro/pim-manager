@@ -16,6 +16,7 @@ func (f activationForm) valid() bool {
 }
 
 type summary struct {
+	results         []pim.ActivationResult
 	activated       []pim.ActivationResult
 	pendingApproval []pim.ActivationResult
 	failed          []pim.ActivationResult
@@ -24,6 +25,7 @@ type summary struct {
 func newSummary(results []pim.ActivationResult) summary {
 	var s summary
 	for _, result := range results {
+		s.results = append(s.results, result)
 		switch {
 		case result.Success():
 			s.activated = append(s.activated, result)

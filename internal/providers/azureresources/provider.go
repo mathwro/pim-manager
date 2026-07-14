@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/mathwro/pim-manager/internal/activation"
 	"github.com/mathwro/pim-manager/internal/arm"
 	"github.com/mathwro/pim-manager/internal/pim"
 )
@@ -155,7 +156,7 @@ func (p Provider) Activate(ctx context.Context, request pim.ActivationRequest) (
 	path := fmt.Sprintf("%s/providers/Microsoft.Authorization/roleAssignmentScheduleRequests/%s?api-version=%s", request.Assignment.AzureScope, requestID, arm.AuthorizationAPIVersion)
 	var response activationResponse
 	if err := p.arm.Put(ctx, path, activationBody(request), &response); err != nil {
-		return pim.ActivationResult{}, err
+		return pim.ActivationResult{}, activation.WrapRetryable(err)
 	}
 	switch response.Properties.Status {
 	case "Granted", "Provisioned":

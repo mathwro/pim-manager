@@ -2,8 +2,14 @@ package entra
 
 import (
 	"context"
+	"errors"
+	"io"
+	"net/http"
+	"strings"
 	"testing"
 
+	"github.com/mathwro/pim-manager/internal/activation"
+	"github.com/mathwro/pim-manager/internal/graph"
 	"github.com/mathwro/pim-manager/internal/pim"
 )
 
@@ -129,3 +135,87 @@ func (f *pagingFakeGraph) Get(_ context.Context, path string, out any) error {
 }
 
 func (f *pagingFakeGraph) Post(context.Context, string, any, any) error { return nil }
+
+func TestActivateWrapsTransientGraphErrorsAsRetryable(t *testing.T) {
+	client := graph.NewClient(
+		&http.Client{
+			Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusTooManyRequests,
+					Status:     "429 Too Many Requests",
+					Body:       io.NopCloser(strings.NewReader(`{"error":{"message":"throttled"}}`)),
+					Header:     make(http.Header),
+				}, nil
+			}),
+		},
+		staticTokenSource{},
+	)
+	provider := NewProvider(client)
+
+	_, err := provider.Activate(context.Background(), pim.ActivationRequest{
+		Assignment: pim.EligibleAssignment{
+			PrincipalID:      "principal-1",
+			RoleDefinitionID: "role-1",
+			DirectoryScopeID: "/",
+		},
+		Justification: "Need access",
+		DurationISO:   "PT1H",
+	})
+
+	if err == nil {
+		t.Fatal("expected activation error")
+	}
+	if !activation.IsRetryable(err) {
+		t.Fatalf("expected retryable error, got %v", err)
+	}
+	var graphErr graph.ResponseError
+	if !errors.As(err, &graphErr) {
+		t.Fatalf("expected wrapped graph response error, got %T", err)
+	}
+}
+
+func TestActivateLeavesNonTransientGraphErrorsNonRetryable(t *testing.T) {
+	client := graph.NewClient(
+		&http.Client{
+			Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusForbidden,
+					Status:     "403 Forbidden",
+					Body:       io.NopCloser(strings.NewReader(`{"error":{"message":"policy denied"}}`)),
+					Header:     make(http.Header),
+				}, nil
+			}),
+		},
+		staticTokenSource{},
+	)
+	provider := NewProvider(client)
+
+	_, err := provider.Activate(context.Background(), pim.ActivationRequest{
+		Assignment: pim.EligibleAssignment{
+			PrincipalID:      "principal-1",
+			RoleDefinitionID: "role-1",
+			DirectoryScopeID: "/",
+		},
+		Justification: "Need access",
+		DurationISO:   "PT1H",
+	})
+
+	if err == nil {
+		t.Fatal("expected activation error")
+	}
+	if activation.IsRetryable(err) {
+		t.Fatalf("expected non-retryable error, got %v", err)
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+type staticTokenSource struct{}
+
+func (staticTokenSource) AccessToken(context.Context, string) (string, error) {
+	return "token", nil
+}
