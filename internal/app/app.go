@@ -1,7 +1,6 @@
 package app
 
 import (
-	"context"
 	"net/http"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -14,24 +13,28 @@ import (
 	"github.com/mathwro/pim-manager/internal/tui"
 )
 
+var newCLI = azureauth.NewCLI
+
+var runProgram = func(model tea.Model) error {
+	_, err := tea.NewProgram(model, tea.WithAltScreen()).Run()
+	return err
+}
+
 func Run() error {
-	auth := azureauth.NewCLI(nil)
-	principalID, err := auth.PrincipalID(context.Background())
-	if err != nil {
-		return err
-	}
+	auth := newCLI(nil)
 	httpClient := http.DefaultClient
 	graphClient := graph.NewClient(httpClient, auth)
 	armClient := arm.NewClient(httpClient, auth)
-	scopes, err := azureresources.NewScopeDiscoverer(armClient).Discover(context.Background())
-	if err != nil {
-		return err
-	}
 	runtime := tui.Runtime{
-		Entra:          entra.NewProvider(graphClient),
-		AzureResources: azureresources.NewProvider(armClient, principalID, scopes),
-		Groups:         groups.NewProvider(graphClient, principalID),
+		Entra: entra.NewProvider(graphClient),
+		AzureResources: newLazyAzureResourcesProvider(auth, azureresources.NewScopeDiscoverer(armClient), func(principalID string, scopes []string) lazyAssignmentProvider {
+			provider := azureresources.NewProvider(armClient, principalID, scopes)
+			return lazyAssignmentProvider{discover: provider.Discover, activate: provider.Activate}
+		}),
+		Groups: newLazyPrincipalProvider(auth, func(principalID string) lazyAssignmentProvider {
+			provider := groups.NewProvider(graphClient, principalID)
+			return lazyAssignmentProvider{discover: provider.Discover, activate: provider.Activate}
+		}),
 	}
-	_, err = tea.NewProgram(tui.NewModel(runtime), tea.WithAltScreen()).Run()
-	return err
+	return runProgram(tui.NewModel(runtime))
 }
