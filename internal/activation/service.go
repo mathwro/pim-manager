@@ -27,7 +27,7 @@ func (s Service) ActivateBatch(ctx context.Context, requests []pim.ActivationReq
 				Assignment: request.Assignment,
 				Status:     pim.ActivationStatusFailed,
 				Message:    err.Error(),
-				Retryable:  true,
+				Retryable:  IsRetryable(err),
 			}
 		}
 		results = append(results, result)

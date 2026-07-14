@@ -14,7 +14,7 @@ func TestActivateBatchContinuesAfterFailure(t *testing.T) {
 			"two": {Status: pim.ActivationStatusActivated},
 		},
 		errors: map[string]error{
-			"one": errors.New("throttled"),
+			"one": NewRetryableError(errors.New("throttled")),
 		},
 	}
 	service := NewService(provider)
@@ -42,7 +42,7 @@ func TestActivateBatchContinuesAfterFailure(t *testing.T) {
 }
 
 func TestActivateBatchMapsProviderErrorToFailedResult(t *testing.T) {
-	service := NewService(&fakeProvider{err: errors.New("network down")})
+	service := NewService(&fakeProvider{err: NewRetryableError(errors.New("network down"))})
 	assignment := pim.EligibleAssignment{
 		ID:          "one",
 		Source:      pim.AssignmentSourceEntra,
@@ -70,6 +70,20 @@ func TestActivateBatchMapsProviderErrorToFailedResult(t *testing.T) {
 	}
 	if results[0].Assignment != assignment {
 		t.Fatalf("expected assignment %#v, got %#v", assignment, results[0].Assignment)
+	}
+}
+
+func TestActivateBatchMarksOnlyRetryableErrorsRetryable(t *testing.T) {
+	service := NewService(&fakeProvider{err: NewRetryableError(errors.New("timeout"))})
+	results := service.ActivateBatch(context.Background(), []pim.ActivationRequest{{Assignment: pim.EligibleAssignment{ID: "one"}}})
+	if len(results) != 1 || !results[0].CanRetry() {
+		t.Fatalf("expected retryable failure, got %#v", results)
+	}
+
+	service = NewService(&fakeProvider{err: errors.New("policy denied")})
+	results = service.ActivateBatch(context.Background(), []pim.ActivationRequest{{Assignment: pim.EligibleAssignment{ID: "one"}}})
+	if len(results) != 1 || results[0].CanRetry() {
+		t.Fatalf("expected non-retryable failure, got %#v", results)
 	}
 }
 
