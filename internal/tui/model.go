@@ -2,10 +2,13 @@ package tui
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strings"
 
+	"github.com/charmbracelet/bubbles/spinner"
+	"github.com/charmbracelet/bubbles/textarea"
+	"github.com/charmbracelet/bubbles/textinput"
+	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/mathwro/pim-manager/internal/activation"
 	"github.com/mathwro/pim-manager/internal/azureauth"
@@ -15,10 +18,13 @@ import (
 type Screen string
 
 const (
-	ScreenHome        Screen = "home"
-	ScreenAssignments Screen = "assignments"
-	ScreenActivation  Screen = "activation"
-	ScreenSummary     Screen = "summary"
+	ScreenHome         Screen = "home"
+	ScreenAssignments  Screen = "assignments"
+	ScreenDetails      Screen = "details"
+	ScreenActivation   Screen = "activation"
+	ScreenConfirmation Screen = "confirmation"
+	ScreenProgress     Screen = "progress"
+	ScreenSummary      Screen = "summary"
 )
 
 type Section string
@@ -57,8 +63,11 @@ type Model struct {
 	listCursor      int
 	assignmentList  assignmentList
 	form            activationForm
-	formEditing     bool
 	formField       activationFormField
+	justification   textarea.Model
+	duration        textinput.Model
+	spinner         spinner.Model
+	summaryViewport viewport.Model
 	summary         summary
 	loading         bool
 	checkingAccount bool
@@ -66,6 +75,9 @@ type Model struct {
 	account         azureauth.Account
 	accountErr      error
 	err             error
+	helpVisible     bool
+	width           int
+	height          int
 }
 
 type activationFormField int
@@ -90,7 +102,23 @@ type accountCheckedMsg struct {
 }
 
 func NewModel(runtime Runtime) Model {
-	return Model{
+	justification := textarea.New()
+	justification.Placeholder = "Why is this access needed?"
+	justification.CharLimit = 500
+	justification.ShowLineNumbers = false
+	justification.SetHeight(4)
+
+	duration := textinput.New()
+	duration.Prompt = ""
+	duration.Placeholder = "PT1H"
+	duration.CharLimit = 20
+	duration.SetValue("PT1H")
+
+	activity := spinner.New()
+	activity.Spinner = spinner.Line
+	activity.Style = spinnerStyle
+
+	model := Model{
 		runtime:         runtime,
 		screen:          ScreenHome,
 		selectedSection: SectionEntra,
@@ -100,19 +128,39 @@ func NewModel(runtime Runtime) Model {
 			durationISO: "PT1H",
 		},
 		formField:       formFieldJustification,
+		justification:   justification,
+		duration:        duration,
+		spinner:         activity,
+		summaryViewport: viewport.New(0, 0),
 		checkingAccount: runtime.Account != nil,
+		width:           96,
+		height:          30,
 	}
+	model.resizeComponents()
+	return model
 }
 
 func (m Model) Init() tea.Cmd {
-	if m.runtime.Account != nil {
-		return m.checkAccount()
+	if m.runtime.Account == nil {
+		return nil
 	}
-	return nil
+	return m.checkAccount()
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch typed := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.width = typed.Width
+		m.height = typed.Height
+		m.resizeComponents()
+		return m, nil
+	case spinner.TickMsg:
+		if !m.loading && !m.checkingAccount {
+			return m, nil
+		}
+		var cmd tea.Cmd
+		m.spinner, cmd = m.spinner.Update(typed)
+		return m, cmd
 	case assignmentsDiscoveredMsg:
 		m.loading = false
 		m.err = typed.err
@@ -127,6 +175,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.loading = false
 		m.summary = newSummary(typed.results)
 		m.screen = ScreenSummary
+		m.refreshSummaryViewport()
 		return m, nil
 	case accountCheckedMsg:
 		m.checkingAccount = false
@@ -140,72 +189,95 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if !ok {
 		return m, nil
 	}
+	if key.Type == tea.KeyCtrlC {
+		return m, tea.Quit
+	}
+	if m.helpVisible {
+		if key.Type == tea.KeyEsc || key.String() == "?" || key.String() == "q" {
+			m.helpVisible = false
+		}
+		return m, nil
+	}
+	if !m.acceptingText() {
+		switch key.String() {
+		case "q":
+			return m, tea.Quit
+		case "?":
+			m.helpVisible = true
+			return m, nil
+		}
+	}
 
 	switch m.screen {
 	case ScreenHome:
 		return m.updateHome(key)
 	case ScreenAssignments:
 		return m.updateAssignments(key)
+	case ScreenDetails:
+		return m.updateDetails(key)
+	case ScreenActivation:
+		return m.updateActivation(key)
+	case ScreenConfirmation:
+		return m.updateConfirmation(key)
+	case ScreenProgress:
+		return m, nil
 	case ScreenSummary:
 		return m.updateSummary(key)
+	default:
+		return m, nil
 	}
-
-	return m, nil
 }
 
 func (m Model) View() string {
+	var content string
 	switch m.screen {
 	case ScreenHome:
-		return m.viewHome()
+		content = m.viewHome()
 	case ScreenAssignments:
-		return m.viewAssignments()
+		content = m.viewAssignments()
+	case ScreenDetails:
+		content = m.viewDetails()
+	case ScreenActivation:
+		content = m.viewActivation()
+	case ScreenConfirmation:
+		content = m.viewConfirmation()
+	case ScreenProgress:
+		content = m.viewProgress()
 	case ScreenSummary:
-		return m.viewSummary()
+		content = m.viewSummary()
 	default:
-		return "pim-manager"
+		content = "pim-manager"
 	}
+	if m.helpVisible {
+		content = m.viewHelp()
+	}
+	return appFrameStyle.Width(m.frameWidth()).Render(content)
 }
 
 func (m Model) updateHome(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch key.Type {
 	case tea.KeyUp:
-		if m.sectionIndex > 0 {
-			m.sectionIndex--
-		}
-		m.selectedSection = m.sections[m.sectionIndex]
+		m.moveSection(-1)
 	case tea.KeyDown:
-		if m.sectionIndex < len(m.sections)-1 {
-			m.sectionIndex++
+		m.moveSection(1)
+	case tea.KeyEnter:
+		if m.runtime.Account != nil && (m.checkingAccount || m.accountErr != nil) {
+			return m, nil
 		}
-		m.selectedSection = m.sections[m.sectionIndex]
+		return m.beginDiscovery(m.selectedSection)
 	case tea.KeyRunes:
 		switch string(key.Runes) {
 		case "k":
-			if m.sectionIndex > 0 {
-				m.sectionIndex--
-			}
-			m.selectedSection = m.sections[m.sectionIndex]
+			m.moveSection(-1)
 		case "j":
-			if m.sectionIndex < len(m.sections)-1 {
-				m.sectionIndex++
-			}
-			m.selectedSection = m.sections[m.sectionIndex]
+			m.moveSection(1)
 		case "r":
 			if m.runtime.Account != nil {
 				m.checkingAccount = true
 				m.accountErr = nil
-				return m, m.checkAccount()
+				return m, tea.Batch(m.checkAccount(), m.spinner.Tick)
 			}
 		}
-	case tea.KeyEnter:
-		m.activeSection = m.selectedSection
-		m.screen = ScreenAssignments
-		m.loading = true
-		m.err = nil
-		m.query = ""
-		m.assignmentList = newAssignmentList(nil)
-		m.listCursor = 0
-		return m, m.discoverAssignments()
 	}
 	return m, nil
 }
@@ -218,122 +290,129 @@ func (m Model) updateAssignments(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case tea.KeyBackspace, tea.KeyCtrlH:
 			m.query = trimLastRune(m.query)
 			m.clampCursor()
-		case tea.KeyRunes:
-			m.query += string(key.Runes)
+		case tea.KeyCtrlU:
+			m.query = ""
 			m.clampCursor()
+		case tea.KeyRunes, tea.KeySpace:
+			m.query += key.String()
+			m.clampCursor()
+		}
+		return m, nil
+	}
+
+	if m.loading {
+		if key.Type == tea.KeyEsc {
+			m.screen = ScreenHome
 		}
 		return m, nil
 	}
 
 	switch key.Type {
 	case tea.KeyEsc:
-		if m.formEditing {
-			m.formEditing = false
-			return m, nil
-		}
 		m.screen = ScreenHome
+		m.err = nil
 		return m, nil
-	case tea.KeyEnter:
-		if m.formEditing {
-			m.formEditing = false
-		}
-	case tea.KeyTab:
-		if m.formEditing {
-			if m.formField == formFieldJustification {
-				m.formField = formFieldDuration
-			} else {
-				m.formField = formFieldJustification
-			}
-		}
-	case tea.KeyBackspace, tea.KeyCtrlH:
-		if m.formEditing {
-			if m.formField == formFieldJustification {
-				m.form.justification = trimLastRune(m.form.justification)
-			} else {
-				m.form.durationISO = trimLastRune(m.form.durationISO)
-			}
-		}
-	case tea.KeyCtrlU:
-		if m.formEditing {
-			if m.formField == formFieldJustification {
-				m.form.justification = ""
-			} else {
-				m.form.durationISO = ""
-			}
-		}
 	case tea.KeyUp:
-		if m.formEditing {
-			return m, nil
-		}
-		if m.listCursor > 0 {
-			m.listCursor--
-		}
+		m.moveAssignment(-1)
 	case tea.KeyDown:
-		if m.formEditing {
-			return m, nil
-		}
-		filtered := m.assignmentList.filtered(m.query)
-		if m.listCursor < len(filtered)-1 {
-			m.listCursor++
-		}
+		m.moveAssignment(1)
 	case tea.KeySpace:
-		if m.formEditing {
-			if m.formField == formFieldJustification {
-				m.form.justification += " "
-			} else {
-				m.form.durationISO += " "
+		m.toggleFocusedAssignment()
+	case tea.KeyEnter:
+		if len(m.assignmentList.selected()) == 0 {
+			m.err = fmt.Errorf("select at least one assignment to continue")
+			return m, nil
+		}
+		return m.openActivationForm()
+	case tea.KeyRunes:
+		switch string(key.Runes) {
+		case "/":
+			m.searchMode = true
+			m.err = nil
+		case "j":
+			m.moveAssignment(1)
+		case "k":
+			m.moveAssignment(-1)
+		case "i":
+			if len(m.assignmentList.filtered(m.query)) > 0 {
+				m.screen = ScreenDetails
 			}
-			return m, nil
+		case "a":
+			m.toggleAllFiltered()
+		case "r":
+			return m.beginDiscovery(m.activeSection)
 		}
-		filtered := m.assignmentList.filtered(m.query)
-		if len(filtered) == 0 || m.listCursor >= len(filtered) {
-			return m, nil
+	}
+	return m, nil
+}
+
+func (m Model) updateDetails(key tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if key.Type == tea.KeyEsc || key.Type == tea.KeyEnter || key.String() == "b" {
+		m.screen = ScreenAssignments
+	}
+	return m, nil
+}
+
+func (m Model) updateActivation(key tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch key.Type {
+	case tea.KeyEsc:
+		m.justification.Blur()
+		m.duration.Blur()
+		m.screen = ScreenAssignments
+		m.err = nil
+		return m, nil
+	case tea.KeyTab, tea.KeyShiftTab:
+		return m.toggleFormFocus()
+	case tea.KeyEnter:
+		if m.formField == formFieldJustification {
+			return m.focusDuration()
 		}
-		m.assignmentList.toggle(filtered[m.listCursor].ID)
-	case tea.KeyCtrlA:
-		if m.formEditing {
-			return m, nil
-		}
-		if m.loading || m.err != nil {
-			return m, nil
-		}
+		m.syncForm()
 		if !m.form.valid() {
 			m.err = fmt.Errorf("justification and duration are required")
 			return m, nil
 		}
+		m.err = nil
+		m.duration.Blur()
+		m.screen = ScreenConfirmation
+		return m, nil
+	}
+
+	if key.Type == tea.KeySpace {
+		key = tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}}
+	}
+
+	var cmd tea.Cmd
+	if m.formField == formFieldJustification {
+		m.justification, cmd = m.justification.Update(key)
+	} else {
+		m.duration, cmd = m.duration.Update(key)
+	}
+	m.syncForm()
+	m.err = nil
+	return m, cmd
+}
+
+func (m Model) updateConfirmation(key tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch key.Type {
+	case tea.KeyEsc:
+		m.screen = ScreenActivation
+		return m.focusDuration()
+	case tea.KeyEnter:
 		selected := m.assignmentList.selected()
 		if len(selected) == 0 {
-			m.err = fmt.Errorf("select at least one assignment")
+			m.screen = ScreenAssignments
+			m.err = fmt.Errorf("select at least one assignment to continue")
 			return m, nil
 		}
+		m.screen = ScreenProgress
 		m.loading = true
 		m.err = nil
-		return m, m.activateSelected(selected)
+		return m, tea.Batch(m.activateSelected(selected), m.spinner.Tick)
 	case tea.KeyRunes:
-		if m.formEditing {
-			if m.formField == formFieldJustification {
-				m.form.justification += string(key.Runes)
-			} else {
-				m.form.durationISO += string(key.Runes)
-			}
-			return m, nil
-		}
-		switch string(key.Runes) {
-		case "/":
-			m.searchMode = true
-			return m, nil
-		case "k":
-			if m.listCursor > 0 {
-				m.listCursor--
-			}
-		case "j":
-			filtered := m.assignmentList.filtered(m.query)
-			if m.listCursor < len(filtered)-1 {
-				m.listCursor++
-			}
-		case "e":
-			m.formEditing = true
-			m.formField = formFieldJustification
+		if string(key.Runes) == "e" {
+			m.screen = ScreenActivation
+			return m.focusJustification()
 		}
 	}
 	return m, nil
@@ -344,22 +423,135 @@ func (m Model) updateSummary(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case tea.KeyEsc:
 		m.screen = ScreenAssignments
 		return m, nil
-	case tea.KeyCtrlA:
-		if m.loading {
+	case tea.KeyRunes:
+		switch string(key.Runes) {
+		case "h":
+			m.screen = ScreenHome
 			return m, nil
+		case "r":
+			retryable := m.summary.retryableFailures()
+			if len(retryable) == 0 {
+				return m, nil
+			}
+			assignments := make([]pim.EligibleAssignment, 0, len(retryable))
+			for _, result := range retryable {
+				assignments = append(assignments, result.Assignment)
+			}
+			m.screen = ScreenProgress
+			m.loading = true
+			return m, tea.Batch(m.activateSelected(assignments), m.spinner.Tick)
 		}
-		retryable := m.summary.retryableFailures()
-		if len(retryable) == 0 {
-			return m, nil
-		}
-		assignments := make([]pim.EligibleAssignment, 0, len(retryable))
-		for _, result := range retryable {
-			assignments = append(assignments, result.Assignment)
-		}
-		m.loading = true
-		return m, m.activateSelected(assignments)
 	}
-	return m, nil
+	var cmd tea.Cmd
+	m.summaryViewport, cmd = m.summaryViewport.Update(key)
+	return m, cmd
+}
+
+func (m Model) beginDiscovery(section Section) (tea.Model, tea.Cmd) {
+	m.activeSection = section
+	m.screen = ScreenAssignments
+	m.loading = true
+	m.err = nil
+	m.query = ""
+	m.searchMode = false
+	m.assignmentList = newAssignmentList(nil)
+	m.listCursor = 0
+	return m, tea.Batch(m.discoverAssignments(), m.spinner.Tick)
+}
+
+func (m Model) openActivationForm() (tea.Model, tea.Cmd) {
+	m.screen = ScreenActivation
+	m.err = nil
+	return m.focusJustification()
+}
+
+func (m Model) focusJustification() (tea.Model, tea.Cmd) {
+	m.formField = formFieldJustification
+	m.duration.Blur()
+	return m, m.justification.Focus()
+}
+
+func (m Model) focusDuration() (tea.Model, tea.Cmd) {
+	m.formField = formFieldDuration
+	m.justification.Blur()
+	return m, m.duration.Focus()
+}
+
+func (m Model) toggleFormFocus() (tea.Model, tea.Cmd) {
+	if m.formField == formFieldJustification {
+		return m.focusDuration()
+	}
+	return m.focusJustification()
+}
+
+func (m *Model) syncForm() {
+	m.form.justification = m.justification.Value()
+	m.form.durationISO = m.duration.Value()
+}
+
+func (m Model) acceptingText() bool {
+	return m.searchMode || m.screen == ScreenActivation
+}
+
+func (m *Model) moveSection(delta int) {
+	m.sectionIndex += delta
+	if m.sectionIndex < 0 {
+		m.sectionIndex = 0
+	}
+	if m.sectionIndex >= len(m.sections) {
+		m.sectionIndex = len(m.sections) - 1
+	}
+	m.selectedSection = m.sections[m.sectionIndex]
+}
+
+func (m *Model) moveAssignment(delta int) {
+	filtered := m.assignmentList.filtered(m.query)
+	if len(filtered) == 0 {
+		m.listCursor = 0
+		return
+	}
+	m.listCursor += delta
+	if m.listCursor < 0 {
+		m.listCursor = 0
+	}
+	if m.listCursor >= len(filtered) {
+		m.listCursor = len(filtered) - 1
+	}
+}
+
+func (m *Model) toggleFocusedAssignment() {
+	filtered := m.assignmentList.filtered(m.query)
+	if len(filtered) == 0 || m.listCursor >= len(filtered) {
+		return
+	}
+	m.assignmentList.toggle(filtered[m.listCursor].ID)
+	m.err = nil
+}
+
+func (m *Model) toggleAllFiltered() {
+	filtered := m.assignmentList.filtered(m.query)
+	if len(filtered) == 0 {
+		return
+	}
+	allSelected := true
+	for _, assignment := range filtered {
+		if !m.assignmentList.selectedIDs[assignment.ID] {
+			allSelected = false
+			break
+		}
+	}
+	for _, assignment := range filtered {
+		m.assignmentList.selectedIDs[assignment.ID] = !allSelected
+	}
+	m.err = nil
+}
+
+func (m Model) focusedAssignment() (pim.EligibleAssignment, bool) {
+	filtered := m.assignmentList.filtered(m.query)
+	if len(filtered) == 0 || m.listCursor >= len(filtered) {
+		return pim.EligibleAssignment{}, false
+	}
+	return filtered[m.listCursor], true
 }
 
 func (m Model) providerForSection(section Section) AssignmentProvider {
@@ -384,10 +576,7 @@ func (m Model) discoverAssignments() tea.Cmd {
 	}
 	return func() tea.Msg {
 		assignments, err := provider.Discover(context.Background())
-		return assignmentsDiscoveredMsg{
-			assignments: assignments,
-			err:         err,
-		}
+		return assignmentsDiscoveredMsg{assignments: assignments, err: err}
 	}
 }
 
@@ -407,7 +596,6 @@ func (m Model) activateSelected(selected []pim.EligibleAssignment) tea.Cmd {
 			}
 			return activationCompletedMsg{results: results}
 		}
-
 		for _, assignment := range selected {
 			request := pim.ActivationRequest{
 				Assignment:    assignment,
@@ -433,99 +621,6 @@ func (m Model) activateSelected(selected []pim.EligibleAssignment) tea.Cmd {
 	}
 }
 
-func (m Model) viewHome() string {
-	var b strings.Builder
-	b.WriteString("pim-manager\n\n")
-	if m.runtime.Account != nil {
-		switch {
-		case m.checkingAccount:
-			b.WriteString("Azure account: checking Azure CLI login state...\n\n")
-		case m.accountErr != nil:
-			if errors.Is(m.accountErr, azureauth.ErrNotLoggedIn) {
-				b.WriteString("Azure account: sign-in required. Run: az login\n")
-			} else {
-				b.WriteString("Azure account: check failed.\n")
-			}
-			fmt.Fprintf(&b, "Details: %s\nRetry: press r to check again.\n\n", m.accountErr)
-		case m.accountChecked:
-			fmt.Fprintf(&b, "Azure account: %s\nTenant: %s\nSubscription: %s\n\n", valueOrUnknown(m.account.UserName), valueOrUnknown(m.account.TenantID), valueOrUnknown(m.account.SubscriptionID))
-		}
-	}
-	b.WriteString("Sections:\n")
-	for i, section := range m.sections {
-		cursor := " "
-		if i == m.sectionIndex {
-			cursor = ">"
-		}
-		fmt.Fprintf(&b, "%s %s\n", cursor, section)
-	}
-	if m.runtime.Account != nil {
-		b.WriteString("\nEnter: discover assignments  j/k or arrows: move  r: retry account check  q: quit")
-	} else {
-		b.WriteString("\nEnter: discover assignments  j/k or arrows: move  q: quit")
-	}
-	return b.String()
-}
-
-func (m Model) viewAssignments() string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "Section: %s\n", m.activeSection)
-	if m.loading {
-		b.WriteString("Loading assignments...\n")
-	}
-	if m.err != nil {
-		fmt.Fprintf(&b, "Error: %s\n", m.err)
-	}
-	searchState := "view mode"
-	if m.searchMode {
-		searchState = "search mode"
-	}
-	fmt.Fprintf(&b, "Search: %s (%s)\n", m.query, searchState)
-	if m.searchMode {
-		b.WriteString("Type to search  Backspace: edit  Enter/Esc: finish search\n")
-	}
-
-	filtered := m.assignmentList.filtered(m.query)
-	if len(filtered) == 0 && !m.loading {
-		b.WriteString("No assignments found.\n")
-	}
-
-	for i, assignment := range filtered {
-		cursor := " "
-		if i == m.listCursor {
-			cursor = ">"
-		}
-		checked := " "
-		if m.assignmentList.selectedIDs[assignment.ID] {
-			checked = "x"
-		}
-		scope := assignment.DisplayScope()
-		if strings.TrimSpace(scope) == "" {
-			scope = "scope unavailable"
-		}
-		fmt.Fprintf(&b, "%s [%s] %s (%s)\n", cursor, checked, assignment.DisplayName, scope)
-	}
-
-	justificationPrefix := " "
-	durationPrefix := " "
-	formMode := "view mode"
-	if m.formEditing {
-		formMode = "edit mode"
-		if m.formField == formFieldJustification {
-			justificationPrefix = ">"
-		} else {
-			durationPrefix = ">"
-		}
-	}
-	fmt.Fprintf(&b, "\nActivation form (%s)\n%s Justification: %s\n%s Duration: %s\n", formMode, justificationPrefix, m.form.justification, durationPrefix, m.form.durationISO)
-	if m.formEditing {
-		b.WriteString("Type to edit  Tab: switch field  Backspace/Ctrl+U: edit  Enter/Esc: finish form")
-	} else {
-		b.WriteString("Space: toggle selection  /: search  e: edit form  Ctrl+A: activate selected  Esc: back")
-	}
-	return b.String()
-}
-
 func (m Model) checkAccount() tea.Cmd {
 	provider := m.runtime.Account
 	if provider == nil {
@@ -533,10 +628,7 @@ func (m Model) checkAccount() tea.Cmd {
 	}
 	return func() tea.Msg {
 		account, err := provider.Account(context.Background())
-		return accountCheckedMsg{
-			account: account,
-			err:     err,
-		}
+		return accountCheckedMsg{account: account, err: err}
 	}
 }
 
@@ -551,51 +643,10 @@ func (m *Model) clampCursor() {
 	}
 }
 
-func valueOrUnknown(value string) string {
-	if strings.TrimSpace(value) == "" {
-		return "unknown"
-	}
-	return value
-}
-
 func trimLastRune(value string) string {
 	runes := []rune(value)
 	if len(runes) == 0 {
 		return ""
 	}
 	return string(runes[:len(runes)-1])
-}
-
-func (m Model) viewSummary() string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "Summary for %s\n\n", m.activeSection)
-	fmt.Fprintf(&b, "activated: %d\n", len(m.summary.activated))
-	fmt.Fprintf(&b, "pending_approval: %d\n", len(m.summary.pendingApproval))
-	fmt.Fprintf(&b, "failed: %d\n", len(m.summary.failed))
-	fmt.Fprintf(&b, "retryable_failures: %d\n", len(m.summary.retryableFailures()))
-
-	if len(m.summary.results) > 0 {
-		b.WriteString("\nResults:\n")
-		for _, result := range m.summary.results {
-			displayName := strings.TrimSpace(result.Assignment.DisplayName)
-			if displayName == "" {
-				displayName = strings.TrimSpace(result.Assignment.ID)
-			}
-			if displayName == "" {
-				displayName = "assignment"
-			}
-			message := strings.TrimSpace(result.Message)
-			if message != "" {
-				fmt.Fprintf(&b, "- %s: %s (%s)\n", displayName, result.Status, message)
-				continue
-			}
-			fmt.Fprintf(&b, "- %s: %s\n", displayName, result.Status)
-		}
-	}
-	if len(m.summary.retryableFailures()) > 0 {
-		b.WriteString("\nCtrl+A: retry retryable failures  Esc: back")
-	} else {
-		b.WriteString("\nEsc: back")
-	}
-	return b.String()
 }

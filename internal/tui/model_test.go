@@ -24,6 +24,23 @@ func sendRunes(model Model, text string) Model {
 	return model
 }
 
+func runCommand(model Model, cmd tea.Cmd) Model {
+	if cmd == nil {
+		return model
+	}
+	msg := cmd()
+	switch typed := msg.(type) {
+	case tea.BatchMsg:
+		for _, child := range typed {
+			model = runCommand(model, child)
+		}
+	case assignmentsDiscoveredMsg, activationCompletedMsg, accountCheckedMsg:
+		next, _ := model.Update(msg)
+		model = next.(Model)
+	}
+	return model
+}
+
 type fakeAssignmentProvider struct{}
 
 func (fakeAssignmentProvider) Discover(context.Context) ([]pim.EligibleAssignment, error) {
@@ -143,32 +160,39 @@ func TestModelDiscoversSelectedSectionAndActivatesSelection(t *testing.T) {
 	model := NewModel(Runtime{Entra: provider})
 
 	next, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	model = next.(Model)
-	msg := cmd()
-	next, _ = model.Update(msg)
-	model = next.(Model)
-	if !strings.Contains(model.View(), "e: edit form") {
-		t.Fatalf("expected edit-form hint, got %q", model.View())
+	model = runCommand(next.(Model), cmd)
+	if !strings.Contains(model.View(), "Eligible assignments") {
+		t.Fatalf("expected assignments screen, got %q", model.View())
 	}
 
 	next, _ = model.Update(tea.KeyMsg{Type: tea.KeySpace})
 	model = next.(Model)
-	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("e")})
+	next, cmd = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	model = next.(Model)
+	if model.screen != ScreenActivation || cmd == nil {
+		t.Fatalf("expected focused activation form, got screen %s", model.screen)
+	}
 	model = sendRunes(model, "Need access now")
-	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyTab})
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	model = next.(Model)
 	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyCtrlU})
 	model = next.(Model)
 	model = sendRunes(model, "PT2H")
 	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	model = next.(Model)
+	if model.screen != ScreenConfirmation {
+		t.Fatalf("expected confirmation screen, got %s", model.screen)
+	}
 
-	next, cmd = model.Update(tea.KeyMsg{Type: tea.KeyCtrlA})
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyEsc})
 	model = next.(Model)
-	msg = cmd()
-	next, _ = model.Update(msg)
+	if model.screen != ScreenActivation {
+		t.Fatalf("expected Esc to return to activation form, got %s", model.screen)
+	}
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	model = next.(Model)
+	next, cmd = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = runCommand(next.(Model), cmd)
 
 	if model.screen != ScreenSummary {
 		t.Fatalf("expected summary screen, got %s", model.screen)
@@ -176,7 +200,7 @@ func TestModelDiscoversSelectedSectionAndActivatesSelection(t *testing.T) {
 	if len(provider.activated) != 1 || provider.activated[0].Justification != "Need access now" || provider.activated[0].DurationISO != "PT2H" {
 		t.Fatalf("unexpected activation requests: %#v", provider.activated)
 	}
-	if !strings.Contains(model.View(), "activated") {
+	if !strings.Contains(model.View(), "1 activated") {
 		t.Fatalf("expected rendered summary, got %q", model.View())
 	}
 }
@@ -184,9 +208,7 @@ func TestModelDiscoversSelectedSectionAndActivatesSelection(t *testing.T) {
 func TestModelShowsDiscoveryErrorWithoutLeavingTUI(t *testing.T) {
 	model := NewModel(Runtime{Entra: &scriptedProvider{discoverErr: errors.New("az login required")}})
 	next, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	model = next.(Model)
-	next, _ = model.Update(cmd())
-	model = next.(Model)
+	model = runCommand(next.(Model), cmd)
 
 	if model.screen != ScreenAssignments {
 		t.Fatalf("expected assignments screen, got %s", model.screen)
@@ -204,30 +226,25 @@ func TestModelMarksRetryableProviderFailuresAndShowsRetryAction(t *testing.T) {
 	model := NewModel(Runtime{Entra: provider})
 
 	next, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	model = next.(Model)
-	next, _ = model.Update(cmd())
-	model = next.(Model)
+	model = runCommand(next.(Model), cmd)
 	next, _ = model.Update(tea.KeyMsg{Type: tea.KeySpace})
 	model = next.(Model)
-	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("e")})
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	model = next.(Model)
 	model = sendRunes(model, "Need access")
 	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	model = next.(Model)
-	next, cmd = model.Update(tea.KeyMsg{Type: tea.KeyCtrlA})
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	model = next.(Model)
-	next, _ = model.Update(cmd())
-	model = next.(Model)
+	next, cmd = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = runCommand(next.(Model), cmd)
 
 	if len(model.summary.retryableFailures()) != 1 {
 		t.Fatalf("expected one retryable failure, got %#v", model.summary.failed)
 	}
 	view := model.View()
-	if !strings.Contains(view, "retryable_failures: 1") {
-		t.Fatalf("expected retryable summary count, got %q", view)
-	}
-	if !strings.Contains(view, "Ctrl+A: retry retryable failures") {
-		t.Fatalf("expected retry hint, got %q", view)
+	if !strings.Contains(view, "1 failed") || !strings.Contains(view, "retry failures") {
+		t.Fatalf("expected retryable summary action, got %q", view)
 	}
 }
 
@@ -241,9 +258,7 @@ func TestAssignmentsSearchModeFiltersAndSelection(t *testing.T) {
 	model := NewModel(Runtime{Entra: provider})
 
 	next, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	model = next.(Model)
-	next, _ = model.Update(cmd())
-	model = next.(Model)
+	model = runCommand(next.(Model), cmd)
 
 	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/")})
 	model = next.(Model)
@@ -257,7 +272,7 @@ func TestAssignmentsSearchModeFiltersAndSelection(t *testing.T) {
 		t.Fatalf("expected query to be edited, got %q", model.query)
 	}
 	view := model.View()
-	if !strings.Contains(view, "Search: global") {
+	if !strings.Contains(view, "/  global_") {
 		t.Fatalf("expected search query in view, got %q", view)
 	}
 	if !strings.Contains(view, "Global Reader") || strings.Contains(view, "Contributor") {
@@ -288,20 +303,14 @@ func TestHomeShowsLoginGuidanceAndRetriesAccountLookup(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("expected Init command to check account")
 	}
-	next, _ := model.Update(cmd())
-	model = next.(Model)
+	model = runCommand(model, cmd)
 	view := model.View()
-	if !strings.Contains(view, "az login") || !strings.Contains(view, "r: retry account check") {
+	if !strings.Contains(view, "az login") || !strings.Contains(view, "check sign-in") {
 		t.Fatalf("expected login guidance and retry hint, got %q", view)
 	}
 
-	next, cmd = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
-	model = next.(Model)
-	if cmd == nil {
-		t.Fatal("expected retry command")
-	}
-	next, _ = model.Update(cmd())
-	model = next.(Model)
+	next, cmd := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
+	model = runCommand(next.(Model), cmd)
 	view = model.View()
 	if !strings.Contains(view, "user@example.com") || !strings.Contains(view, "sub-1") {
 		t.Fatalf("expected account context in view after retry, got %q", view)
@@ -332,6 +341,7 @@ func TestSummaryViewListsPerAssignmentStatuses(t *testing.T) {
 			Message:    "PolicyBlocked",
 		},
 	})
+	model.refreshSummaryViewport()
 
 	view := model.View()
 	if !strings.Contains(view, "- Global Reader: activated (Granted)") {
@@ -342,5 +352,45 @@ func TestSummaryViewListsPerAssignmentStatuses(t *testing.T) {
 	}
 	if !strings.Contains(view, "- Billing Reader: failed (PolicyBlocked)") {
 		t.Fatalf("expected failed row in summary, got %q", view)
+	}
+}
+
+func TestModelSupportsHelpBackNavigationAndQuit(t *testing.T) {
+	provider := &scriptedProvider{
+		discoveries: [][]pim.EligibleAssignment{{{ID: "one", DisplayName: "Global Reader"}}},
+	}
+	model := NewModel(Runtime{Entra: provider})
+	next, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = runCommand(next.(Model), cmd)
+
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeySpace})
+	model = next.(Model)
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = next.(Model)
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	model = next.(Model)
+	if model.screen != ScreenAssignments {
+		t.Fatalf("expected activation Esc to return to assignments, got %s", model.screen)
+	}
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	model = next.(Model)
+	if model.screen != ScreenHome {
+		t.Fatalf("expected assignments Esc to return home, got %s", model.screen)
+	}
+
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("?")})
+	model = next.(Model)
+	if !model.helpVisible || !strings.Contains(model.View(), "Keyboard guide") {
+		t.Fatalf("expected contextual help overlay, got %q", model.View())
+	}
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	model = next.(Model)
+	if model.helpVisible {
+		t.Fatal("expected Esc to close help")
+	}
+
+	_, cmd = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
+	if _, ok := cmd().(tea.QuitMsg); !ok {
+		t.Fatal("expected q to quit outside text input")
 	}
 }
