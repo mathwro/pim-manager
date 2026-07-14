@@ -43,9 +43,20 @@ func TestActivateBatchContinuesAfterFailure(t *testing.T) {
 
 func TestActivateBatchMapsProviderErrorToFailedResult(t *testing.T) {
 	service := NewService(&fakeProvider{err: errors.New("network down")})
+	assignment := pim.EligibleAssignment{
+		ID:          "one",
+		Source:      pim.AssignmentSourceEntra,
+		Kind:        pim.AssignmentKindDirectoryRole,
+		DisplayName: "Privileged Role Administrator",
+		Scope: pim.Scope{
+			ID:          "/",
+			DisplayName: "Tenant Root",
+			Type:        pim.ScopeTypeTenant,
+		},
+	}
 
 	results := service.ActivateBatch(context.Background(), []pim.ActivationRequest{
-		{Assignment: pim.EligibleAssignment{ID: "one"}},
+		{Assignment: assignment},
 	})
 
 	if len(results) != 1 {
@@ -57,8 +68,8 @@ func TestActivateBatchMapsProviderErrorToFailedResult(t *testing.T) {
 	if results[0].Message != "network down" {
 		t.Fatalf("expected error message %q, got %q", "network down", results[0].Message)
 	}
-	if results[0].Assignment.ID != "one" {
-		t.Fatalf("expected assignment ID %q, got %q", "one", results[0].Assignment.ID)
+	if results[0].Assignment != assignment {
+		t.Fatalf("expected assignment %#v, got %#v", assignment, results[0].Assignment)
 	}
 }
 
