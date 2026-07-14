@@ -10,6 +10,14 @@ import (
 	"github.com/mathwro/pim-manager/internal/pim"
 )
 
+func sendRunes(model Model, text string) Model {
+	for _, r := range text {
+		next, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		model = next.(Model)
+	}
+	return model
+}
+
 type fakeAssignmentProvider struct{}
 
 func (fakeAssignmentProvider) Discover(context.Context) ([]pim.EligibleAssignment, error) {
@@ -98,9 +106,22 @@ func TestModelDiscoversSelectedSectionAndActivatesSelection(t *testing.T) {
 	msg := cmd()
 	next, _ = model.Update(msg)
 	model = next.(Model)
-	model.assignmentList.toggle("one")
-	model.form.justification = "Need access"
-	model.form.durationISO = "PT2H"
+	if !strings.Contains(model.View(), "e: edit form") {
+		t.Fatalf("expected edit-form hint, got %q", model.View())
+	}
+
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeySpace})
+	model = next.(Model)
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("e")})
+	model = next.(Model)
+	model = sendRunes(model, "Need access")
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyTab})
+	model = next.(Model)
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyCtrlU})
+	model = next.(Model)
+	model = sendRunes(model, "PT2H")
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = next.(Model)
 
 	next, cmd = model.Update(tea.KeyMsg{Type: tea.KeyCtrlA})
 	model = next.(Model)

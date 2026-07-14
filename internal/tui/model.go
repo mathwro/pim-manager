@@ -48,10 +48,19 @@ type Model struct {
 	listCursor      int
 	assignmentList  assignmentList
 	form            activationForm
+	formEditing     bool
+	formField       activationFormField
 	summary         summary
 	loading         bool
 	err             error
 }
+
+type activationFormField int
+
+const (
+	formFieldJustification activationFormField = iota
+	formFieldDuration
+)
 
 type assignmentsDiscoveredMsg struct {
 	assignments []pim.EligibleAssignment
@@ -72,6 +81,7 @@ func NewModel(runtime Runtime) Model {
 		form: activationForm{
 			durationISO: "PT1H",
 		},
+		formField: formFieldJustification,
 	}
 }
 
@@ -169,24 +179,68 @@ func (m Model) updateHome(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m Model) updateAssignments(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch key.Type {
 	case tea.KeyEsc:
+		if m.formEditing {
+			m.formEditing = false
+			return m, nil
+		}
 		m.screen = ScreenHome
 		return m, nil
+	case tea.KeyEnter:
+		if m.formEditing {
+			m.formEditing = false
+		}
+	case tea.KeyTab:
+		if m.formEditing {
+			if m.formField == formFieldJustification {
+				m.formField = formFieldDuration
+			} else {
+				m.formField = formFieldJustification
+			}
+		}
+	case tea.KeyBackspace, tea.KeyCtrlH:
+		if m.formEditing {
+			if m.formField == formFieldJustification {
+				m.form.justification = trimLastRune(m.form.justification)
+			} else {
+				m.form.durationISO = trimLastRune(m.form.durationISO)
+			}
+		}
+	case tea.KeyCtrlU:
+		if m.formEditing {
+			if m.formField == formFieldJustification {
+				m.form.justification = ""
+			} else {
+				m.form.durationISO = ""
+			}
+		}
 	case tea.KeyUp:
+		if m.formEditing {
+			return m, nil
+		}
 		if m.listCursor > 0 {
 			m.listCursor--
 		}
 	case tea.KeyDown:
+		if m.formEditing {
+			return m, nil
+		}
 		filtered := m.assignmentList.filtered(m.query)
 		if m.listCursor < len(filtered)-1 {
 			m.listCursor++
 		}
 	case tea.KeySpace:
+		if m.formEditing {
+			return m, nil
+		}
 		filtered := m.assignmentList.filtered(m.query)
 		if len(filtered) == 0 || m.listCursor >= len(filtered) {
 			return m, nil
 		}
 		m.assignmentList.toggle(filtered[m.listCursor].ID)
 	case tea.KeyCtrlA:
+		if m.formEditing {
+			return m, nil
+		}
 		if m.loading || m.err != nil {
 			return m, nil
 		}
@@ -203,6 +257,14 @@ func (m Model) updateAssignments(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.err = nil
 		return m, m.activateSelected(selected)
 	case tea.KeyRunes:
+		if m.formEditing {
+			if m.formField == formFieldJustification {
+				m.form.justification += string(key.Runes)
+			} else {
+				m.form.durationISO += string(key.Runes)
+			}
+			return m, nil
+		}
 		switch string(key.Runes) {
 		case "k":
 			if m.listCursor > 0 {
@@ -213,6 +275,9 @@ func (m Model) updateAssignments(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if m.listCursor < len(filtered)-1 {
 				m.listCursor++
 			}
+		case "e":
+			m.formEditing = true
+			m.formField = formFieldJustification
 		}
 	}
 	return m, nil
@@ -356,9 +421,32 @@ func (m Model) viewAssignments() string {
 		fmt.Fprintf(&b, "%s [%s] %s (%s)\n", cursor, checked, assignment.DisplayName, scope)
 	}
 
-	fmt.Fprintf(&b, "\nJustification: %s\nDuration: %s\n", m.form.justification, m.form.durationISO)
-	b.WriteString("Space: toggle selection  Ctrl+A: activate selected  Esc: back")
+	justificationPrefix := " "
+	durationPrefix := " "
+	formMode := "view mode"
+	if m.formEditing {
+		formMode = "edit mode"
+		if m.formField == formFieldJustification {
+			justificationPrefix = ">"
+		} else {
+			durationPrefix = ">"
+		}
+	}
+	fmt.Fprintf(&b, "\nActivation form (%s)\n%s Justification: %s\n%s Duration: %s\n", formMode, justificationPrefix, m.form.justification, durationPrefix, m.form.durationISO)
+	if m.formEditing {
+		b.WriteString("Type to edit  Tab: switch field  Backspace/Ctrl+U: edit  Enter/Esc: finish form")
+	} else {
+		b.WriteString("Space: toggle selection  e: edit form  Ctrl+A: activate selected  Esc: back")
+	}
 	return b.String()
+}
+
+func trimLastRune(value string) string {
+	runes := []rune(value)
+	if len(runes) == 0 {
+		return ""
+	}
+	return string(runes[:len(runes)-1])
 }
 
 func (m Model) viewSummary() string {
