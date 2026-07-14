@@ -9,10 +9,12 @@ import (
 )
 
 func TestActivateBatchContinuesAfterFailure(t *testing.T) {
-	provider := fakeProvider{
+	provider := &fakeProvider{
 		results: map[string]pim.ActivationResult{
-			"one": {Status: pim.ActivationStatusActivated},
-			"two": {Status: pim.ActivationStatusFailed, Message: "throttled", Retryable: true},
+			"two": {Status: pim.ActivationStatusActivated},
+		},
+		errors: map[string]error{
+			"one": errors.New("throttled"),
 		},
 	}
 	service := NewService(provider)
@@ -25,16 +27,22 @@ func TestActivateBatchContinuesAfterFailure(t *testing.T) {
 	if len(results) != 2 {
 		t.Fatalf("expected two results, got %d", len(results))
 	}
-	if !results[0].Success() {
-		t.Fatalf("expected first result success: %#v", results[0])
+	if !results[0].CanRetry() {
+		t.Fatalf("expected first result retryable failure: %#v", results[0])
 	}
-	if !results[1].CanRetry() {
-		t.Fatalf("expected second result retryable failure: %#v", results[1])
+	if results[0].Message != "throttled" {
+		t.Fatalf("expected first result message %q, got %q", "throttled", results[0].Message)
+	}
+	if !results[1].Success() {
+		t.Fatalf("expected second result success: %#v", results[1])
+	}
+	if len(provider.calls) != 2 || provider.calls[0] != "one" || provider.calls[1] != "two" {
+		t.Fatalf("expected calls [one two], got %#v", provider.calls)
 	}
 }
 
 func TestActivateBatchMapsProviderErrorToFailedResult(t *testing.T) {
-	service := NewService(fakeProvider{err: errors.New("network down")})
+	service := NewService(&fakeProvider{err: errors.New("network down")})
 
 	results := service.ActivateBatch(context.Background(), []pim.ActivationRequest{
 		{Assignment: pim.EligibleAssignment{ID: "one"}},
@@ -46,16 +54,28 @@ func TestActivateBatchMapsProviderErrorToFailedResult(t *testing.T) {
 	if results[0].Status != pim.ActivationStatusFailed || !results[0].Retryable {
 		t.Fatalf("expected retryable failure, got %#v", results[0])
 	}
+	if results[0].Message != "network down" {
+		t.Fatalf("expected error message %q, got %q", "network down", results[0].Message)
+	}
+	if results[0].Assignment.ID != "one" {
+		t.Fatalf("expected assignment ID %q, got %q", "one", results[0].Assignment.ID)
+	}
 }
 
 type fakeProvider struct {
 	results map[string]pim.ActivationResult
+	errors  map[string]error
 	err     error
+	calls   []string
 }
 
-func (f fakeProvider) Activate(ctx context.Context, request pim.ActivationRequest) (pim.ActivationResult, error) {
+func (f *fakeProvider) Activate(ctx context.Context, request pim.ActivationRequest) (pim.ActivationResult, error) {
+	f.calls = append(f.calls, request.Assignment.ID)
 	if f.err != nil {
 		return pim.ActivationResult{}, f.err
+	}
+	if err := f.errors[request.Assignment.ID]; err != nil {
+		return pim.ActivationResult{}, err
 	}
 	result := f.results[request.Assignment.ID]
 	result.Assignment = request.Assignment
