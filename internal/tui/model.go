@@ -1,7 +1,10 @@
 package tui
 
 import (
+	"context"
+
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/mathwro/pim-manager/internal/pim"
 )
 
 type Screen string
@@ -21,7 +24,16 @@ const (
 	SectionGroups         Section = "Groups"
 )
 
-type Runtime struct{}
+type Runtime struct {
+	Entra          AssignmentProvider
+	AzureResources AssignmentProvider
+	Groups         AssignmentProvider
+}
+
+type AssignmentProvider interface {
+	Discover(context.Context) ([]pim.EligibleAssignment, error)
+	Activate(context.Context, pim.ActivationRequest) (pim.ActivationResult, error)
+}
 
 type Model struct {
 	runtime         Runtime

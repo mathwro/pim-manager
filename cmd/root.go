@@ -11,7 +11,7 @@ func newRootCmd(runApp func() error) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "pim-manager",
 		Short: "Discover and activate Microsoft PIM eligibilities",
-		Long:  "pim-manager opens an interactive TUI for activating eligible Entra, Azure Resource, and Group PIM assignments.",
+		Long:  "Discover and activate Microsoft PIM eligibilities through an interactive TUI for eligible Entra, Azure Resource, and Group PIM assignments.",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runApp()
 		},

@@ -3,6 +3,7 @@ package cmd
 import (
 	"bytes"
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -34,5 +35,23 @@ func TestRootCommandReturnsAppError(t *testing.T) {
 	got := cmd.Execute()
 	if !errors.Is(got, want) {
 		t.Fatalf("expected %v, got %v", want, got)
+	}
+}
+
+func TestRootCommandHelpIncludesPIMDescription(t *testing.T) {
+	cmd := newRootCmd(func() error {
+		t.Fatal("help should not run the app")
+		return nil
+	})
+	out := &bytes.Buffer{}
+	cmd.SetOut(out)
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"--help"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	if !strings.Contains(out.String(), "Discover and activate Microsoft PIM eligibilities") {
+		t.Fatalf("expected help to include PIM description, got:\n%s", out.String())
 	}
 }
