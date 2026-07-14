@@ -230,6 +230,11 @@ func (m Model) updateAssignments(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case tea.KeySpace:
 		if m.formEditing {
+			if m.formField == formFieldJustification {
+				m.form.justification += " "
+			} else {
+				m.form.durationISO += " "
+			}
 			return m, nil
 		}
 		filtered := m.assignmentList.filtered(m.query)

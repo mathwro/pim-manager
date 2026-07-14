@@ -12,7 +12,11 @@ import (
 
 func sendRunes(model Model, text string) Model {
 	for _, r := range text {
-		next, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		msg := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}}
+		if r == ' ' {
+			msg = tea.KeyMsg{Type: tea.KeySpace}
+		}
+		next, _ := model.Update(msg)
 		model = next.(Model)
 	}
 	return model
@@ -114,7 +118,7 @@ func TestModelDiscoversSelectedSectionAndActivatesSelection(t *testing.T) {
 	model = next.(Model)
 	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("e")})
 	model = next.(Model)
-	model = sendRunes(model, "Need access")
+	model = sendRunes(model, "Need access now")
 	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyTab})
 	model = next.(Model)
 	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyCtrlU})
@@ -132,7 +136,7 @@ func TestModelDiscoversSelectedSectionAndActivatesSelection(t *testing.T) {
 	if model.screen != ScreenSummary {
 		t.Fatalf("expected summary screen, got %s", model.screen)
 	}
-	if len(provider.activated) != 1 || provider.activated[0].Justification != "Need access" || provider.activated[0].DurationISO != "PT2H" {
+	if len(provider.activated) != 1 || provider.activated[0].Justification != "Need access now" || provider.activated[0].DurationISO != "PT2H" {
 		t.Fatalf("unexpected activation requests: %#v", provider.activated)
 	}
 	if !strings.Contains(model.View(), "activated") {
