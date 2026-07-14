@@ -29,16 +29,33 @@ func (p lazyAssignmentProvider) Activate(ctx context.Context, request pim.Activa
 }
 
 type providerResolver struct {
-	once     sync.Once
-	provider lazyAssignmentProvider
-	err      error
+	mu          sync.Mutex
+	initialized bool
+	provider    lazyAssignmentProvider
 }
 
 func (r *providerResolver) get(init func() (lazyAssignmentProvider, error)) (lazyAssignmentProvider, error) {
-	r.once.Do(func() {
-		r.provider, r.err = init()
-	})
-	return r.provider, r.err
+	r.mu.Lock()
+	if r.initialized {
+		provider := r.provider
+		r.mu.Unlock()
+		return provider, nil
+	}
+	r.mu.Unlock()
+
+	provider, err := init()
+	if err != nil {
+		return lazyAssignmentProvider{}, err
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.initialized {
+		return r.provider, nil
+	}
+	r.provider = provider
+	r.initialized = true
+	return provider, nil
 }
 
 func newLazyPrincipalProvider(principal principalSource, factory func(string) lazyAssignmentProvider) lazyAssignmentProvider {

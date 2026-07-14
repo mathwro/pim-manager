@@ -31,6 +31,24 @@ func (f *fakeScopeDiscoverer) Discover(context.Context) ([]string, error) {
 	return f.scopes, f.err
 }
 
+type retryingPrincipalSource struct {
+	calls int
+	errs  []error
+	id    string
+}
+
+func (f *retryingPrincipalSource) PrincipalID(context.Context) (string, error) {
+	f.calls++
+	if len(f.errs) > 0 {
+		err := f.errs[0]
+		f.errs = f.errs[1:]
+		if err != nil {
+			return "", err
+		}
+	}
+	return f.id, nil
+}
+
 type fakeProviderFactory struct {
 	principalID string
 	scopes      []string
@@ -69,6 +87,44 @@ func TestLazyAzureResourcesProviderDefersPrincipalAndScopesUntilDiscover(t *test
 	}
 	if factory.principalID != "principal-1" || len(factory.scopes) != 1 {
 		t.Fatalf("expected principal and scopes passed to factory, got %q %#v", factory.principalID, factory.scopes)
+	}
+}
+
+func TestLazyAzureResourcesProviderRetriesAfterInitializationFailure(t *testing.T) {
+	principal := &retryingPrincipalSource{id: "principal-retry", errs: []error{context.Canceled, nil}}
+	scopes := &fakeScopeDiscoverer{scopes: []string{"/subscriptions/sub-retry"}}
+	factoryCalls := 0
+	provider := newLazyAzureResourcesProvider(principal, scopes, func(principalID string, discoveredScopes []string) lazyAssignmentProvider {
+		factoryCalls++
+		if principalID != "principal-retry" {
+			t.Fatalf("expected principal-retry, got %q", principalID)
+		}
+		if len(discoveredScopes) != 1 || discoveredScopes[0] != "/subscriptions/sub-retry" {
+			t.Fatalf("unexpected scopes: %#v", discoveredScopes)
+		}
+		return lazyAssignmentProvider{
+			discover: func(context.Context) ([]pim.EligibleAssignment, error) {
+				return []pim.EligibleAssignment{{ID: "assignment-retry"}}, nil
+			},
+			activate: func(context.Context, pim.ActivationRequest) (pim.ActivationResult, error) {
+				return pim.ActivationResult{}, nil
+			},
+		}
+	})
+
+	if _, err := provider.Discover(context.Background()); err == nil {
+		t.Fatal("expected first Discover to fail")
+	}
+
+	assignments, err := provider.Discover(context.Background())
+	if err != nil {
+		t.Fatalf("second Discover returned error: %v", err)
+	}
+	if len(assignments) != 1 || assignments[0].ID != "assignment-retry" {
+		t.Fatalf("unexpected assignments: %#v", assignments)
+	}
+	if principal.calls != 2 || scopes.calls != 1 || factoryCalls != 1 {
+		t.Fatalf("expected retryable initialization, got principal=%d scopes=%d factory=%d", principal.calls, scopes.calls, factoryCalls)
 	}
 }
 
