@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -196,5 +197,44 @@ func TestRunDefersAzureCliLookupUntilTuiInteraction(t *testing.T) {
 	}
 	if runnerCalls != 0 {
 		t.Fatalf("expected no Azure CLI calls before TUI interaction, got %d", runnerCalls)
+	}
+}
+
+func TestRunInitChecksAccountWithoutSectionDiscovery(t *testing.T) {
+	oldNewCLI := newCLI
+	oldRunProgram := runProgram
+	t.Cleanup(func() {
+		newCLI = oldNewCLI
+		runProgram = oldRunProgram
+	})
+
+	var commands []string
+	newCLI = func(run azureauth.Runner) azureauth.CLI {
+		return azureauth.NewCLI(func(_ context.Context, name string, args ...string) ([]byte, error) {
+			command := name
+			for _, arg := range args {
+				command += " " + arg
+			}
+			commands = append(commands, command)
+			if command == "az account show --output json" {
+				return []byte(`{"id":"sub-1","tenantId":"tenant-1","user":{"name":"user@example.com"}}`), nil
+			}
+			return nil, errors.New("unexpected command: " + command)
+		})
+	}
+	runProgram = func(model tea.Model) error {
+		cmd := model.Init()
+		if cmd == nil {
+			t.Fatal("expected Init command")
+		}
+		_ = cmd()
+		return nil
+	}
+
+	if err := Run(); err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if len(commands) != 1 || commands[0] != "az account show --output json" {
+		t.Fatalf("expected only account-show call, got %#v", commands)
 	}
 }

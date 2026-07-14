@@ -2,10 +2,13 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/mathwro/pim-manager/internal/activation"
+	"github.com/mathwro/pim-manager/internal/azureauth"
 	"github.com/mathwro/pim-manager/internal/pim"
 )
 
@@ -30,11 +33,16 @@ type Runtime struct {
 	Entra          AssignmentProvider
 	AzureResources AssignmentProvider
 	Groups         AssignmentProvider
+	Account        AccountProvider
 }
 
 type AssignmentProvider interface {
 	Discover(context.Context) ([]pim.EligibleAssignment, error)
 	Activate(context.Context, pim.ActivationRequest) (pim.ActivationResult, error)
+}
+
+type AccountProvider interface {
+	Account(context.Context) (azureauth.Account, error)
 }
 
 type Model struct {
@@ -45,6 +53,7 @@ type Model struct {
 	sections        []Section
 	sectionIndex    int
 	query           string
+	searchMode      bool
 	listCursor      int
 	assignmentList  assignmentList
 	form            activationForm
@@ -52,6 +61,10 @@ type Model struct {
 	formField       activationFormField
 	summary         summary
 	loading         bool
+	checkingAccount bool
+	accountChecked  bool
+	account         azureauth.Account
+	accountErr      error
 	err             error
 }
 
@@ -71,6 +84,11 @@ type activationCompletedMsg struct {
 	results []pim.ActivationResult
 }
 
+type accountCheckedMsg struct {
+	account azureauth.Account
+	err     error
+}
+
 func NewModel(runtime Runtime) Model {
 	return Model{
 		runtime:         runtime,
@@ -81,11 +99,15 @@ func NewModel(runtime Runtime) Model {
 		form: activationForm{
 			durationISO: "PT1H",
 		},
-		formField: formFieldJustification,
+		formField:       formFieldJustification,
+		checkingAccount: runtime.Account != nil,
 	}
 }
 
 func (m Model) Init() tea.Cmd {
+	if m.runtime.Account != nil {
+		return m.checkAccount()
+	}
 	return nil
 }
 
@@ -105,6 +127,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.loading = false
 		m.summary = newSummary(typed.results)
 		m.screen = ScreenSummary
+		return m, nil
+	case accountCheckedMsg:
+		m.checkingAccount = false
+		m.accountChecked = true
+		m.account = typed.account
+		m.accountErr = typed.err
 		return m, nil
 	}
 
@@ -162,6 +190,12 @@ func (m Model) updateHome(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.sectionIndex++
 			}
 			m.selectedSection = m.sections[m.sectionIndex]
+		case "r":
+			if m.runtime.Account != nil {
+				m.checkingAccount = true
+				m.accountErr = nil
+				return m, m.checkAccount()
+			}
 		}
 	case tea.KeyEnter:
 		m.activeSection = m.selectedSection
@@ -177,6 +211,20 @@ func (m Model) updateHome(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) updateAssignments(key tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.searchMode {
+		switch key.Type {
+		case tea.KeyEsc, tea.KeyEnter:
+			m.searchMode = false
+		case tea.KeyBackspace, tea.KeyCtrlH:
+			m.query = trimLastRune(m.query)
+			m.clampCursor()
+		case tea.KeyRunes:
+			m.query += string(key.Runes)
+			m.clampCursor()
+		}
+		return m, nil
+	}
+
 	switch key.Type {
 	case tea.KeyEsc:
 		if m.formEditing {
@@ -271,6 +319,9 @@ func (m Model) updateAssignments(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		switch string(key.Runes) {
+		case "/":
+			m.searchMode = true
+			return m, nil
 		case "k":
 			if m.listCursor > 0 {
 				m.listCursor--
@@ -369,6 +420,7 @@ func (m Model) activateSelected(selected []pim.EligibleAssignment) tea.Cmd {
 					Assignment: assignment,
 					Status:     pim.ActivationStatusFailed,
 					Message:    err.Error(),
+					Retryable:  activation.IsRetryable(err),
 				})
 				continue
 			}
@@ -383,7 +435,23 @@ func (m Model) activateSelected(selected []pim.EligibleAssignment) tea.Cmd {
 
 func (m Model) viewHome() string {
 	var b strings.Builder
-	b.WriteString("pim-manager\n\nSections:\n")
+	b.WriteString("pim-manager\n\n")
+	if m.runtime.Account != nil {
+		switch {
+		case m.checkingAccount:
+			b.WriteString("Azure account: checking Azure CLI login state...\n\n")
+		case m.accountErr != nil:
+			if errors.Is(m.accountErr, azureauth.ErrNotLoggedIn) {
+				b.WriteString("Azure account: sign-in required. Run: az login\n")
+			} else {
+				b.WriteString("Azure account: check failed.\n")
+			}
+			fmt.Fprintf(&b, "Details: %s\nRetry: press r to check again.\n\n", m.accountErr)
+		case m.accountChecked:
+			fmt.Fprintf(&b, "Azure account: %s\nTenant: %s\nSubscription: %s\n\n", valueOrUnknown(m.account.UserName), valueOrUnknown(m.account.TenantID), valueOrUnknown(m.account.SubscriptionID))
+		}
+	}
+	b.WriteString("Sections:\n")
 	for i, section := range m.sections {
 		cursor := " "
 		if i == m.sectionIndex {
@@ -391,7 +459,11 @@ func (m Model) viewHome() string {
 		}
 		fmt.Fprintf(&b, "%s %s\n", cursor, section)
 	}
-	b.WriteString("\nEnter: discover assignments  j/k or arrows: move  q: quit")
+	if m.runtime.Account != nil {
+		b.WriteString("\nEnter: discover assignments  j/k or arrows: move  r: retry account check  q: quit")
+	} else {
+		b.WriteString("\nEnter: discover assignments  j/k or arrows: move  q: quit")
+	}
 	return b.String()
 }
 
@@ -403,6 +475,14 @@ func (m Model) viewAssignments() string {
 	}
 	if m.err != nil {
 		fmt.Fprintf(&b, "Error: %s\n", m.err)
+	}
+	searchState := "view mode"
+	if m.searchMode {
+		searchState = "search mode"
+	}
+	fmt.Fprintf(&b, "Search: %s (%s)\n", m.query, searchState)
+	if m.searchMode {
+		b.WriteString("Type to search  Backspace: edit  Enter/Esc: finish search\n")
 	}
 
 	filtered := m.assignmentList.filtered(m.query)
@@ -441,9 +521,41 @@ func (m Model) viewAssignments() string {
 	if m.formEditing {
 		b.WriteString("Type to edit  Tab: switch field  Backspace/Ctrl+U: edit  Enter/Esc: finish form")
 	} else {
-		b.WriteString("Space: toggle selection  e: edit form  Ctrl+A: activate selected  Esc: back")
+		b.WriteString("Space: toggle selection  /: search  e: edit form  Ctrl+A: activate selected  Esc: back")
 	}
 	return b.String()
+}
+
+func (m Model) checkAccount() tea.Cmd {
+	provider := m.runtime.Account
+	if provider == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		account, err := provider.Account(context.Background())
+		return accountCheckedMsg{
+			account: account,
+			err:     err,
+		}
+	}
+}
+
+func (m *Model) clampCursor() {
+	filtered := m.assignmentList.filtered(m.query)
+	if len(filtered) == 0 {
+		m.listCursor = 0
+		return
+	}
+	if m.listCursor >= len(filtered) {
+		m.listCursor = len(filtered) - 1
+	}
+}
+
+func valueOrUnknown(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return "unknown"
+	}
+	return value
 }
 
 func trimLastRune(value string) string {

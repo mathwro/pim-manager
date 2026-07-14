@@ -35,6 +35,7 @@ func Run() error {
 			provider := groups.NewProvider(graphClient, principalID)
 			return lazyAssignmentProvider{discover: provider.Discover, activate: provider.Activate}
 		}),
+		Account: auth,
 	}
 	return runProgram(tui.NewModel(runtime))
 }
