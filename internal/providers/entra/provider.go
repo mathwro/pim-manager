@@ -21,7 +21,8 @@ func NewProvider(graph GraphClient) Provider {
 }
 
 type roleEligibilityResponse struct {
-	Value []roleEligibilitySchedule `json:"value"`
+	Value    []roleEligibilitySchedule `json:"value"`
+	NextLink string                    `json:"@odata.nextLink"`
 }
 
 type roleEligibilitySchedule struct {
@@ -38,14 +39,17 @@ type roleDefinition struct {
 }
 
 func (p Provider) Discover(ctx context.Context) ([]pim.EligibleAssignment, error) {
-	var response roleEligibilityResponse
 	path := "/roleManagement/directory/roleEligibilitySchedules/filterByCurrentUser(on='principal')?$expand=roleDefinition"
-	if err := p.graph.Get(ctx, path, &response); err != nil {
-		return nil, err
-	}
-	assignments := make([]pim.EligibleAssignment, 0, len(response.Value))
-	for _, item := range response.Value {
-		assignments = append(assignments, normalizeEligibility(item))
+	assignments := make([]pim.EligibleAssignment, 0)
+	for path != "" {
+		var response roleEligibilityResponse
+		if err := p.graph.Get(ctx, path, &response); err != nil {
+			return nil, err
+		}
+		for _, item := range response.Value {
+			assignments = append(assignments, normalizeEligibility(item))
+		}
+		path = response.NextLink
 	}
 	return assignments, nil
 }

@@ -66,7 +66,66 @@ func TestMapStatus(t *testing.T) {
 	}
 }
 
+func TestDiscoverFetchesAllPages(t *testing.T) {
+	graph := &pagingFakeGraph{
+		responses: []roleEligibilityResponse{
+			{
+				Value: []roleEligibilitySchedule{{
+					ID:               "eligibility-1",
+					PrincipalID:      "principal-1",
+					RoleDefinitionID: "role-1",
+					RoleDefinition:   roleDefinition{DisplayName: "First Role"},
+				}},
+				NextLink: "https://graph.microsoft.com/v1.0/next",
+			},
+			{
+				Value: []roleEligibilitySchedule{{
+					ID:               "eligibility-2",
+					PrincipalID:      "principal-1",
+					RoleDefinitionID: "role-2",
+					RoleDefinition:   roleDefinition{DisplayName: "Second Role"},
+				}},
+			},
+		},
+	}
+	provider := NewProvider(graph)
+
+	got, err := provider.Discover(context.Background())
+	if err != nil {
+		t.Fatalf("Discover returned error: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("expected 2 assignments, got %d", len(got))
+	}
+	if got[0].ID != "eligibility-1" || got[1].ID != "eligibility-2" {
+		t.Fatalf("unexpected assignments: %#v", got)
+	}
+	if len(graph.paths) != 2 {
+		t.Fatalf("expected 2 graph requests, got %d (%v)", len(graph.paths), graph.paths)
+	}
+	if graph.paths[0] != "/roleManagement/directory/roleEligibilitySchedules/filterByCurrentUser(on='principal')?$expand=roleDefinition" {
+		t.Fatalf("unexpected first path: %q", graph.paths[0])
+	}
+	if graph.paths[1] != "https://graph.microsoft.com/v1.0/next" {
+		t.Fatalf("unexpected second path: %q", graph.paths[1])
+	}
+}
+
 type fakeGraph struct{}
 
 func (fakeGraph) Get(context.Context, string, any) error       { return nil }
 func (fakeGraph) Post(context.Context, string, any, any) error { return nil }
+
+type pagingFakeGraph struct {
+	paths     []string
+	responses []roleEligibilityResponse
+}
+
+func (f *pagingFakeGraph) Get(_ context.Context, path string, out any) error {
+	f.paths = append(f.paths, path)
+	response := out.(*roleEligibilityResponse)
+	*response = f.responses[len(f.paths)-1]
+	return nil
+}
+
+func (f *pagingFakeGraph) Post(context.Context, string, any, any) error { return nil }

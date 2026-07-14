@@ -24,7 +24,8 @@ func NewProvider(graph GraphClient, principalID string) Provider {
 }
 
 type eligibilityResponse struct {
-	Value []eligibilityScheduleInstance `json:"value"`
+	Value    []eligibilityScheduleInstance `json:"value"`
+	NextLink string                        `json:"@odata.nextLink"`
 }
 
 type eligibilityScheduleInstance struct {
@@ -35,16 +36,19 @@ type eligibilityScheduleInstance struct {
 }
 
 func (p Provider) Discover(ctx context.Context) ([]pim.EligibleAssignment, error) {
-	var response eligibilityResponse
 	principalID := strings.ReplaceAll(p.principalID, "'", "''")
 	filter := url.QueryEscape("principalId eq '" + principalID + "'")
 	path := "/identityGovernance/privilegedAccess/group/eligibilityScheduleInstances?$filter=" + filter
-	if err := p.graph.Get(ctx, path, &response); err != nil {
-		return nil, err
-	}
-	assignments := make([]pim.EligibleAssignment, 0, len(response.Value))
-	for _, item := range response.Value {
-		assignments = append(assignments, normalizeEligibility(item))
+	assignments := make([]pim.EligibleAssignment, 0)
+	for path != "" {
+		var response eligibilityResponse
+		if err := p.graph.Get(ctx, path, &response); err != nil {
+			return nil, err
+		}
+		for _, item := range response.Value {
+			assignments = append(assignments, normalizeEligibility(item))
+		}
+		path = response.NextLink
 	}
 	return assignments, nil
 }

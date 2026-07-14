@@ -36,6 +36,51 @@ func TestDiscoverFetchesEligibilitiesWithPrincipalFilter(t *testing.T) {
 	}
 }
 
+func TestDiscoverFetchesAllPages(t *testing.T) {
+	graph := &pagingFakeGraph{
+		responses: []eligibilityResponse{
+			{
+				Value: []eligibilityScheduleInstance{{
+					ID:          "group-1_member_sched-1",
+					AccessID:    "member",
+					PrincipalID: "principal-1",
+					GroupID:     "group-1",
+				}},
+				NextLink: "https://graph.microsoft.com/v1.0/next",
+			},
+			{
+				Value: []eligibilityScheduleInstance{{
+					ID:          "group-2_owner_sched-1",
+					AccessID:    "owner",
+					PrincipalID: "principal-1",
+					GroupID:     "group-2",
+				}},
+			},
+		},
+	}
+	provider := NewProvider(graph, "principal-1")
+
+	got, err := provider.Discover(context.Background())
+	if err != nil {
+		t.Fatalf("Discover returned error: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("expected 2 assignments, got %d", len(got))
+	}
+	if got[0].ID != "group-1_member_sched-1" || got[1].ID != "group-2_owner_sched-1" {
+		t.Fatalf("unexpected assignments: %#v", got)
+	}
+	if len(graph.paths) != 2 {
+		t.Fatalf("expected 2 graph requests, got %d (%v)", len(graph.paths), graph.paths)
+	}
+	if graph.paths[0] != "/identityGovernance/privilegedAccess/group/eligibilityScheduleInstances?$filter=principalId+eq+%27principal-1%27" {
+		t.Fatalf("unexpected first path: %q", graph.paths[0])
+	}
+	if graph.paths[1] != "https://graph.microsoft.com/v1.0/next" {
+		t.Fatalf("unexpected second path: %q", graph.paths[1])
+	}
+}
+
 func TestNormalizeMemberEligibility(t *testing.T) {
 	item := eligibilityScheduleInstance{
 		ID:          "group-1_member_sched-1",
@@ -90,3 +135,17 @@ func (f *fakeGraph) Get(_ context.Context, path string, out any) error {
 }
 
 func (f *fakeGraph) Post(context.Context, string, any, any) error { return nil }
+
+type pagingFakeGraph struct {
+	paths     []string
+	responses []eligibilityResponse
+}
+
+func (f *pagingFakeGraph) Get(_ context.Context, path string, out any) error {
+	f.paths = append(f.paths, path)
+	response := out.(*eligibilityResponse)
+	*response = f.responses[len(f.paths)-1]
+	return nil
+}
+
+func (f *pagingFakeGraph) Post(context.Context, string, any, any) error { return nil }
