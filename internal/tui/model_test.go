@@ -2,6 +2,8 @@ package tui
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -51,5 +53,83 @@ func TestHomeEnterMovesToSelectedSection(t *testing.T) {
 	}
 	if got.activeSection != SectionGroups {
 		t.Fatalf("expected groups section, got %s", got.activeSection)
+	}
+}
+
+type scriptedProvider struct {
+	discoveries [][]pim.EligibleAssignment
+	results     []pim.ActivationResult
+	discoverErr error
+	activated   []pim.ActivationRequest
+}
+
+func (p *scriptedProvider) Discover(context.Context) ([]pim.EligibleAssignment, error) {
+	if p.discoverErr != nil {
+		return nil, p.discoverErr
+	}
+	if len(p.discoveries) == 0 {
+		return nil, nil
+	}
+	out := p.discoveries[0]
+	p.discoveries = p.discoveries[1:]
+	return out, nil
+}
+
+func (p *scriptedProvider) Activate(_ context.Context, request pim.ActivationRequest) (pim.ActivationResult, error) {
+	p.activated = append(p.activated, request)
+	result := p.results[0]
+	p.results = p.results[1:]
+	result.Assignment = request.Assignment
+	return result, nil
+}
+
+func TestModelDiscoversSelectedSectionAndActivatesSelection(t *testing.T) {
+	provider := &scriptedProvider{
+		discoveries: [][]pim.EligibleAssignment{{
+			{ID: "one", DisplayName: "Global Reader"},
+			{ID: "two", DisplayName: "Privileged Role Administrator"},
+		}},
+		results: []pim.ActivationResult{{Status: pim.ActivationStatusActivated}},
+	}
+	model := NewModel(Runtime{Entra: provider})
+
+	next, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = next.(Model)
+	msg := cmd()
+	next, _ = model.Update(msg)
+	model = next.(Model)
+	model.assignmentList.toggle("one")
+	model.form.justification = "Need access"
+	model.form.durationISO = "PT2H"
+
+	next, cmd = model.Update(tea.KeyMsg{Type: tea.KeyCtrlA})
+	model = next.(Model)
+	msg = cmd()
+	next, _ = model.Update(msg)
+	model = next.(Model)
+
+	if model.screen != ScreenSummary {
+		t.Fatalf("expected summary screen, got %s", model.screen)
+	}
+	if len(provider.activated) != 1 || provider.activated[0].Justification != "Need access" || provider.activated[0].DurationISO != "PT2H" {
+		t.Fatalf("unexpected activation requests: %#v", provider.activated)
+	}
+	if !strings.Contains(model.View(), "activated") {
+		t.Fatalf("expected rendered summary, got %q", model.View())
+	}
+}
+
+func TestModelShowsDiscoveryErrorWithoutLeavingTUI(t *testing.T) {
+	model := NewModel(Runtime{Entra: &scriptedProvider{discoverErr: errors.New("az login required")}})
+	next, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = next.(Model)
+	next, _ = model.Update(cmd())
+	model = next.(Model)
+
+	if model.screen != ScreenAssignments {
+		t.Fatalf("expected assignments screen, got %s", model.screen)
+	}
+	if !strings.Contains(model.View(), "az login required") {
+		t.Fatalf("expected discovery error in view, got %q", model.View())
 	}
 }
