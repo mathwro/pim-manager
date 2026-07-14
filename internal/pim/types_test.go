@@ -45,3 +45,16 @@ func TestEligibleAssignmentDisplayScope(t *testing.T) {
 		t.Fatalf("expected display scope, got %q", got)
 	}
 }
+
+func TestEligibleAssignmentDisplayScopeWithoutDisplayName(t *testing.T) {
+	assignment := EligibleAssignment{
+		DisplayName: "Contributor",
+		Scope: Scope{
+			Type: ScopeTypeSubscription,
+		},
+	}
+
+	if got := assignment.DisplayScope(); got != string(ScopeTypeSubscription) {
+		t.Fatalf("expected scope type, got %q", got)
+	}
+}
