@@ -3,8 +3,10 @@ package activation
 import (
 	"context"
 	"errors"
+	"net/http"
 	"testing"
 
+	"github.com/mathwro/pim-manager/internal/graph"
 	"github.com/mathwro/pim-manager/internal/pim"
 )
 
@@ -84,6 +86,18 @@ func TestActivateBatchMarksOnlyRetryableErrorsRetryable(t *testing.T) {
 	results = service.ActivateBatch(context.Background(), []pim.ActivationRequest{{Assignment: pim.EligibleAssignment{ID: "one"}}})
 	if len(results) != 1 || results[0].CanRetry() {
 		t.Fatalf("expected non-retryable failure, got %#v", results)
+	}
+}
+
+func TestWrapRetryableMarksRequestTimeoutTransient(t *testing.T) {
+	err := WrapRetryable(graph.ResponseError{
+		StatusCode: http.StatusRequestTimeout,
+		Status:     "408 Request Timeout",
+		Body:       "request timed out",
+	})
+
+	if !IsRetryable(err) {
+		t.Fatalf("expected request timeout to be retryable, got %T %[1]v", err)
 	}
 }
 

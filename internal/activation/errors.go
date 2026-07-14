@@ -72,5 +72,5 @@ func isTransientActivationError(err error) bool {
 }
 
 func isTransientStatus(code int) bool {
-	return code == http.StatusTooManyRequests || code >= http.StatusInternalServerError
+	return code == http.StatusRequestTimeout || code == http.StatusTooManyRequests || code >= http.StatusInternalServerError
 }
