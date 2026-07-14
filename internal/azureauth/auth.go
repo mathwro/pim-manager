@@ -33,7 +33,10 @@ func NewCLI(run Runner) CLI {
 func (c CLI) Account(ctx context.Context) (Account, error) {
 	out, err := c.run(ctx, "az", "account", "show", "--output", "json")
 	if err != nil {
-		return Account{}, ErrNotLoggedIn
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return Account{}, err
+		}
+		return Account{}, fmt.Errorf("%w: %v", ErrNotLoggedIn, err)
 	}
 
 	var payload struct {

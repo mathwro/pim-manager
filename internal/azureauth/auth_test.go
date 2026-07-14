@@ -3,6 +3,7 @@ package azureauth
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -29,6 +30,39 @@ func TestAccountReturnsLoginHintOnAzFailure(t *testing.T) {
 	_, err := client.Account(context.Background())
 	if !errors.Is(err, ErrNotLoggedIn) {
 		t.Fatalf("expected ErrNotLoggedIn, got %v", err)
+	}
+}
+
+func TestAccountReturnsContextErrorsUnchanged(t *testing.T) {
+	for _, contextErr := range []error{context.Canceled, context.DeadlineExceeded} {
+		t.Run(contextErr.Error(), func(t *testing.T) {
+			client := NewCLI(func(context.Context, string, ...string) ([]byte, error) {
+				return nil, contextErr
+			})
+
+			_, err := client.Account(context.Background())
+			if !errors.Is(err, contextErr) {
+				t.Fatalf("expected %v, got %v", contextErr, err)
+			}
+			if errors.Is(err, ErrNotLoggedIn) {
+				t.Fatalf("did not expect ErrNotLoggedIn, got %v", err)
+			}
+		})
+	}
+}
+
+func TestAccountWrapsUnexpectedAzFailureWithLoginHint(t *testing.T) {
+	commandErr := errors.New("az account show failed")
+	client := NewCLI(func(context.Context, string, ...string) ([]byte, error) {
+		return nil, commandErr
+	})
+
+	_, err := client.Account(context.Background())
+	if !errors.Is(err, ErrNotLoggedIn) {
+		t.Fatalf("expected ErrNotLoggedIn, got %v", err)
+	}
+	if !strings.Contains(err.Error(), commandErr.Error()) {
+		t.Fatalf("expected command error details, got %v", err)
 	}
 }
 
