@@ -26,11 +26,8 @@ func Run() error {
 	graphClient := graph.NewClient(httpClient, auth)
 	armClient := arm.NewClient(httpClient, auth)
 	runtime := tui.Runtime{
-		Entra: entra.NewProvider(graphClient),
-		AzureResources: newLazyAzureResourcesProvider(auth, azureresources.NewScopeDiscoverer(armClient), func(principalID string, scopes []string) lazyAssignmentProvider {
-			provider := azureresources.NewProvider(armClient, principalID, scopes)
-			return lazyAssignmentProvider{discover: provider.Discover, activate: provider.Activate}
-		}),
+		Entra:          entra.NewProvider(graphClient),
+		AzureResources: azureresources.NewProvider(armClient),
 		Groups: newLazyPrincipalProvider(auth, func(principalID string) lazyAssignmentProvider {
 			provider := groups.NewProvider(graphClient, principalID)
 			return lazyAssignmentProvider{discover: provider.Discover, activate: provider.Activate}

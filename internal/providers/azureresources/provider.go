@@ -13,14 +13,17 @@ import (
 	"github.com/mathwro/pim-manager/internal/pim"
 )
 
-type Provider struct {
-	arm         ARMClient
-	principalID string
-	scopes      []string
+type ARMClient interface {
+	Get(context.Context, string, any) error
+	Put(context.Context, string, any, any) error
 }
 
-func NewProvider(arm ARMClient, principalID string, scopes []string) Provider {
-	return Provider{arm: arm, principalID: principalID, scopes: scopes}
+type Provider struct {
+	arm ARMClient
+}
+
+func NewProvider(arm ARMClient) Provider {
+	return Provider{arm: arm}
 }
 
 type eligibilityResponse struct {
@@ -62,20 +65,18 @@ type expandedRoleDefinition struct {
 }
 
 func (p Provider) Discover(ctx context.Context) ([]pim.EligibleAssignment, error) {
+	filter := url.QueryEscape("asTarget()")
+	path := fmt.Sprintf("/providers/Microsoft.Authorization/roleEligibilityScheduleInstances?$filter=%s&api-version=%s", filter, arm.AuthorizationAPIVersion)
 	var assignments []pim.EligibleAssignment
-	for _, scope := range p.scopes {
-		filter := url.QueryEscape(fmt.Sprintf("assignedTo('%s')", p.principalID))
-		path := fmt.Sprintf("%s/providers/Microsoft.Authorization/roleEligibilityScheduleInstances?$filter=%s&api-version=%s", scope, filter, arm.AuthorizationAPIVersion)
-		for path != "" {
-			var response eligibilityResponse
-			if err := p.arm.Get(ctx, path, &response); err != nil {
-				return nil, err
-			}
-			for _, item := range response.Value {
-				assignments = append(assignments, normalizeEligibility(item))
-			}
-			path = response.NextLink
+	for path != "" {
+		var response eligibilityResponse
+		if err := p.arm.Get(ctx, path, &response); err != nil {
+			return nil, err
 		}
+		for _, item := range response.Value {
+			assignments = append(assignments, normalizeEligibility(item))
+		}
+		path = response.NextLink
 	}
 	return assignments, nil
 }

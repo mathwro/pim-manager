@@ -55,8 +55,27 @@ func TestActivationRequestBody(t *testing.T) {
 	}
 }
 
+func TestDiscoverFetchesCurrentUsersEligibilitiesOnceAtTenantScope(t *testing.T) {
+	tenantPath := "/providers/Microsoft.Authorization/roleEligibilityScheduleInstances?$filter=asTarget%28%29&api-version=2020-10-01"
+	arm := &providerFakeARM{responses: map[string]any{
+		tenantPath: eligibilityResponse{Value: []roleEligibilityScheduleInstance{{ID: "eligibility-1"}}},
+	}}
+	provider := NewProvider(arm)
+
+	assignments, err := provider.Discover(context.Background())
+	if err != nil {
+		t.Fatalf("Discover returned error: %v", err)
+	}
+	if len(assignments) != 1 {
+		t.Fatalf("expected 1 assignment, got %#v", assignments)
+	}
+	if len(arm.paths) != 1 || arm.paths[0] != tenantPath {
+		t.Fatalf("expected one tenant-scope request %q, got %#v", tenantPath, arm.paths)
+	}
+}
+
 func TestDiscoverFollowsPaginatedEligibilities(t *testing.T) {
-	firstPath := "/subscriptions/sub-1/providers/Microsoft.Authorization/roleEligibilityScheduleInstances?$filter=assignedTo%28%27principal-1%27%29&api-version=2020-10-01"
+	firstPath := "/providers/Microsoft.Authorization/roleEligibilityScheduleInstances?$filter=asTarget%28%29&api-version=2020-10-01"
 	nextPath := "https://management.azure.com/subscriptions/sub-1/providers/Microsoft.Authorization/roleEligibilityScheduleInstances?$skiptoken=next"
 	arm := &providerFakeARM{
 		responses: map[string]any{
@@ -87,7 +106,7 @@ func TestDiscoverFollowsPaginatedEligibilities(t *testing.T) {
 			},
 		},
 	}
-	provider := NewProvider(arm, "principal-1", []string{"/subscriptions/sub-1"})
+	provider := NewProvider(arm)
 
 	assignments, err := provider.Discover(context.Background())
 	if err != nil {
@@ -104,12 +123,13 @@ func TestDiscoverFollowsPaginatedEligibilities(t *testing.T) {
 
 type providerFakeARM struct {
 	responses map[string]any
+	paths     []string
 }
 
 func (f *providerFakeARM) Get(_ context.Context, path string, out any) error {
-	switch target := out.(type) {
-	case *eligibilityResponse:
-		*target = f.responses[path].(eligibilityResponse)
+	f.paths = append(f.paths, path)
+	if response, ok := f.responses[path]; ok {
+		*out.(*eligibilityResponse) = response.(eligibilityResponse)
 	}
 	return nil
 }
