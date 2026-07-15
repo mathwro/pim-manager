@@ -394,3 +394,24 @@ func TestModelSupportsHelpBackNavigationAndQuit(t *testing.T) {
 		t.Fatal("expected q to quit outside text input")
 	}
 }
+
+func TestDisplayScopeUsesCompactAzureScopeLabels(t *testing.T) {
+	tests := []struct {
+		name      string
+		scopeType pim.ScopeType
+		want      string
+	}{
+		{name: "management group", scopeType: pim.ScopeTypeManagementGroup, want: "MG: scope-name"},
+		{name: "subscription", scopeType: pim.ScopeTypeSubscription, want: "Sub: scope-name"},
+		{name: "resource group", scopeType: pim.ScopeTypeResourceGroup, want: "RG: scope-name"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			assignment := pim.EligibleAssignment{Scope: pim.Scope{DisplayName: "scope-name", Type: test.scopeType}}
+			if got := displayScope(assignment); got != test.want {
+				t.Fatalf("expected %q, got %q", test.want, got)
+			}
+		})
+	}
+}

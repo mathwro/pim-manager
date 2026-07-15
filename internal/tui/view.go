@@ -442,6 +442,14 @@ func displayName(assignment pim.EligibleAssignment) string {
 func displayScope(assignment pim.EligibleAssignment) string {
 	name := strings.TrimSpace(assignment.Scope.DisplayName)
 	scopeType := strings.TrimSpace(string(assignment.Scope.Type))
+	switch assignment.Scope.Type {
+	case pim.ScopeTypeManagementGroup:
+		scopeType = "MG"
+	case pim.ScopeTypeSubscription:
+		scopeType = "Sub"
+	case pim.ScopeTypeResourceGroup:
+		scopeType = "RG"
+	}
 	switch {
 	case name != "" && scopeType != "":
 		return fmt.Sprintf("%s: %s", scopeType, name)
