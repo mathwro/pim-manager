@@ -121,8 +121,8 @@ func NewModel(runtime Runtime) Model {
 	model := Model{
 		runtime:         runtime,
 		screen:          ScreenHome,
-		selectedSection: SectionEntra,
-		sections:        []Section{SectionEntra, SectionAzureResources, SectionGroups},
+		selectedSection: SectionAzureResources,
+		sections:        []Section{SectionAzureResources},
 		assignmentList:  newAssignmentList(nil),
 		form: activationForm{
 			durationISO: "PT1H",

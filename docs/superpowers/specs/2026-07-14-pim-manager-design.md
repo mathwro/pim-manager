@@ -28,15 +28,27 @@ The MVP focuses on a keyboard-first interactive workflow for selecting and activ
 - Approval management after a request is submitted.
 - Cross-section mixed batches in the MVP.
 
+## Temporary Graph PIM Limitation
+
+Entra Roles and Groups are paused because Azure CLI's fixed client cannot obtain the delegated Microsoft Graph PIM permissions required for discovery and activation. Azure Resources remains available through ARM.
+
+Track:
+
+- [Azure CLI #22775](https://github.com/Azure/azure-cli/issues/22775)
+- [Azure CLI #28854](https://github.com/Azure/azure-cli/issues/28854)
+- [az-pim-cli #121](https://github.com/netr0m/az-pim-cli/issues/121)
+
+Do not use the deprecated `/beta/privilegedAccess` APIs or private `api.azrbac.mspim.azure.com` endpoint. Re-enable these sections only when Azure CLI supports the required scopes or the product adopts a dedicated Graph application registration and login.
+
 ## Product Flow
 
 Running `pim-manager` with no arguments starts the Bubble Tea TUI. The home screen shows Azure account context and three primary sections:
 
 | Section | What it lists |
 | --- | --- |
-| Entra Roles | Eligible Microsoft Entra directory role activations. |
+| Entra Roles | **Paused** — Azure CLI cannot obtain the required Microsoft Graph PIM permissions. |
 | Azure Resources | Eligible Azure RBAC activations across management groups, subscriptions, and resource groups. |
-| Groups | Eligible Privileged Access Group member and owner activations. |
+| Groups | **Paused** — Azure CLI cannot obtain the required Microsoft Graph PIM permissions. |
 
 Each section follows the same flow:
 

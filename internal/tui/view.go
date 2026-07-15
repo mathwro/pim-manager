@@ -27,6 +27,8 @@ func (m Model) viewHome() string {
 	b.WriteString("\n")
 	b.WriteString(mutedStyle.Render("Assignments stay inside one Azure PIM area per activation batch."))
 	b.WriteString("\n\n")
+	b.WriteString(mutedStyle.Render("Entra Roles and Groups are paused until Azure CLI can request the required\nMicrosoft Graph PIM permissions."))
+	b.WriteString("\n\n")
 
 	descriptions := map[Section]string{
 		SectionEntra:          "Directory roles across your Microsoft Entra tenant",

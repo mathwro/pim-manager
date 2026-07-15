@@ -73,9 +73,8 @@ func TestRuntimeAcceptsAssignmentProviders(t *testing.T) {
 	}
 }
 
-func TestHomeEnterMovesToSelectedSection(t *testing.T) {
+func TestHomeEnterOpensAzureResources(t *testing.T) {
 	model := NewModel(Runtime{})
-	model.selectedSection = SectionGroups
 
 	next, _ := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	got := next.(Model)
@@ -83,20 +82,22 @@ func TestHomeEnterMovesToSelectedSection(t *testing.T) {
 	if got.screen != ScreenAssignments {
 		t.Fatalf("expected assignments screen, got %s", got.screen)
 	}
-	if got.activeSection != SectionGroups {
-		t.Fatalf("expected groups section, got %s", got.activeSection)
+	if got.activeSection != SectionAzureResources {
+		t.Fatalf("expected Azure Resources section, got %s", got.activeSection)
 	}
 }
 
 type scriptedProvider struct {
-	discoveries [][]pim.EligibleAssignment
-	results     []pim.ActivationResult
-	activateErr []error
-	discoverErr error
-	activated   []pim.ActivationRequest
+	discoveries   [][]pim.EligibleAssignment
+	discoverCalls int
+	results       []pim.ActivationResult
+	activateErr   []error
+	discoverErr   error
+	activated     []pim.ActivationRequest
 }
 
 func (p *scriptedProvider) Discover(context.Context) ([]pim.EligibleAssignment, error) {
+	p.discoverCalls++
 	if p.discoverErr != nil {
 		return nil, p.discoverErr
 	}
@@ -158,7 +159,7 @@ func TestModelDiscoversSelectedSectionAndActivatesSelection(t *testing.T) {
 		}},
 		results: []pim.ActivationResult{{Status: pim.ActivationStatusActivated}},
 	}
-	model := NewModel(Runtime{Entra: provider})
+	model := NewModel(Runtime{AzureResources: provider})
 
 	next, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	model = runCommand(next.(Model), cmd)
@@ -207,7 +208,7 @@ func TestModelDiscoversSelectedSectionAndActivatesSelection(t *testing.T) {
 }
 
 func TestModelShowsDiscoveryErrorWithoutLeavingTUI(t *testing.T) {
-	model := NewModel(Runtime{Entra: &scriptedProvider{discoverErr: errors.New("az login required")}})
+	model := NewModel(Runtime{AzureResources: &scriptedProvider{discoverErr: errors.New("az login required")}})
 	next, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	model = runCommand(next.(Model), cmd)
 
@@ -224,7 +225,7 @@ func TestModelMarksRetryableProviderFailuresAndShowsRetryAction(t *testing.T) {
 		discoveries: [][]pim.EligibleAssignment{{{ID: "one", DisplayName: "Global Reader"}}},
 		activateErr: []error{activation.NewRetryableError(errors.New("temporary Azure error"))},
 	}
-	model := NewModel(Runtime{Entra: provider})
+	model := NewModel(Runtime{AzureResources: provider})
 
 	next, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	model = runCommand(next.(Model), cmd)
@@ -256,7 +257,7 @@ func TestAssignmentsSearchModeFiltersAndSelection(t *testing.T) {
 			{ID: "two", DisplayName: "Contributor", Scope: pim.Scope{DisplayName: "rg-prod"}},
 		}},
 	}
-	model := NewModel(Runtime{Entra: provider})
+	model := NewModel(Runtime{AzureResources: provider})
 
 	next, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	model = runCommand(next.(Model), cmd)
@@ -360,7 +361,7 @@ func TestModelSupportsHelpBackNavigationAndQuit(t *testing.T) {
 	provider := &scriptedProvider{
 		discoveries: [][]pim.EligibleAssignment{{{ID: "one", DisplayName: "Global Reader"}}},
 	}
-	model := NewModel(Runtime{Entra: provider})
+	model := NewModel(Runtime{AzureResources: provider})
 	next, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	model = runCommand(next.(Model), cmd)
 
@@ -493,5 +494,33 @@ func TestAssignmentsValidationErrorFitsMinimumSupportedTerminal(t *testing.T) {
 	}
 	if got, want := lipgloss.Height(view), 26; got > want {
 		t.Fatalf("expected assignments view height at most %d, got %d", want, got)
+	}
+}
+
+func TestNewModelPausesGraphPIMSections(t *testing.T) {
+	entra := &scriptedProvider{}
+	azureResources := &scriptedProvider{}
+	groups := &scriptedProvider{}
+	model := NewModel(Runtime{
+		Entra:          entra,
+		AzureResources: azureResources,
+		Groups:         groups,
+	})
+
+	if len(model.sections) != 1 || model.sections[0] != SectionAzureResources {
+		t.Fatalf("expected only Azure Resources, got %#v", model.sections)
+	}
+	if model.selectedSection != SectionAzureResources {
+		t.Fatalf("expected Azure Resources selected, got %s", model.selectedSection)
+	}
+	view := model.View()
+	if !strings.Contains(view, "Entra Roles and Groups are paused") || !strings.Contains(view, "Microsoft Graph PIM permissions") {
+		t.Fatalf("expected paused-section guidance, got %q", view)
+	}
+
+	next, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	_ = runCommand(next.(Model), cmd)
+	if azureResources.discoverCalls != 1 || entra.discoverCalls != 0 || groups.discoverCalls != 0 {
+		t.Fatalf("expected only Azure Resources discovery, got entra=%d azure=%d groups=%d", entra.discoverCalls, azureResources.discoverCalls, groups.discoverCalls)
 	}
 }
