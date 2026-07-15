@@ -401,7 +401,7 @@ func (m Model) roleColumnWidth() int {
 }
 
 func (m Model) scopeColumnWidth() int {
-	return max(10, m.contentWidth()-m.roleColumnWidth()-10)
+	return max(10, m.contentWidth()-m.roleColumnWidth()-14)
 }
 
 func (m Model) assignmentFooter() string {

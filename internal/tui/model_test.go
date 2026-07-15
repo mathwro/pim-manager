@@ -443,7 +443,14 @@ func TestAssignmentColumnsFavorScopeText(t *testing.T) {
 func TestAssignmentsViewFitsMinimumSupportedTerminal(t *testing.T) {
 	assignments := make([]pim.EligibleAssignment, 20)
 	for index := range assignments {
-		assignments[index] = pim.EligibleAssignment{ID: "assignment", DisplayName: "Global Reader"}
+		assignments[index] = pim.EligibleAssignment{
+			ID:          "assignment",
+			DisplayName: "Privileged Role Administrator",
+			Scope: pim.Scope{
+				DisplayName: "production-management-group-with-long-name",
+				Type:        pim.ScopeTypeManagementGroup,
+			},
+		}
 	}
 
 	model := NewModel(Runtime{})
