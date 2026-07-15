@@ -120,11 +120,7 @@ func (m Model) viewAssignments() string {
 		}
 	}
 
-	if m.searchMode {
-		b.WriteString(m.footer([]keyHint{{"type", "filter"}, {"enter", "apply"}, {"esc", "close search"}}))
-		return b.String()
-	}
-	b.WriteString(m.footer([]keyHint{{"space", "select"}, {"a", "select all"}, {"/", "search"}, {"i", "details"}, {"enter", "continue"}, {"esc", "back"}}))
+	b.WriteString(m.assignmentFooter())
 	return b.String()
 }
 
@@ -384,7 +380,8 @@ func (m Model) contentWidth() int {
 }
 
 func (m Model) assignmentVisibleRows() int {
-	return max(4, m.height-19)
+	footerExtraRows := max(0, lipgloss.Height(m.assignmentFooter())-2)
+	return max(4, m.height-19-footerExtraRows)
 }
 
 func (m Model) assignmentWindow(total int) (int, int) {
@@ -405,6 +402,13 @@ func (m Model) roleColumnWidth() int {
 
 func (m Model) scopeColumnWidth() int {
 	return max(10, m.contentWidth()-m.roleColumnWidth()-10)
+}
+
+func (m Model) assignmentFooter() string {
+	if m.searchMode {
+		return m.footer([]keyHint{{"type", "filter"}, {"enter", "apply"}, {"esc", "close search"}})
+	}
+	return m.footer([]keyHint{{"space", "select"}, {"a", "select all"}, {"/", "search"}, {"i", "details"}, {"enter", "continue"}, {"esc", "back"}})
 }
 
 func (m Model) footer(hints []keyHint) string {

@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/mathwro/pim-manager/internal/activation"
 	"github.com/mathwro/pim-manager/internal/azureauth"
 	"github.com/mathwro/pim-manager/internal/pim"
@@ -436,5 +437,23 @@ func TestAssignmentColumnsFavorScopeText(t *testing.T) {
 
 	if model.scopeColumnWidth() <= model.roleColumnWidth() {
 		t.Fatalf("expected scope column wider than role column, got role=%d scope=%d", model.roleColumnWidth(), model.scopeColumnWidth())
+	}
+}
+
+func TestAssignmentsViewFitsMinimumSupportedTerminal(t *testing.T) {
+	assignments := make([]pim.EligibleAssignment, 20)
+	for index := range assignments {
+		assignments[index] = pim.EligibleAssignment{ID: "assignment", DisplayName: "Global Reader"}
+	}
+
+	model := NewModel(Runtime{})
+	model.screen = ScreenAssignments
+	model.activeSection = SectionAzureResources
+	model.assignmentList = newAssignmentList(assignments)
+	next, _ := model.Update(tea.WindowSizeMsg{Width: 80, Height: 26})
+	model = next.(Model)
+
+	if got, want := lipgloss.Height(model.View()), 26; got > want {
+		t.Fatalf("expected assignments view height at most %d, got %d", want, got)
 	}
 }
