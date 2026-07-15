@@ -4,17 +4,15 @@
 
 `pim-manager` is a Go CLI for discovering and activating Microsoft PIM eligibilities through an interactive terminal UI. It uses Cobra for command structure, Bubble Tea for the TUI runtime, and Bubbles for reusable UI components. Authentication is based on the user's existing Azure CLI session.
 
-The MVP focuses on a keyboard-first interactive workflow for selecting and activating multiple eligible assignments. It supports three top-level PIM areas modeled after the Azure portal: Entra roles, Azure resource roles, and groups.
+The current MVP focuses on a keyboard-first interactive workflow for selecting and activating eligible Azure Resource assignments. Entra roles and groups remain modeled as dormant reactivation targets after the Microsoft Graph PIM authentication limitation is resolved.
 
 ## Goals
 
 - Open the interactive TUI when `pim-manager` is run with no arguments.
 - Use Azure CLI authentication instead of implementing a custom login flow.
-- Discover eligible PIM activations for:
-  - Microsoft Entra directory roles.
-  - Azure Resource RBAC roles across management groups, subscriptions, and resource groups.
-  - Privileged Access Group member and owner assignments.
-- Let users select multiple assignments within a section.
+- Discover eligible Azure Resource RBAC activations across management groups, subscriptions, and resource groups.
+- Preserve dormant Entra directory role and Privileged Access Group provider seams for future reactivation after supported Graph authentication is available.
+- Let users select multiple Azure Resource assignments.
 - Collect one justification and one duration for all selected assignments in the batch.
 - Activate selected assignments and show a per-assignment result summary.
 - Continue processing remaining assignments when one activation fails.
@@ -42,7 +40,7 @@ Do not use the deprecated `/beta/privilegedAccess` APIs or private `api.azrbac.m
 
 ## Product Flow
 
-Running `pim-manager` with no arguments starts the Bubble Tea TUI. The home screen shows Azure account context and three primary sections:
+Running `pim-manager` with no arguments starts the Bubble Tea TUI. The home screen shows Azure account context, the temporary Graph PIM pause explanation, and one selectable Azure Resources section. The complete product-area status is:
 
 | Section | What it lists |
 | --- | --- |
@@ -50,7 +48,7 @@ Running `pim-manager` with no arguments starts the Bubble Tea TUI. The home scre
 | Azure Resources | Eligible Azure RBAC activations across management groups, subscriptions, and resource groups. |
 | Groups | **Paused** — Azure CLI cannot obtain the required Microsoft Graph PIM permissions. |
 
-Each section follows the same flow:
+The active Azure Resources section follows this flow:
 
 1. Discover eligible assignments for that PIM area.
 2. Render assignments in a searchable and filterable multi-select list.
@@ -69,29 +67,28 @@ The application is split into focused packages with clear boundaries.
 | Package | Responsibility |
 | --- | --- |
 | `cmd` | Cobra commands, root command setup, flags, and process exit behavior. |
-| `internal/app` | Application wiring for auth, providers, activation services, and the TUI model. |
-| `internal/azureauth` | Azure CLI login validation and access token retrieval for Microsoft Graph and Azure Resource Manager. |
+| `internal/app` | Production wiring for Azure CLI auth, the ARM client, the active Azure Resources provider, and the TUI model. |
+| `internal/azureauth` | Azure CLI login validation and token retrieval; the current app uses Azure Resource Manager credentials, while Graph token support is retained for future reactivation. |
 | `internal/pim` | Shared domain types for eligibility, assignment source, scope metadata, activation requests, and activation results. |
-| `internal/providers/entra` | Discovery and activation for eligible Microsoft Entra directory roles. |
-| `internal/providers/azureresources` | Discovery and activation for eligible Azure Resource roles across management groups, subscriptions, and resource groups. |
-| `internal/providers/groups` | Discovery and activation for eligible Privileged Access Group member and owner assignments. |
+| `internal/providers/entra` | Dormant Entra role discovery and activation implementation retained for reactivation after supported Graph authentication is available. |
+| `internal/providers/azureresources` | Active discovery and activation for eligible Azure Resource roles across management groups, subscriptions, and resource groups. |
+| `internal/providers/groups` | Dormant Privileged Access Group discovery and activation implementation retained for reactivation after supported Graph authentication is available. |
 | `internal/activation` | Shared batch activation orchestration, partial success handling, and retry classification. |
 | `internal/tui` | Bubble Tea screens, Bubbles components, navigation, selection state, forms, progress, and summaries. |
 
-The TUI depends on interfaces rather than concrete Azure clients. Provider packages translate Azure API responses into shared `pim.EligibleAssignment` values so the UI can render all sections consistently while preserving source-specific metadata for details and activation.
+The TUI depends on provider interfaces rather than concrete Azure clients. The current production runtime supplies only the Azure Resources provider, which translates ARM responses into shared `pim.EligibleAssignment` values. Entra and Groups runtime seams remain dormant so their source-specific metadata and activation paths can be reactivated without changing the TUI contract.
 
 ## Authentication and Discovery
 
 At startup, `pim-manager` validates Azure CLI login state. If the user is not signed in, the TUI shows a clear message with the exact `az login` command to run, provides a retry action, and exits only if the user chooses to quit.
 
-After authentication, discovery is section-specific:
+After authentication, only Azure Resources discovery is active:
 
-1. The Entra provider uses Azure CLI-derived Microsoft Graph access tokens to list eligible directory role assignments and enrich them with display names and policy metadata.
-2. The Azure Resources provider uses Azure CLI-derived Azure Resource Manager tokens to list eligible role assignments across management groups, subscriptions, and resource groups visible to the user.
-3. The Groups provider uses Azure CLI-derived Microsoft Graph access tokens to list eligible Privileged Access Group member and owner assignments.
-4. Each provider returns normalized `pim.EligibleAssignment` records with source, display name, assignment type, scope name, scope type, principal details when available, eligibility identifiers, policy hints, and activation capability.
+1. The Azure Resources provider uses Azure CLI-derived Azure Resource Manager tokens to list eligible role assignments across management groups, subscriptions, and resource groups visible to the user.
+2. It returns normalized `pim.EligibleAssignment` records with source, display name, assignment type, scope name, scope type, principal details when available, eligibility identifiers, policy hints, and activation capability.
+3. The dormant Entra and Groups providers are not constructed or invoked by production wiring. They may be reactivated only after the tracked Microsoft Graph PIM authentication limitation is resolved.
 
-Discovery failures are isolated by section. If Entra discovery fails, the Entra section shows that error; Azure Resources and Groups remain usable when their own discovery succeeds.
+Azure Resources discovery failures remain inside the Azure Resources workflow and are shown without leaving the TUI.
 
 ## TUI Screen Model
 
@@ -99,7 +96,7 @@ The Bubble Tea app uses a simple stack-like screen flow:
 
 | Screen | Purpose |
 | --- | --- |
-| Home | Choose Entra Roles, Azure Resources, or Groups; show auth and account context. |
+| Home | Choose Azure Resources; show auth and account context plus the Entra Roles and Groups pause explanation. |
 | Assignment list | Fetch and render eligible assignments for the selected section; support search, filter, inspect, and multi-select. |
 | Assignment details | Show source, scope, assignment identifiers, policy hints, and activation constraints for the focused item. |
 | Activation form | Enter shared justification and duration for all selected assignments. |
@@ -152,7 +149,7 @@ The app should surface Azure and PIM constraints clearly instead of collapsing t
 - API throttling.
 - Tenant, subscription, management group, or resource group access failure.
 
-Provider-level errors are isolated to the relevant section. Activation errors are isolated to the relevant assignment. The UI should keep enough detail for users to know whether to retry, change input, sign in again, or resolve an Azure policy/access issue.
+Azure Resources provider errors are isolated to its workflow, and activation errors are isolated to the relevant assignment. Dormant Entra and Groups providers are not invoked. The UI should keep enough detail for users to know whether to retry, change input, sign in again, or resolve an Azure policy/access issue.
 
 ## Testing Strategy
 
@@ -162,7 +159,7 @@ Testing should focus on separable logic and avoid requiring live Azure access fo
 | --- | --- |
 | Cobra command startup | Unit tests for default command behavior and error propagation. |
 | Azure auth wrapper | Unit tests around command/token parsing with mocked Azure CLI execution. |
-| PIM domain normalization | Unit tests for converting Entra, Azure Resource, and Group API responses into shared domain records. |
+| PIM domain normalization | Unit tests for active Azure Resource conversion plus retained Entra and Group conversion behavior needed for future reactivation. |
 | Batch activation | Unit tests for partial success, pending approval, failures, and retry eligibility. |
 | TUI models | Bubble Tea update/model tests for navigation, selection, form validation, and summaries. |
 | Provider integration | Optional manual integration tests gated behind environment variables or explicit commands. |
@@ -177,3 +174,4 @@ The MVP should keep clean seams for later additions without implementing them no
 - Rich filtering by scope, assignment type, and role name.
 - Exporting activation summaries.
 - Approval status polling.
+- Reactivating Entra Roles and Groups after a supported Microsoft Graph PIM authentication path is available.
