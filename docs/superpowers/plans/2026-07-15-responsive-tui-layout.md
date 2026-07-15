@@ -207,11 +207,11 @@ func (m Model) roleColumnWidth() int {
 }
 ```
 
-Keep `contentWidth()` and `scopeColumnWidth()` unchanged. The scope helper receives the remaining table width:
+Keep `contentWidth()` unchanged. The scope helper reserves the active card's border, padding, cursor, checkbox, and separators so a fully occupied row remains one line:
 
 ```go
 func (m Model) scopeColumnWidth() int {
-	return max(10, m.contentWidth()-m.roleColumnWidth()-10)
+	return max(10, m.contentWidth()-m.roleColumnWidth()-14)
 }
 ```
 

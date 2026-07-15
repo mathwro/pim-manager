@@ -28,6 +28,8 @@ The assignment list uses the available terminal height minus its fixed content a
 
 Assignment rows remain one line at all supported widths. The role column receives approximately 40 percent of the available table width; the scope column receives the remainder. Both columns retain minimum widths and truncate overflowing text with an ellipsis.
 
+Column widths reserve the active card's border, padding, cursor, checkbox, and separators so fully occupied rows remain one line.
+
 This favors the usually longer Azure scope names while preserving enough room for role names such as `User Access Administrator`.
 
 ## Non-goals
