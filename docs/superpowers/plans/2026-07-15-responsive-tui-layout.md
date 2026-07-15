@@ -14,6 +14,7 @@
 - Assignment rows remain one line and truncate overflowing text with an ellipsis.
 - The frame has no maximum width; assignment rows have no maximum visible-row count.
 - Keep the existing frame and row minimums.
+- Support the assignments screen from `80x26` upward; wrapped footer lines reduce visible rows without lowering the four-row minimum.
 - Give the scope column approximately 60 percent of assignment table width.
 - Do not change providers, domain models, or add dependencies.
 
@@ -123,10 +124,10 @@ git commit -m "feat: abbreviate Azure scope labels"
 - Modify: `internal/tui/view.go:378-408`
 
 **Interfaces:**
-- Consumes: `Model.width`, `Model.height`, `tea.WindowSizeMsg`, and the existing `contentWidth()` calculation.
-- Produces: `frameWidth() int` without a maximum, `assignmentVisibleRows() int` without a maximum, and a role/scope split favoring scope text.
+- Consumes: `Model.width`, `Model.height`, `tea.WindowSizeMsg`, the existing `contentWidth()` calculation, and the rendered assignment footer.
+- Produces: `frameWidth() int` without a maximum, footer-aware `assignmentVisibleRows() int` without a maximum, and a role/scope split favoring scope text.
 
-- [ ] **Step 1: Write failing resize and column tests**
+- [ ] **Step 1: Write failing resize, column, and minimum-terminal tests**
 
 Append to `internal/tui/model_test.go`:
 
@@ -155,15 +156,37 @@ func TestAssignmentColumnsFavorScopeText(t *testing.T) {
 }
 ```
 
+Add `github.com/charmbracelet/lipgloss` to the test imports, then append:
+
+```go
+func TestAssignmentsViewFitsMinimumSupportedTerminal(t *testing.T) {
+	assignments := make([]pim.EligibleAssignment, 20)
+	for index := range assignments {
+		assignments[index] = pim.EligibleAssignment{ID: "assignment", DisplayName: "Global Reader"}
+	}
+
+	model := NewModel(Runtime{})
+	model.screen = ScreenAssignments
+	model.activeSection = SectionAzureResources
+	model.assignmentList = newAssignmentList(assignments)
+	next, _ := model.Update(tea.WindowSizeMsg{Width: 80, Height: 26})
+	model = next.(Model)
+
+	if got, want := lipgloss.Height(model.View()), 26; got > want {
+		t.Fatalf("expected assignments view height at most %d, got %d", want, got)
+	}
+}
+```
+
 - [ ] **Step 2: Run the tests and verify RED**
 
 Run:
 
 ```bash
-go test ./internal/tui -run 'TestWindowResizeUsesAvailableWidthAndHeight|TestAssignmentColumnsFavorScopeText' -count=1
+go test ./internal/tui -run 'TestWindowResizeUsesAvailableWidthAndHeight|TestAssignmentColumnsFavorScopeText|TestAssignmentsViewFitsMinimumSupportedTerminal' -count=1
 ```
 
-Expected: FAIL with frame width `104`, visible rows `12`, and the role column wider than the scope column.
+Expected: FAIL with frame width `104`, the role column wider than the scope column, and the `80x26` rendered view exceeding 26 rows.
 
 - [ ] **Step 3: Remove width and height caps and rebalance columns**
 
@@ -175,7 +198,8 @@ func (m Model) frameWidth() int {
 }
 
 func (m Model) assignmentVisibleRows() int {
-	return max(4, m.height-19)
+	footerExtraRows := max(0, lipgloss.Height(m.assignmentFooter())-2)
+	return max(4, m.height-19-footerExtraRows)
 }
 
 func (m Model) roleColumnWidth() int {
@@ -191,13 +215,24 @@ func (m Model) scopeColumnWidth() int {
 }
 ```
 
+Use one footer source for rendering and sizing. Replace the assignment screen's normal/search footer branches with `b.WriteString(m.assignmentFooter())`, then add:
+
+```go
+func (m Model) assignmentFooter() string {
+	if m.searchMode {
+		return m.footer([]keyHint{{"type", "filter"}, {"enter", "apply"}, {"esc", "close search"}})
+	}
+	return m.footer([]keyHint{{"space", "select"}, {"a", "select all"}, {"/", "search"}, {"i", "details"}, {"enter", "continue"}, {"esc", "back"}})
+}
+```
+
 - [ ] **Step 4: Format and run focused tests**
 
 Run:
 
 ```bash
 gofmt -w internal/tui/model_test.go internal/tui/view.go
-go test ./internal/tui -run 'TestWindowResizeUsesAvailableWidthAndHeight|TestAssignmentColumnsFavorScopeText' -count=1
+go test ./internal/tui -run 'TestWindowResizeUsesAvailableWidthAndHeight|TestAssignmentColumnsFavorScopeText|TestAssignmentsViewFitsMinimumSupportedTerminal' -count=1
 ```
 
 Expected: PASS.
@@ -224,7 +259,7 @@ go build -o /tmp/pim-manager-responsive .
 
 Open **Azure Resources** and verify:
 
-1. At approximately `80x24`, rows stay one line and long role/scope values end with `...` inside the frame.
+1. At approximately `80x26`, rows stay one line, the footer wraps without overflowing the frame, and long role/scope values end with `...`.
 2. At approximately `160x50`, the frame expands beyond 104 columns, more than 12 assignments are visible when available, and the scope column is wider than the role column.
 3. Scope prefixes render as `MG:`, `Sub:`, and `RG:`.
 

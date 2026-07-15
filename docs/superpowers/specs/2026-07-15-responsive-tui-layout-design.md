@@ -20,7 +20,7 @@ The scope display name remains unchanged. Other scope types retain their current
 
 The application frame uses the terminal width minus the existing outer margin, without the current 104-column maximum. The existing minimum width remains to preserve the one-line layout.
 
-The assignment list uses the available terminal height minus its fixed header, search, status, and footer rows. It retains the existing four-row minimum but removes the current 12-row maximum.
+The assignment list uses the available terminal height minus its fixed content and the actual rendered assignment-footer height. It retains the existing four-row minimum but removes the current 12-row maximum. The minimum supported assignment screen is 80 columns by 26 rows; wrapped footer lines reduce visible assignments instead of overflowing the frame.
 
 `tea.WindowSizeMsg` remains the single resize input. Existing component resizing continues to update text inputs and the summary viewport.
 
@@ -46,5 +46,6 @@ Unit tests cover:
 - Assignment row growth beyond 12 rows in tall terminals.
 - Proportional role and scope column sizing.
 - Live recalculation after `tea.WindowSizeMsg`.
+- Assignment-view height at the minimum supported `80x26` terminal.
 
 A terminal smoke check exercises the assignments screen at narrow and wide window sizes and confirms rows remain within the frame with correct truncation.
