@@ -415,3 +415,26 @@ func TestDisplayScopeUsesCompactAzureScopeLabels(t *testing.T) {
 		})
 	}
 }
+
+func TestWindowResizeUsesAvailableWidthAndHeight(t *testing.T) {
+	model := NewModel(Runtime{})
+	next, _ := model.Update(tea.WindowSizeMsg{Width: 160, Height: 50})
+	model = next.(Model)
+
+	if got, want := model.frameWidth(), 154; got != want {
+		t.Fatalf("expected frame width %d, got %d", want, got)
+	}
+	if got, want := model.assignmentVisibleRows(), 31; got != want {
+		t.Fatalf("expected %d visible assignment rows, got %d", want, got)
+	}
+}
+
+func TestAssignmentColumnsFavorScopeText(t *testing.T) {
+	model := NewModel(Runtime{})
+	next, _ := model.Update(tea.WindowSizeMsg{Width: 160, Height: 30})
+	model = next.(Model)
+
+	if model.scopeColumnWidth() <= model.roleColumnWidth() {
+		t.Fatalf("expected scope column wider than role column, got role=%d scope=%d", model.roleColumnWidth(), model.scopeColumnWidth())
+	}
+}

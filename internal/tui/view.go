@@ -376,7 +376,7 @@ func (m Model) summaryContent() string {
 }
 
 func (m Model) frameWidth() int {
-	return max(42, min(104, m.width-6))
+	return max(42, m.width-6)
 }
 
 func (m Model) contentWidth() int {
@@ -384,7 +384,7 @@ func (m Model) contentWidth() int {
 }
 
 func (m Model) assignmentVisibleRows() int {
-	return max(4, min(12, m.height-19))
+	return max(4, m.height-19)
 }
 
 func (m Model) assignmentWindow(total int) (int, int) {
@@ -400,7 +400,7 @@ func (m Model) assignmentWindow(total int) (int, int) {
 }
 
 func (m Model) roleColumnWidth() int {
-	return max(14, (m.contentWidth()-12)*3/5)
+	return max(14, (m.contentWidth()-12)*2/5)
 }
 
 func (m Model) scopeColumnWidth() int {
