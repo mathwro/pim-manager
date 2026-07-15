@@ -67,9 +67,9 @@ func (m Model) viewAssignments() string {
 		b.WriteString(m.footer([]keyHint{{"esc", "back"}, {"q", "quit"}}))
 		return b.String()
 	}
-	if m.err != nil {
-		b.WriteString(errorStyle.Width(m.contentWidth() - 4).Render("Could not continue\n" + m.err.Error()))
-		b.WriteString("\n\n")
+	if assignmentError := m.assignmentError(); assignmentError != "" {
+		b.WriteString(assignmentError)
+		b.WriteString("\n")
 	}
 
 	searchLabel := "/  Search roles, scopes, and assignment types"
@@ -381,7 +381,11 @@ func (m Model) contentWidth() int {
 
 func (m Model) assignmentVisibleRows() int {
 	footerExtraRows := max(0, lipgloss.Height(m.assignmentFooter())-2)
-	return max(4, m.height-19-footerExtraRows)
+	errorRows := 0
+	if assignmentError := m.assignmentError(); assignmentError != "" {
+		errorRows = lipgloss.Height(assignmentError)
+	}
+	return max(4, m.height-19-footerExtraRows-errorRows)
 }
 
 func (m Model) assignmentWindow(total int) (int, int) {
@@ -409,6 +413,13 @@ func (m Model) assignmentFooter() string {
 		return m.footer([]keyHint{{"type", "filter"}, {"enter", "apply"}, {"esc", "close search"}})
 	}
 	return m.footer([]keyHint{{"space", "select"}, {"a", "select all"}, {"/", "search"}, {"i", "details"}, {"enter", "continue"}, {"esc", "back"}})
+}
+
+func (m Model) assignmentError() string {
+	if m.err == nil {
+		return ""
+	}
+	return errorStyle.Width(m.contentWidth() - 4).Render("Could not continue: " + m.err.Error())
 }
 
 func (m Model) footer(hints []keyHint) string {

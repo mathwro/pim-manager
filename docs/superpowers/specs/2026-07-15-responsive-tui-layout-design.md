@@ -20,7 +20,7 @@ The scope display name remains unchanged. Other scope types retain their current
 
 The application frame uses the terminal width minus the existing outer margin, without the current 104-column maximum. The existing minimum width remains to preserve the one-line layout.
 
-The assignment list uses the available terminal height minus its fixed content and the actual rendered assignment-footer height. It retains the existing four-row minimum but removes the current 12-row maximum. The minimum supported assignment screen is 80 columns by 26 rows; wrapped footer lines reduce visible assignments instead of overflowing the frame.
+The assignment list uses the available terminal height minus its fixed content, the actual rendered assignment-footer height, and any rendered assignment validation error. It retains the existing four-row minimum but removes the current 12-row maximum. The minimum supported assignment screen is 80 columns by 26 rows; wrapped footer or error lines reduce visible assignments instead of overflowing the frame. Validation errors use a compact one-line treatment when their text fits.
 
 `tea.WindowSizeMsg` remains the single resize input. Existing component resizing continues to update text inputs and the summary viewport.
 
@@ -48,6 +48,6 @@ Unit tests cover:
 - Assignment row growth beyond 12 rows in tall terminals.
 - Proportional role and scope column sizing.
 - Live recalculation after `tea.WindowSizeMsg`.
-- Assignment-view height at the minimum supported `80x26` terminal.
+- Assignment-view height at the minimum supported `80x26` terminal, both normally and after the real Enter-with-no-selection validation path.
 
-A terminal smoke check exercises the assignments screen at narrow and wide window sizes and confirms rows remain within the frame with correct truncation.
+A terminal smoke check exercises the assignments screen at narrow and wide window sizes and confirms rows, footer hints, and validation errors remain within the frame with correct truncation.

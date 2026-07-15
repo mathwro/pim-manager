@@ -464,3 +464,34 @@ func TestAssignmentsViewFitsMinimumSupportedTerminal(t *testing.T) {
 		t.Fatalf("expected assignments view height at most %d, got %d", want, got)
 	}
 }
+
+func TestAssignmentsValidationErrorFitsMinimumSupportedTerminal(t *testing.T) {
+	assignments := make([]pim.EligibleAssignment, 20)
+	for index := range assignments {
+		assignments[index] = pim.EligibleAssignment{
+			ID:          "assignment",
+			DisplayName: "Privileged Role Administrator",
+			Scope: pim.Scope{
+				DisplayName: "production-management-group-with-long-name",
+				Type:        pim.ScopeTypeManagementGroup,
+			},
+		}
+	}
+
+	model := NewModel(Runtime{})
+	model.screen = ScreenAssignments
+	model.activeSection = SectionAzureResources
+	model.assignmentList = newAssignmentList(assignments)
+	next, _ := model.Update(tea.WindowSizeMsg{Width: 80, Height: 26})
+	model = next.(Model)
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = next.(Model)
+
+	view := model.View()
+	if want := "select at least one assignment to continue"; !strings.Contains(view, want) {
+		t.Fatalf("expected validation error %q to remain visible, got %q", want, view)
+	}
+	if got, want := lipgloss.Height(view), 26; got > want {
+		t.Fatalf("expected assignments view height at most %d, got %d", want, got)
+	}
+}

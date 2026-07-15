@@ -14,7 +14,7 @@
 - Assignment rows remain one line and truncate overflowing text with an ellipsis.
 - The frame has no maximum width; assignment rows have no maximum visible-row count.
 - Keep the existing frame and row minimums.
-- Support the assignments screen from `80x26` upward; wrapped footer lines reduce visible rows without lowering the four-row minimum.
+- Support the assignments screen from `80x26` upward; wrapped footer and validation-error lines reduce visible rows without lowering the four-row minimum.
 - Give the scope column approximately 60 percent of assignment table width.
 - Do not change providers, domain models, or add dependencies.
 
@@ -124,10 +124,10 @@ git commit -m "feat: abbreviate Azure scope labels"
 - Modify: `internal/tui/view.go:378-408`
 
 **Interfaces:**
-- Consumes: `Model.width`, `Model.height`, `tea.WindowSizeMsg`, the existing `contentWidth()` calculation, and the rendered assignment footer.
-- Produces: `frameWidth() int` without a maximum, footer-aware `assignmentVisibleRows() int` without a maximum, and a role/scope split favoring scope text.
+- Consumes: `Model.width`, `Model.height`, `tea.WindowSizeMsg`, the existing `contentWidth()` calculation, the rendered assignment footer, and the rendered assignment validation error.
+- Produces: `frameWidth() int` without a maximum, footer/error-aware `assignmentVisibleRows() int` without a maximum, and a role/scope split favoring scope text.
 
-- [ ] **Step 1: Write failing resize, column, and minimum-terminal tests**
+- [ ] **Step 1: Write failing resize, column, minimum-terminal, and validation-error tests**
 
 Append to `internal/tui/model_test.go`:
 
@@ -162,7 +162,14 @@ Add `github.com/charmbracelet/lipgloss` to the test imports, then append:
 func TestAssignmentsViewFitsMinimumSupportedTerminal(t *testing.T) {
 	assignments := make([]pim.EligibleAssignment, 20)
 	for index := range assignments {
-		assignments[index] = pim.EligibleAssignment{ID: "assignment", DisplayName: "Global Reader"}
+		assignments[index] = pim.EligibleAssignment{
+			ID:          "assignment",
+			DisplayName: "Privileged Role Administrator",
+			Scope: pim.Scope{
+				DisplayName: "production-management-group-with-long-name",
+				Type:        pim.ScopeTypeManagementGroup,
+			},
+		}
 	}
 
 	model := NewModel(Runtime{})
@@ -178,15 +185,17 @@ func TestAssignmentsViewFitsMinimumSupportedTerminal(t *testing.T) {
 }
 ```
 
+Add a second minimum-terminal regression with the same long role and management-group scope values. Send `tea.KeyEnter` without selecting an assignment, then assert the rendered validation message remains visible and `lipgloss.Height(model.View())` does not exceed 26.
+
 - [ ] **Step 2: Run the tests and verify RED**
 
 Run:
 
 ```bash
-go test ./internal/tui -run 'TestWindowResizeUsesAvailableWidthAndHeight|TestAssignmentColumnsFavorScopeText|TestAssignmentsViewFitsMinimumSupportedTerminal' -count=1
+go test ./internal/tui -run 'TestWindowResizeUsesAvailableWidthAndHeight|TestAssignmentColumnsFavorScopeText|TestAssignmentsViewFitsMinimumSupportedTerminal|TestAssignmentsValidationErrorFitsMinimumSupportedTerminal' -count=1
 ```
 
-Expected: FAIL with frame width `104`, the role column wider than the scope column, and the `80x26` rendered view exceeding 26 rows.
+Expected: FAIL with frame width `104`, the role column wider than the scope column, or an `80x26` rendered view exceeding 26 rows. The validation regression must fail specifically because the real Enter-with-no-selection error overflows the view.
 
 - [ ] **Step 3: Remove width and height caps and rebalance columns**
 
@@ -199,7 +208,11 @@ func (m Model) frameWidth() int {
 
 func (m Model) assignmentVisibleRows() int {
 	footerExtraRows := max(0, lipgloss.Height(m.assignmentFooter())-2)
-	return max(4, m.height-19-footerExtraRows)
+	errorRows := 0
+	if assignmentError := m.assignmentError(); assignmentError != "" {
+		errorRows = lipgloss.Height(assignmentError)
+	}
+	return max(4, m.height-19-footerExtraRows-errorRows)
 }
 
 func (m Model) roleColumnWidth() int {
@@ -215,7 +228,7 @@ func (m Model) scopeColumnWidth() int {
 }
 ```
 
-Use one footer source for rendering and sizing. Replace the assignment screen's normal/search footer branches with `b.WriteString(m.assignmentFooter())`, then add:
+Use one footer source and one validation-error source for both rendering and sizing. Render the compact error immediately before the search field, and render the footer with `b.WriteString(m.assignmentFooter())`.
 
 ```go
 func (m Model) assignmentFooter() string {
@@ -224,7 +237,16 @@ func (m Model) assignmentFooter() string {
 	}
 	return m.footer([]keyHint{{"space", "select"}, {"a", "select all"}, {"/", "search"}, {"i", "details"}, {"enter", "continue"}, {"esc", "back"}})
 }
+
+func (m Model) assignmentError() string {
+	if m.err == nil {
+		return ""
+	}
+	return errorStyle.Width(m.contentWidth() - 4).Render("Could not continue: " + m.err.Error())
+}
 ```
+
+`assignmentVisibleRows()` conditionally measures this exact string so an absent error costs no rows and a rendered error reduces the list before the four-row minimum applies.
 
 - [ ] **Step 4: Format and run focused tests**
 
@@ -232,7 +254,7 @@ Run:
 
 ```bash
 gofmt -w internal/tui/model_test.go internal/tui/view.go
-go test ./internal/tui -run 'TestWindowResizeUsesAvailableWidthAndHeight|TestAssignmentColumnsFavorScopeText|TestAssignmentsViewFitsMinimumSupportedTerminal' -count=1
+go test ./internal/tui -run 'TestWindowResizeUsesAvailableWidthAndHeight|TestAssignmentColumnsFavorScopeText|TestAssignmentsViewFitsMinimumSupportedTerminal|TestAssignmentsValidationErrorFitsMinimumSupportedTerminal' -count=1
 ```
 
 Expected: PASS.
@@ -259,7 +281,7 @@ go build -o /tmp/pim-manager-responsive .
 
 Open **Azure Resources** and verify:
 
-1. At approximately `80x26`, rows stay one line, the footer wraps without overflowing the frame, and long role/scope values end with `...`.
+1. At approximately `80x26`, rows stay one line, the footer and Enter-with-no-selection validation error remain visible without overflowing the frame, and long role/scope values end with `...`.
 2. At approximately `160x50`, the frame expands beyond 104 columns, more than 12 assignments are visible when available, and the scope column is wider than the role column.
 3. Scope prefixes render as `MG:`, `Sub:`, and `RG:`.
 
