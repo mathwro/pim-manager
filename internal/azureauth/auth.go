@@ -2,6 +2,7 @@ package azureauth
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -79,6 +80,23 @@ func (c CLI) PrincipalID(ctx context.Context) (string, error) {
 		return "", errors.New("Azure CLI returned empty signed-in user principal ID")
 	}
 	return principalID, nil
+}
+
+const mfaClaimsRequest = `{"access_token":{"amr":{"essential":true,"values":["mfa"]}}}`
+
+func MFALoginCommand(tenantID string) (*exec.Cmd, error) {
+	tenantID = strings.TrimSpace(tenantID)
+	if tenantID == "" {
+		return nil, errors.New("Azure tenant ID is required for MFA authentication")
+	}
+	claims := base64.StdEncoding.EncodeToString([]byte(mfaClaimsRequest))
+	return exec.Command(
+		"az", "login",
+		"--tenant", tenantID,
+		"--scope", "https://management.core.windows.net//.default",
+		"--claims-challenge", claims,
+		"--output", "none",
+	), nil
 }
 
 func execCommand(ctx context.Context, name string, args ...string) ([]byte, error) {

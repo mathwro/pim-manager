@@ -2,7 +2,9 @@ package azureauth
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -78,6 +80,30 @@ func TestAccessTokenUsesRequestedResource(t *testing.T) {
 	}
 	if token != "abc" {
 		t.Fatalf("expected token abc, got %q", token)
+	}
+}
+
+func TestMFALoginCommandUsesTenantARMAndMFAClaim(t *testing.T) {
+	command, err := MFALoginCommand(" tenant-1 ")
+	if err != nil {
+		t.Fatalf("MFALoginCommand returned error: %v", err)
+	}
+	claims := base64.StdEncoding.EncodeToString([]byte(`{"access_token":{"amr":{"essential":true,"values":["mfa"]}}}`))
+	want := []string{
+		"az", "login",
+		"--tenant", "tenant-1",
+		"--scope", "https://management.core.windows.net//.default",
+		"--claims-challenge", claims,
+		"--output", "none",
+	}
+	if !reflect.DeepEqual(command.Args, want) {
+		t.Fatalf("expected args %#v, got %#v", want, command.Args)
+	}
+}
+
+func TestMFALoginCommandRejectsMissingTenant(t *testing.T) {
+	if _, err := MFALoginCommand("  "); err == nil {
+		t.Fatal("expected missing tenant error")
 	}
 }
 
