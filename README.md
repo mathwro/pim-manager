@@ -6,6 +6,20 @@
 
 Running `pim-manager` opens an interactive Bubble Tea TUI. Azure Resources is active for eligible Azure RBAC assignments across management groups, subscriptions, and resource groups. Entra Roles and Groups are shown as paused until Azure CLI can obtain their required Microsoft Graph PIM permissions.
 
+## Installation
+
+Install the latest version directly from the Go module repository:
+
+```bash
+go install github.com/mathwro/pim-manager@latest
+```
+
+`go install` downloads the source, builds the CLI, and writes the `pim-manager` executable to `GOBIN`. If `GOBIN` is unset, Go uses `$(go env GOPATH)/bin` (normally `~/go/bin`). Ensure that directory is on your `PATH`, then start the TUI:
+
+```bash
+pim-manager
+```
+
 ## Authentication
 
 The app uses your existing Azure CLI session. Sign in before running:
