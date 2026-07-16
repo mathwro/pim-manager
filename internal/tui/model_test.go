@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -240,6 +241,81 @@ func TestSelectedFocusedAssignmentKeepsContinuousHighlight(t *testing.T) {
 		if strings.Contains(line, "Contributor") && strings.Contains(line, "[✓]\x1b[0m") {
 			t.Fatalf("selected marker reset the focused-row highlight: %q", line)
 		}
+	}
+}
+
+func TestAssignmentsViewShowsActiveStateAndCount(t *testing.T) {
+	until := time.Date(2026, 7, 16, 18, 0, 0, 0, time.UTC)
+	model := NewModel(Runtime{})
+	model.screen = ScreenAssignments
+	model.activeSection = SectionAzureResources
+	model.assignmentList = newAssignmentList([]pim.EligibleAssignment{
+		{ID: "available", DisplayName: "Contributor"},
+		{ID: "active", DisplayName: "Owner", Active: true, ActiveUntil: &until},
+	})
+
+	view := model.View()
+	if !strings.Contains(view, "STATE") || !strings.Contains(view, "[ACTIVE]") || !strings.Contains(view, "1 active") {
+		t.Fatalf("expected active assignment state, got %q", view)
+	}
+
+	model.listCursor = 1
+	model.screen = ScreenDetails
+	view = model.View()
+	if !strings.Contains(view, "Active") || !strings.Contains(view, "2026-07-16") {
+		t.Fatalf("expected active details and expiry, got %q", view)
+	}
+}
+
+func TestActiveAssignmentStaysFocusableButCannotBeSelectedThroughUpdate(t *testing.T) {
+	until := time.Date(2026, 7, 16, 18, 0, 0, 0, time.UTC)
+	model := NewModel(Runtime{})
+	model.screen = ScreenAssignments
+	model.activeSection = SectionAzureResources
+	model.assignmentList = newAssignmentList([]pim.EligibleAssignment{
+		{ID: "available", DisplayName: "Contributor"},
+		{ID: "active", DisplayName: "Owner", Active: true, ActiveUntil: &until},
+	})
+
+	next, _ := model.Update(tea.KeyMsg{Type: tea.KeyDown})
+	model = next.(Model)
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeySpace})
+	model = next.(Model)
+	if model.listCursor != 1 || len(model.assignmentList.selected()) != 0 {
+		t.Fatalf("expected active row to retain focus without selection, cursor=%d selected=%#v", model.listCursor, model.assignmentList.selected())
+	}
+
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'i'}})
+	model = next.(Model)
+	if model.screen != ScreenDetails || !strings.Contains(model.View(), "2026-07-16") {
+		t.Fatalf("expected focused active row details, screen=%s view=%q", model.screen, model.View())
+	}
+}
+
+func TestActiveFocusedAssignmentKeepsContinuousHighlight(t *testing.T) {
+	previousProfile := lipgloss.ColorProfile()
+	previousDarkBackground := lipgloss.HasDarkBackground()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	lipgloss.SetHasDarkBackground(true)
+	defer lipgloss.SetColorProfile(previousProfile)
+	defer lipgloss.SetHasDarkBackground(previousDarkBackground)
+
+	model := NewModel(Runtime{})
+	model.screen = ScreenAssignments
+	model.activeSection = SectionAzureResources
+	model.assignmentList = newAssignmentList([]pim.EligibleAssignment{{ID: "active", DisplayName: "Owner", Active: true}})
+
+	found := false
+	for line := range strings.SplitSeq(model.View(), "\n") {
+		if strings.Contains(line, "[ACTIVE]") {
+			found = true
+			if strings.Contains(line, "[ACTIVE]\x1b[0m") {
+				t.Fatalf("active marker reset the focused-row highlight: %q", line)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("expected focused active assignment marker")
 	}
 }
 
@@ -489,6 +565,7 @@ func TestAssignmentsViewFitsMinimumSupportedTerminal(t *testing.T) {
 			},
 		}
 	}
+	assignments[0].Active = true
 
 	model := NewModel(Runtime{})
 	model.screen = ScreenAssignments
@@ -497,8 +574,14 @@ func TestAssignmentsViewFitsMinimumSupportedTerminal(t *testing.T) {
 	next, _ := model.Update(tea.WindowSizeMsg{Width: 80, Height: 26})
 	model = next.(Model)
 
-	if got, want := lipgloss.Height(model.View()), 26; got > want {
+	view := model.View()
+	if got, want := lipgloss.Height(view), 26; got > want {
 		t.Fatalf("expected assignments view height at most %d, got %d", want, got)
+	}
+	for _, line := range strings.Split(view, "\n") {
+		if width := lipgloss.Width(line); width > 80 {
+			t.Fatalf("expected line width at most 80, got %d for %q", width, line)
+		}
 	}
 }
 
@@ -561,17 +644,20 @@ func TestNewModelPausesGraphPIMSections(t *testing.T) {
 	}
 }
 
-func TestToggleAllFilteredSkipsActiveAssignments(t *testing.T) {
+func TestToggleAllFilteredSkipsActiveAssignmentsThroughUpdate(t *testing.T) {
 	model := NewModel(Runtime{})
+	model.screen = ScreenAssignments
 	model.assignmentList = newAssignmentList([]pim.EligibleAssignment{
 		{ID: "inactive", DisplayName: "Contributor"},
 		{ID: "active", DisplayName: "Owner", Active: true},
 	})
+	model.listCursor = 1
 
-	model.toggleAllFiltered()
+	next, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	model = next.(Model)
 
 	selected := model.assignmentList.selected()
-	if len(selected) != 1 || selected[0].ID != "inactive" {
-		t.Fatalf("expected select-all to skip active assignment, got %#v", selected)
+	if len(selected) != 1 || selected[0].ID != "inactive" || model.listCursor != 1 {
+		t.Fatalf("expected select-all to skip active assignment and retain focus, cursor=%d selected=%#v", model.listCursor, selected)
 	}
 }

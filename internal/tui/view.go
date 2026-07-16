@@ -84,7 +84,17 @@ func (m Model) viewAssignments() string {
 	b.WriteString(fieldStyle.Width(m.contentWidth() - 4).Render(searchLabel))
 	b.WriteString("\n")
 	selectedCount := len(m.assignmentList.selected())
-	b.WriteString(fmt.Sprintf("%s  %s\n\n", accentStyle.Render(fmt.Sprintf("%d selected", selectedCount)), mutedStyle.Render(fmt.Sprintf("%d eligible", len(m.assignmentList.items)))))
+	activeCount := 0
+	for _, assignment := range m.assignmentList.items {
+		if assignment.Active {
+			activeCount++
+		}
+	}
+	b.WriteString(fmt.Sprintf("%s  %s  %s\n\n",
+		accentStyle.Render(fmt.Sprintf("%d selected", selectedCount)),
+		mutedStyle.Render(fmt.Sprintf("%d eligible", len(m.assignmentList.items))),
+		successStyle.Render(fmt.Sprintf("%d active", activeCount)),
+	))
 
 	filtered := m.assignmentList.filtered(m.query)
 	if len(filtered) == 0 {
@@ -95,7 +105,7 @@ func (m Model) viewAssignments() string {
 		b.WriteString(panelStyle.Width(m.contentWidth() - 6).Render(message + "\n" + mutedStyle.Render("Clear the search or retry discovery.")))
 	} else {
 		start, end := m.assignmentWindow(len(filtered))
-		b.WriteString(mutedStyle.Render(fmt.Sprintf("    ROLE%sSCOPE", strings.Repeat(" ", max(2, m.roleColumnWidth()-4)))))
+		b.WriteString(mutedStyle.Render(fmt.Sprintf("  %-9s%-*s  %s", "STATE", m.roleColumnWidth(), "ROLE", "SCOPE")))
 		b.WriteString("\n")
 		for index := start; index < end; index++ {
 			assignment := filtered[index]
@@ -103,15 +113,19 @@ func (m Model) viewAssignments() string {
 			if index == m.listCursor {
 				cursor = "> "
 			}
-			check := "[ ]"
-			if m.assignmentList.selectedIDs[assignment.ID] {
-				check = "[✓]"
+			state := "[ ]"
+			if assignment.Active {
+				state = "[ACTIVE]"
+			} else if m.assignmentList.selectedIDs[assignment.ID] {
+				state = "[✓]"
 			}
 			role := truncateText(displayName(assignment), m.roleColumnWidth())
 			scope := truncateText(displayScope(assignment), m.scopeColumnWidth())
-			row := fmt.Sprintf("%s%s %-*s  %s", cursor, check, m.roleColumnWidth(), role, scope)
+			row := fmt.Sprintf("%s%-9s%-*s  %s", cursor, state, m.roleColumnWidth(), role, scope)
 			if index == m.listCursor {
 				row = activeCardStyle.Width(m.contentWidth() - 4).Render(row)
+			} else if assignment.Active {
+				row = successStyle.Render(row)
 			}
 			b.WriteString(row)
 			b.WriteString("\n")
@@ -140,7 +154,23 @@ func (m Model) viewDetails() string {
 	b.WriteString("\n")
 	b.WriteString(mutedStyle.Render(displayScope(assignment)))
 	b.WriteString("\n\n")
+	status := "Available"
+	activeUntil := ""
+	if assignment.Active {
+		status = "Active"
+		if assignment.ActiveUntil != nil {
+			activeUntil = assignment.ActiveUntil.Local().Format("2006-01-02 15:04 MST")
+		}
+	}
+	justification := "Optional"
+	if assignment.ActivationPolicy.JustificationRequired {
+		justification = "Required"
+	}
 	rows := [][2]string{
+		{"Status", status},
+		{"Active until", activeUntil},
+		{"Maximum duration", assignment.ActivationPolicy.MaximumDurationISO},
+		{"Justification", justification},
 		{"Source", string(assignment.Source)},
 		{"Assignment type", string(assignment.Kind)},
 		{"Scope type", string(assignment.Scope.Type)},
@@ -407,7 +437,7 @@ func (m Model) roleColumnWidth() int {
 }
 
 func (m Model) scopeColumnWidth() int {
-	return max(10, m.contentWidth()-m.roleColumnWidth()-14)
+	return max(10, m.contentWidth()-m.roleColumnWidth()-19)
 }
 
 func (m Model) assignmentFooter() string {
