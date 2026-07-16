@@ -84,15 +84,18 @@ func (m Model) viewAssignments() string {
 	b.WriteString(fieldStyle.Width(m.contentWidth() - 4).Render(searchLabel))
 	b.WriteString("\n")
 	selectedCount := len(m.assignmentList.selected())
+	selectableCount := 0
 	activeCount := 0
 	for _, assignment := range m.assignmentList.items {
 		if assignment.Active {
 			activeCount++
+		} else {
+			selectableCount++
 		}
 	}
 	b.WriteString(fmt.Sprintf("%s  %s  %s\n\n",
 		accentStyle.Render(fmt.Sprintf("%d selected", selectedCount)),
-		mutedStyle.Render(fmt.Sprintf("%d eligible", len(m.assignmentList.items))),
+		mutedStyle.Render(fmt.Sprintf("%d selectable", selectableCount)),
 		successStyle.Render(fmt.Sprintf("%d active", activeCount)),
 	))
 

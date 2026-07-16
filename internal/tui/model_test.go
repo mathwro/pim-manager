@@ -245,6 +245,10 @@ func TestSelectedFocusedAssignmentKeepsContinuousHighlight(t *testing.T) {
 }
 
 func TestAssignmentsViewShowsActiveStateAndCount(t *testing.T) {
+	previousLocal := time.Local
+	time.Local = time.FixedZone("TASK3", 8*60*60)
+	defer func() { time.Local = previousLocal }()
+
 	until := time.Date(2026, 7, 16, 18, 0, 0, 0, time.UTC)
 	model := NewModel(Runtime{})
 	model.screen = ScreenAssignments
@@ -255,19 +259,32 @@ func TestAssignmentsViewShowsActiveStateAndCount(t *testing.T) {
 	})
 
 	view := model.View()
-	if !strings.Contains(view, "STATE") || !strings.Contains(view, "[ACTIVE]") || !strings.Contains(view, "1 active") {
-		t.Fatalf("expected active assignment state, got %q", view)
+	for _, want := range []string{"STATE", "[ACTIVE]", "0 selected", "1 selectable", "1 active"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("expected %q in active assignment view, got %q", want, view)
+		}
 	}
 
 	model.listCursor = 1
 	model.screen = ScreenDetails
 	view = model.View()
-	if !strings.Contains(view, "Active") || !strings.Contains(view, "2026-07-16") {
-		t.Fatalf("expected active details and expiry, got %q", view)
+	foundExpiry := false
+	for _, line := range strings.Split(view, "\n") {
+		if strings.Contains(line, "Active until") && strings.Contains(line, "2026-07-17 02:00 TASK3") {
+			foundExpiry = true
+			break
+		}
+	}
+	if !strings.Contains(view, "Active") || !foundExpiry {
+		t.Fatalf("expected active details and local expiry row, got %q", view)
 	}
 }
 
 func TestActiveAssignmentStaysFocusableButCannotBeSelectedThroughUpdate(t *testing.T) {
+	previousLocal := time.Local
+	time.Local = time.FixedZone("TASK3", 8*60*60)
+	defer func() { time.Local = previousLocal }()
+
 	until := time.Date(2026, 7, 16, 18, 0, 0, 0, time.UTC)
 	model := NewModel(Runtime{})
 	model.screen = ScreenAssignments
@@ -287,8 +304,24 @@ func TestActiveAssignmentStaysFocusableButCannotBeSelectedThroughUpdate(t *testi
 
 	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'i'}})
 	model = next.(Model)
-	if model.screen != ScreenDetails || !strings.Contains(model.View(), "2026-07-16") {
-		t.Fatalf("expected focused active row details, screen=%s view=%q", model.screen, model.View())
+	view := model.View()
+	if model.screen != ScreenDetails || !strings.Contains(view, "Active until") || !strings.Contains(view, "2026-07-17 02:00 TASK3") {
+		t.Fatalf("expected focused active row details, screen=%s view=%q", model.screen, view)
+	}
+}
+
+func TestActiveAssignmentDetailsOmitMissingExpiry(t *testing.T) {
+	model := NewModel(Runtime{})
+	model.screen = ScreenDetails
+	model.activeSection = SectionAzureResources
+	model.assignmentList = newAssignmentList([]pim.EligibleAssignment{{ID: "active", DisplayName: "Owner", Active: true}})
+
+	view := model.View()
+	if !strings.Contains(view, "Status") || !strings.Contains(view, "Active") {
+		t.Fatalf("expected active status, got %q", view)
+	}
+	if strings.Contains(view, "Active until") {
+		t.Fatalf("expected missing active expiry to be omitted, got %q", view)
 	}
 }
 
