@@ -220,7 +220,11 @@ func (m Model) viewActivation() string {
 	b.WriteString("\n")
 	b.WriteString(justificationStyle.Width(m.contentWidth() - 4).Render(m.justification.View()))
 	b.WriteString("\n")
-	b.WriteString(mutedStyle.Render(justificationHelp))
+	if m.err != nil {
+		b.WriteString(errorStyle.Render(m.err.Error()))
+	} else {
+		b.WriteString(mutedStyle.Render(justificationHelp))
+	}
 	b.WriteString("\n\n")
 	b.WriteString(violetStyle.Render("Durations"))
 	b.WriteString("\n")
@@ -241,10 +245,6 @@ func (m Model) viewActivation() string {
 		b.WriteString(mutedStyle.Render(fmt.Sprintf("  Showing %d-%d of %d durations", start+1, end, len(selected))))
 		b.WriteString("\n")
 	}
-	if m.err != nil {
-		b.WriteString("\n")
-		b.WriteString(errorStyle.Render(m.err.Error()))
-	}
 	b.WriteString(m.footer([]keyHint{{"tab", "switch field"}, {"enter", "next / review"}, {"esc", "back"}}))
 	return b.String()
 }
@@ -258,12 +258,17 @@ func (m Model) viewConfirmation() string {
 	selected := m.assignmentList.selected()
 	b.WriteString(accentStyle.Render(fmt.Sprintf("%d assignments", len(selected))))
 	b.WriteString("\n")
-	limit := min(len(selected), 6)
-	for index := range limit {
-		b.WriteString(fmt.Sprintf("  - %s  %s  %s\n", displayName(selected[index]), accentStyle.Render(m.form.durations[selected[index].ID]), mutedStyle.Render(displayScope(selected[index]))))
+	start, end := m.activationDurationWindow(len(selected))
+	for index := start; index < end; index++ {
+		marker := "  "
+		if index == m.durationIndex {
+			marker = "> "
+		}
+		b.WriteString(fmt.Sprintf("%s%s  %s  %s\n", marker, displayName(selected[index]), accentStyle.Render(m.form.durations[selected[index].ID]), mutedStyle.Render(displayScope(selected[index]))))
 	}
-	if len(selected) > limit {
-		b.WriteString(mutedStyle.Render(fmt.Sprintf("  ...and %d more\n", len(selected)-limit)))
+	if start > 0 || end < len(selected) {
+		b.WriteString(mutedStyle.Render(fmt.Sprintf("  Showing %d-%d of %d assignments", start+1, end, len(selected))))
+		b.WriteString("\n")
 	}
 	justification := strings.TrimSpace(m.form.justification)
 	if justification == "" {
@@ -275,7 +280,7 @@ func (m Model) viewConfirmation() string {
 	))
 	b.WriteString("\n\n")
 	b.WriteString(warningStyle.Render("Activation requests are submitted immediately and are never retried automatically."))
-	b.WriteString(m.footer([]keyHint{{"enter", "activate"}, {"e", "edit request"}, {"esc", "back"}}))
+	b.WriteString(m.footer([]keyHint{{"up/down", "review"}, {"enter", "activate"}, {"e", "edit request"}, {"esc", "back"}}))
 	return b.String()
 }
 

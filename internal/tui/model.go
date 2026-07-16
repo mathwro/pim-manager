@@ -404,6 +404,10 @@ func (m Model) updateConfirmation(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case tea.KeyEsc:
 		m.screen = ScreenActivation
 		return m.focusDuration(m.durationIndex)
+	case tea.KeyUp:
+		m.durationIndex = max(0, m.durationIndex-1)
+	case tea.KeyDown:
+		m.durationIndex = min(max(0, len(m.assignmentList.selected())-1), m.durationIndex+1)
 	case tea.KeyEnter:
 		selected := m.assignmentList.selected()
 		if len(selected) == 0 {
@@ -416,7 +420,12 @@ func (m Model) updateConfirmation(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.err = nil
 		return m, tea.Batch(m.activateSelected(selected), m.spinner.Tick)
 	case tea.KeyRunes:
-		if string(key.Runes) == "e" {
+		switch string(key.Runes) {
+		case "k":
+			m.durationIndex = max(0, m.durationIndex-1)
+		case "j":
+			m.durationIndex = min(max(0, len(m.assignmentList.selected())-1), m.durationIndex+1)
+		case "e":
 			m.screen = ScreenActivation
 			return m.focusJustification()
 		}
@@ -466,6 +475,7 @@ func (m Model) beginDiscovery(section Section) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) openActivationForm() (tea.Model, tea.Cmd) {
+	m.formField = formFieldJustification
 	m.prepareActivationForm()
 	m.screen = ScreenActivation
 	m.err = nil

@@ -215,6 +215,7 @@ func TestActivationFormDefaultsAndSubmitsPerAssignmentDurations(t *testing.T) {
 		discoveries: [][]pim.EligibleAssignment{{
 			{ID: "one", DisplayName: "Contributor", ActivationPolicy: pim.ActivationPolicy{MaximumDurationISO: "PT8H"}},
 			{ID: "two", DisplayName: "Owner", ActivationPolicy: pim.ActivationPolicy{MaximumDurationISO: "PT4H"}},
+			{ID: "three", DisplayName: "Reader", ActivationPolicy: pim.ActivationPolicy{MaximumDurationISO: "PT2H"}},
 		}},
 		results: []pim.ActivationResult{
 			{Status: pim.ActivationStatusActivated},
@@ -231,19 +232,61 @@ func TestActivationFormDefaultsAndSubmitsPerAssignmentDurations(t *testing.T) {
 	model = next.(Model)
 	next, _ = model.Update(tea.KeyMsg{Type: tea.KeySpace})
 	model = next.(Model)
-	next, cmd = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = sendRunes(next.(Model), "Need access")
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	model = next.(Model)
-	_ = cmd
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyCtrlU})
+	model = sendRunes(next.(Model), "PT7H")
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = next.(Model)
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyCtrlU})
+	model = sendRunes(next.(Model), "PT3H")
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	model = next.(Model)
 
-	if model.form.durations["one"] != "PT8H" || model.form.durations["two"] != "PT4H" {
-		t.Fatalf("unexpected duration defaults: %#v", model.form.durations)
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeySpace})
+	model = next.(Model)
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyDown})
+	model = next.(Model)
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeySpace})
+	model = next.(Model)
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = next.(Model)
+	if model.form.durations["one"] != "PT7H" || model.form.durations["three"] != "PT2H" {
+		t.Fatalf("expected per-ID edit and policy default after changing selection, got %#v", model.form.durations)
 	}
-	model.form.durations["one"] = "PT6H"
-	msg := model.activateSelected(model.assignmentList.selected())()
-	next, _ = model.Update(msg)
-	model = next.(Model)
 
-	if len(provider.activated) != 2 || provider.activated[0].DurationISO != "PT6H" || provider.activated[1].DurationISO != "PT4H" {
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = next.(Model)
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = next.(Model)
+	if model.duration.Value() != "PT2H" {
+		t.Fatalf("expected Reader policy default, got %q", model.duration.Value())
+	}
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyCtrlU})
+	model = sendRunes(next.(Model), "PT1H")
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = next.(Model)
+	if model.screen != ScreenConfirmation {
+		t.Fatalf("expected confirmation, got %s with error %v", model.screen, model.err)
+	}
+	view := model.View()
+	for _, want := range []string{"Contributor", "PT7H", "Reader", "PT1H", "Need access"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("expected confirmation to contain %q, got %q", want, view)
+		}
+	}
+
+	next, cmd = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = runCommand(next.(Model), cmd)
+	if model.screen != ScreenSummary {
+		t.Fatalf("expected summary, got %s", model.screen)
+	}
+	if len(provider.activated) != 2 ||
+		provider.activated[0].Assignment.ID != "one" || provider.activated[0].DurationISO != "PT7H" ||
+		provider.activated[1].Assignment.ID != "three" || provider.activated[1].DurationISO != "PT1H" ||
+		provider.activated[0].Justification != "Need access" || provider.activated[1].Justification != "Need access" {
 		t.Fatalf("unexpected activation requests: %#v", provider.activated)
 	}
 }
@@ -377,6 +420,106 @@ func TestActivationViewFitsMinimumTerminalWithPerAssignmentDurations(t *testing.
 	}
 	if !strings.Contains(view, "Role 6") || !strings.Contains(view, "Showing") {
 		t.Fatalf("expected focused final duration and range, got %q", view)
+	}
+}
+
+func TestConfirmationViewScrollsEveryDurationAtMinimumTerminal(t *testing.T) {
+	assignments := make([]pim.EligibleAssignment, 8)
+	for index := range assignments {
+		assignments[index] = pim.EligibleAssignment{
+			ID:               fmt.Sprintf("assignment-%d", index),
+			DisplayName:      fmt.Sprintf("Role %d", index+1),
+			ActivationPolicy: pim.ActivationPolicy{MaximumDurationISO: fmt.Sprintf("PT%dH", index+1)},
+		}
+	}
+	model := NewModel(Runtime{})
+	model.screen = ScreenAssignments
+	model.assignmentList = newAssignmentList(assignments)
+	for _, assignment := range assignments {
+		model.assignmentList.toggle(assignment.ID)
+	}
+	model.prepareActivationForm()
+	model.screen = ScreenConfirmation
+	model.durationIndex = 0
+	next, _ := model.Update(tea.WindowSizeMsg{Width: 80, Height: 26})
+	model = next.(Model)
+
+	initial := model.View()
+	if !strings.Contains(initial, "Role 1") || strings.Contains(initial, "Role 8") || !strings.Contains(initial, "Showing") {
+		t.Fatalf("expected first confirmation window, got %q", initial)
+	}
+	for range 7 {
+		next, _ = model.Update(tea.KeyMsg{Type: tea.KeyDown})
+		model = next.(Model)
+	}
+	view := model.View()
+	if !strings.Contains(view, "Role 8") || strings.Contains(view, "Role 1") || !strings.Contains(view, "PT8H") {
+		t.Fatalf("expected navigated final confirmation duration, got %q", view)
+	}
+	if height := lipgloss.Height(view); height > 26 {
+		t.Fatalf("expected height at most 26, got %d for %q", height, view)
+	}
+	for _, line := range strings.Split(view, "\n") {
+		if width := lipgloss.Width(line); width > 80 {
+			t.Fatalf("expected line width at most 80, got %d for %q", width, line)
+		}
+	}
+}
+
+func TestActivationValidationErrorsFitMinimumTerminal(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		required bool
+		missing  bool
+		want     string
+	}{
+		{name: "required justification", required: true, want: "justification is required"},
+		{name: "missing duration", missing: true, want: "duration is required for Role 6"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			assignments := make([]pim.EligibleAssignment, 6)
+			for index := range assignments {
+				maximum := "PT4H"
+				if test.missing && index == len(assignments)-1 {
+					maximum = ""
+				}
+				assignments[index] = pim.EligibleAssignment{
+					ID:          fmt.Sprintf("assignment-%d", index),
+					DisplayName: fmt.Sprintf("Role %d", index+1),
+					ActivationPolicy: pim.ActivationPolicy{
+						MaximumDurationISO:    maximum,
+						JustificationRequired: test.required && index == 0,
+					},
+				}
+			}
+			model := NewModel(Runtime{})
+			model.screen = ScreenAssignments
+			model.assignmentList = newAssignmentList(assignments)
+			for _, assignment := range assignments {
+				model.assignmentList.toggle(assignment.ID)
+			}
+			next, _ := model.openActivationForm()
+			model = next.(Model)
+			next, _ = model.focusDuration(len(assignments) - 1)
+			model = next.(Model)
+			next, _ = model.Update(tea.WindowSizeMsg{Width: 80, Height: 26})
+			model = next.(Model)
+			next, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+			model = next.(Model)
+
+			view := model.View()
+			if !strings.Contains(view, test.want) {
+				t.Fatalf("expected %q, got %q", test.want, view)
+			}
+			if height := lipgloss.Height(view); height > 26 {
+				t.Fatalf("expected height at most 26, got %d for %q", height, view)
+			}
+			for _, line := range strings.Split(view, "\n") {
+				if width := lipgloss.Width(line); width > 80 {
+					t.Fatalf("expected line width at most 80, got %d for %q", width, line)
+				}
+			}
+		})
 	}
 }
 
@@ -548,7 +691,8 @@ func TestModelShowsDiscoveryErrorWithoutLeavingTUI(t *testing.T) {
 func TestModelMarksRetryableProviderFailuresAndShowsRetryAction(t *testing.T) {
 	provider := &scriptedProvider{
 		discoveries: [][]pim.EligibleAssignment{{{ID: "one", DisplayName: "Global Reader", ActivationPolicy: pim.ActivationPolicy{MaximumDurationISO: "PT2H"}}}},
-		activateErr: []error{activation.NewRetryableError(errors.New("temporary Azure error"))},
+		activateErr: []error{activation.NewRetryableError(errors.New("temporary Azure error")), nil},
+		results:     []pim.ActivationResult{{Status: pim.ActivationStatusActivated}},
 	}
 	model := NewModel(Runtime{AzureResources: provider})
 
@@ -566,12 +710,29 @@ func TestModelMarksRetryableProviderFailuresAndShowsRetryAction(t *testing.T) {
 	next, cmd = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	model = runCommand(next.(Model), cmd)
 
-	if len(model.summary.retryableFailures()) != 1 {
-		t.Fatalf("expected one retryable failure, got %#v", model.summary.failed)
+	if len(model.summary.retryableFailures()) != 1 || len(provider.activated) != 1 {
+		t.Fatalf("expected one failure without automatic retry, got results %#v requests %#v", model.summary.results, provider.activated)
+	}
+	first := provider.activated[0]
+	if first.Assignment.ID != "one" || first.DurationISO != "PT2H" || first.Justification != "Need access" {
+		t.Fatalf("unexpected first request: %#v", first)
 	}
 	view := model.View()
 	if !strings.Contains(view, "1 failed") || !strings.Contains(view, "retry failures") {
 		t.Fatalf("expected retryable summary action, got %q", view)
+	}
+
+	next, cmd = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	model = runCommand(next.(Model), cmd)
+	if len(provider.activated) != 2 {
+		t.Fatalf("expected one explicit retry, got %#v", provider.activated)
+	}
+	second := provider.activated[1]
+	if second.Assignment.ID != first.Assignment.ID || second.DurationISO != first.DurationISO || second.Justification != first.Justification {
+		t.Fatalf("expected retry to preserve request values, first %#v second %#v", first, second)
+	}
+	if len(model.summary.activated) != 1 || len(model.summary.failed) != 0 {
+		t.Fatalf("expected successful retry summary, got %#v", model.summary)
 	}
 }
 
