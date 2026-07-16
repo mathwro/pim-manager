@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -98,6 +99,9 @@ func TestStepUpLoginCommandUsesTenantARMAndMFAClaim(t *testing.T) {
 	}
 	if !reflect.DeepEqual(command.Args, want) {
 		t.Fatalf("expected args %#v, got %#v", want, command.Args)
+	}
+	if !slices.Contains(command.Env, "AZURE_CORE_LOGIN_EXPERIENCE_V2=off") {
+		t.Fatalf("expected subscription selector disabled for child login, env=%#v", command.Env)
 	}
 }
 

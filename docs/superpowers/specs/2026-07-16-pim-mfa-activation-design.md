@@ -54,6 +54,8 @@ az login --tenant <tenant-id> --scope https://management.core.windows.net//.defa
 
 Standard MFA uses `{"access_token":{"amr":{"essential":true,"values":["mfa"]}}}`. An authentication context such as `c1` uses `{"access_token":{"acrs":{"essential":true,"value":"c1"}}}`. When selected assignments require both, both claims are included in one request. The claims request is standard-base64 encoded for Azure CLI, and Bubble Tea runs the command as an interactive external process.
 
+The child process sets `AZURE_CORE_LOGIN_EXPERIENCE_V2=off`, disabling Azure CLI's post-login subscription selector only for step-up authentication without changing the user's global CLI configuration.
+
 The command does not log out first. Successful authentication refreshes Azure CLI's cached token for `https://management.core.windows.net/`, and ARM requests retrieve that same resource token before calling `https://management.azure.com`.
 
 ## Components
