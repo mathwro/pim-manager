@@ -11,6 +11,7 @@ import (
 	"github.com/mathwro/pim-manager/internal/activation"
 	"github.com/mathwro/pim-manager/internal/azureauth"
 	"github.com/mathwro/pim-manager/internal/pim"
+	"github.com/muesli/termenv"
 )
 
 func sendRunes(model Model, text string) Model {
@@ -204,6 +205,41 @@ func TestModelDiscoversSelectedSectionAndActivatesSelection(t *testing.T) {
 	}
 	if !strings.Contains(model.View(), "1 activated") {
 		t.Fatalf("expected rendered summary, got %q", model.View())
+	}
+}
+
+func TestAssignmentsViewClearlyMarksSelectedRole(t *testing.T) {
+	model := NewModel(Runtime{})
+	model.screen = ScreenAssignments
+	model.activeSection = SectionAzureResources
+	model.assignmentList = newAssignmentList([]pim.EligibleAssignment{{ID: "one", DisplayName: "Contributor"}})
+
+	next, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
+	view := next.(Model).View()
+
+	if !strings.Contains(view, "1 selected") || !strings.Contains(view, "[✓]") {
+		t.Fatalf("expected an explicit selected marker, got %q", view)
+	}
+}
+
+func TestSelectedFocusedAssignmentKeepsContinuousHighlight(t *testing.T) {
+	previousProfile := lipgloss.ColorProfile()
+	previousDarkBackground := lipgloss.HasDarkBackground()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	lipgloss.SetHasDarkBackground(true)
+	defer lipgloss.SetColorProfile(previousProfile)
+	defer lipgloss.SetHasDarkBackground(previousDarkBackground)
+
+	model := NewModel(Runtime{})
+	model.screen = ScreenAssignments
+	model.activeSection = SectionAzureResources
+	model.assignmentList = newAssignmentList([]pim.EligibleAssignment{{ID: "one", DisplayName: "Contributor"}})
+	model.assignmentList.toggle("one")
+
+	for line := range strings.SplitSeq(model.View(), "\n") {
+		if strings.Contains(line, "Contributor") && strings.Contains(line, "[✓]\x1b[0m") {
+			t.Fatalf("selected marker reset the focused-row highlight: %q", line)
+		}
 	}
 }
 

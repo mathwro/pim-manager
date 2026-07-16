@@ -326,6 +326,8 @@ func (m Model) updateAssignments(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.openActivationForm()
 	case tea.KeyRunes:
 		switch string(key.Runes) {
+		case " ":
+			m.toggleFocusedAssignment()
 		case "/":
 			m.searchMode = true
 			m.err = nil

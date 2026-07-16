@@ -105,7 +105,7 @@ func (m Model) viewAssignments() string {
 			}
 			check := "[ ]"
 			if m.assignmentList.selectedIDs[assignment.ID] {
-				check = "[x]"
+				check = "[✓]"
 			}
 			role := truncateText(displayName(assignment), m.roleColumnWidth())
 			scope := truncateText(displayScope(assignment), m.scopeColumnWidth())
