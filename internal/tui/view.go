@@ -172,11 +172,16 @@ func (m Model) viewDetails() string {
 	if assignment.ActivationPolicy.JustificationRequired {
 		justification = "Required"
 	}
+	mfa := "Not required"
+	if assignment.ActivationPolicy.MFARequired {
+		mfa = "Required"
+	}
 	rows := [][2]string{
 		{"Status", status},
 		{"Active until", activeUntil},
 		{"Maximum duration", assignment.ActivationPolicy.MaximumDurationISO},
 		{"Justification", justification},
+		{"MFA", mfa},
 		{"Source", string(assignment.Source)},
 		{"Assignment type", string(assignment.Kind)},
 		{"Scope type", string(assignment.Scope.Type)},
@@ -279,7 +284,15 @@ func (m Model) viewConfirmation() string {
 		fmt.Sprintf("%s\n%s", violetStyle.Render("Justification"), justification),
 	))
 	b.WriteString("\n\n")
+	if requiresMFA(selected) {
+		b.WriteString(warningStyle.Render("MFA is required before activation. Azure CLI will prompt after confirmation."))
+		b.WriteString("\n")
+	}
 	b.WriteString(warningStyle.Render("Activation requests are submitted immediately and are never retried automatically."))
+	if m.err != nil {
+		b.WriteString("\n")
+		b.WriteString(errorStyle.Render(m.err.Error()))
+	}
 	b.WriteString(m.footer([]keyHint{{"up/down", "review"}, {"enter", "activate"}, {"e", "edit request"}, {"esc", "back"}}))
 	return b.String()
 }

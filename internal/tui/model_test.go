@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -413,6 +414,114 @@ func TestActivationConfirmationPreservesEveryDurationAndOptionalJustification(t 
 	model = next.(Model)
 	if model.screen != ScreenActivation || model.durationIndex != 1 || model.duration.Value() != "PT4H" || model.form.durations["one"] != "PT6H" {
 		t.Fatalf("expected duration focus and values to survive back navigation: %#v", model.form.durations)
+	}
+}
+
+func TestConfirmationSkipsMFAForOrdinaryBatch(t *testing.T) {
+	provider := &scriptedProvider{results: []pim.ActivationResult{{Status: pim.ActivationStatusActivated}}}
+	mfaCalls := 0
+	model := NewModel(Runtime{
+		AzureResources: provider,
+		MFACommand: func(string) (*exec.Cmd, error) {
+			mfaCalls++
+			return exec.Command("true"), nil
+		},
+	})
+	model.activeSection = SectionAzureResources
+	model.screen = ScreenConfirmation
+	model.assignmentList = newAssignmentList([]pim.EligibleAssignment{{ID: "reader", DisplayName: "Reader"}})
+	model.assignmentList.toggle("reader")
+	model.form.durations = map[string]string{"reader": "PT1H"}
+
+	next, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = runCommand(next.(Model), cmd)
+
+	if mfaCalls != 0 || len(provider.activated) != 1 || model.screen != ScreenSummary {
+		t.Fatalf("expected direct activation, MFA calls=%d requests=%#v screen=%s", mfaCalls, provider.activated, model.screen)
+	}
+}
+
+func TestConfirmationGatesMixedBatchOnMFA(t *testing.T) {
+	provider := &scriptedProvider{results: []pim.ActivationResult{
+		{Status: pim.ActivationStatusActivated},
+		{Status: pim.ActivationStatusActivated},
+	}}
+	mfaCalls := 0
+	model := NewModel(Runtime{
+		AzureResources: provider,
+		MFACommand: func(tenantID string) (*exec.Cmd, error) {
+			mfaCalls++
+			if tenantID != "tenant-1" {
+				t.Fatalf("expected tenant-1, got %q", tenantID)
+			}
+			return exec.Command("true"), nil
+		},
+	})
+	model.account = azureauth.Account{TenantID: "tenant-1"}
+	model.activeSection = SectionAzureResources
+	model.screen = ScreenConfirmation
+	model.assignmentList = newAssignmentList([]pim.EligibleAssignment{
+		{ID: "reader", DisplayName: "Reader"},
+		{ID: "owner", DisplayName: "Owner", ActivationPolicy: pim.ActivationPolicy{MFARequired: true}},
+	})
+	model.assignmentList.toggle("reader")
+	model.assignmentList.toggle("owner")
+	model.form.durations = map[string]string{"reader": "PT1H", "owner": "PT1H"}
+
+	next, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = next.(Model)
+	if cmd == nil || mfaCalls != 1 || len(provider.activated) != 0 || model.screen != ScreenConfirmation {
+		t.Fatalf("expected pending MFA gate, calls=%d requests=%#v screen=%s", mfaCalls, provider.activated, model.screen)
+	}
+
+	selected := model.assignmentList.selected()
+	next, cmd = model.Update(mfaCompletedMsg{selected: selected})
+	model = runCommand(next.(Model), cmd)
+	if len(provider.activated) != 2 || model.screen != ScreenSummary {
+		t.Fatalf("expected full batch after MFA, requests=%#v screen=%s", provider.activated, model.screen)
+	}
+}
+
+func TestMFAFailureReturnsToConfirmationWithoutActivation(t *testing.T) {
+	provider := &scriptedProvider{}
+	model := NewModel(Runtime{AzureResources: provider})
+	model.screen = ScreenConfirmation
+
+	next, cmd := model.Update(mfaCompletedMsg{
+		selected: []pim.EligibleAssignment{{ID: "owner", ActivationPolicy: pim.ActivationPolicy{MFARequired: true}}},
+		err:      errors.New("login canceled"),
+	})
+	model = next.(Model)
+
+	if cmd != nil || model.screen != ScreenConfirmation || len(provider.activated) != 0 {
+		t.Fatalf("expected blocked activation, requests=%#v screen=%s", provider.activated, model.screen)
+	}
+	if !strings.Contains(model.View(), "MFA authentication failed: login canceled") {
+		t.Fatalf("expected actionable MFA error, got %q", model.View())
+	}
+}
+
+func TestAssignmentDetailsShowsMFARequirement(t *testing.T) {
+	model := NewModel(Runtime{})
+	model.screen = ScreenDetails
+	model.assignmentList = newAssignmentList([]pim.EligibleAssignment{{
+		ID: "owner", DisplayName: "Owner", ActivationPolicy: pim.ActivationPolicy{MFARequired: true},
+	}})
+	if view := model.View(); !strings.Contains(view, "MFA") || !strings.Contains(view, "Required") {
+		t.Fatalf("expected MFA requirement in details, got %q", view)
+	}
+}
+
+func TestConfirmationShowsMFARequirement(t *testing.T) {
+	model := NewModel(Runtime{})
+	model.screen = ScreenConfirmation
+	model.assignmentList = newAssignmentList([]pim.EligibleAssignment{{
+		ID: "owner", DisplayName: "Owner", ActivationPolicy: pim.ActivationPolicy{MFARequired: true},
+	}})
+	model.assignmentList.toggle("owner")
+	model.form.durations = map[string]string{"owner": "PT1H"}
+	if view := model.View(); !strings.Contains(view, "MFA is required before activation") {
+		t.Fatalf("expected MFA confirmation warning, got %q", view)
 	}
 }
 
