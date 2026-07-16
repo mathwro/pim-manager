@@ -172,11 +172,18 @@ func (m Model) viewDetails() string {
 	if assignment.ActivationPolicy.JustificationRequired {
 		justification = "Required"
 	}
+	authentication := "Not required"
+	if assignment.ActivationPolicy.AuthenticationContext != "" {
+		authentication = "Authentication context " + assignment.ActivationPolicy.AuthenticationContext
+	} else if assignment.ActivationPolicy.MFARequired {
+		authentication = "MFA"
+	}
 	rows := [][2]string{
 		{"Status", status},
 		{"Active until", activeUntil},
 		{"Maximum duration", assignment.ActivationPolicy.MaximumDurationISO},
 		{"Justification", justification},
+		{"Authentication", authentication},
 		{"Source", string(assignment.Source)},
 		{"Assignment type", string(assignment.Kind)},
 		{"Scope type", string(assignment.Scope.Type)},
@@ -279,7 +286,23 @@ func (m Model) viewConfirmation() string {
 		fmt.Sprintf("%s\n%s", violetStyle.Render("Justification"), justification),
 	))
 	b.WriteString("\n\n")
+	authenticationContext, mfaRequired, authenticationErr := authenticationRequirement(selected)
+	switch {
+	case authenticationErr != nil:
+		b.WriteString(warningStyle.Render(authenticationErr.Error()))
+		b.WriteString("\n")
+	case authenticationContext != "":
+		b.WriteString(warningStyle.Render("Authentication context " + authenticationContext + " is required before activation. Azure CLI will prompt after confirmation."))
+		b.WriteString("\n")
+	case mfaRequired:
+		b.WriteString(warningStyle.Render("MFA is required before activation. Azure CLI will prompt after confirmation."))
+		b.WriteString("\n")
+	}
 	b.WriteString(warningStyle.Render("Activation requests are submitted immediately and are never retried automatically."))
+	if m.err != nil {
+		b.WriteString("\n")
+		b.WriteString(errorStyle.Render(m.err.Error()))
+	}
 	b.WriteString(m.footer([]keyHint{{"up/down", "review"}, {"enter", "activate"}, {"e", "edit request"}, {"esc", "back"}}))
 	return b.String()
 }
@@ -434,7 +457,7 @@ func (m Model) summaryContent() string {
 		}
 		b.WriteString("\n")
 	}
-	return b.String()
+	return lipgloss.NewStyle().Width(m.summaryViewport.Width).Render(b.String())
 }
 
 func (m Model) frameWidth() int {

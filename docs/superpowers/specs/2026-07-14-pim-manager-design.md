@@ -15,6 +15,7 @@ The current MVP focuses on a keyboard-first interactive workflow for selecting a
 - Let users select multiple Azure Resource assignments.
 - Collect one justification and one duration for all selected assignments in the batch.
 - Activate selected assignments and show a per-assignment result summary.
+- Require Azure CLI step-up authentication before submitting a batch only when a selected role's effective PIM policy explicitly requires standard MFA or an authentication context.
 - Continue processing remaining assignments when one activation fails.
 
 ## Non-Goals
@@ -85,7 +86,7 @@ At startup, `pim-manager` validates Azure CLI login state. If the user is not si
 After authentication, only Azure Resources discovery is active:
 
 1. The Azure Resources provider uses Azure CLI-derived Azure Resource Manager tokens to list eligible role assignments across management groups, subscriptions, and resource groups visible to the user.
-2. It returns normalized `pim.EligibleAssignment` records with source, display name, assignment type, scope name, scope type, principal details when available, eligibility identifiers, policy hints, and activation capability.
+2. It returns normalized `pim.EligibleAssignment` records with source, display name, assignment type, scope name, scope type, principal details when available, eligibility identifiers, maximum duration, justification requirement, MFA requirement, authentication context, and activation capability.
 3. The dormant Entra and Groups providers are not constructed or invoked by production wiring. They may be reactivated only after the tracked Microsoft Graph PIM authentication limitation is resolved.
 
 Azure Resources discovery failures remain inside the Azure Resources workflow and are shown without leaving the TUI.
@@ -121,6 +122,8 @@ Bubbles components should be used where they fit: list or table for assignments,
 
 The activation wizard creates one activation request per selected assignment using the shared justification and duration. The activation service submits requests and records per-assignment results.
 
+Before submitting a batch, the TUI checks the normalized policies of the selected assignments. Batches without an authentication requirement follow the normal path. Standard MFA uses an `amr` claims challenge; an enabled Conditional Access authentication context uses its `acrs` claim. One shared context is supported per batch, while conflicting contexts are blocked with instructions to activate separately. Bubble Tea releases the terminal while Azure CLI performs the interactive step-up, and cancellation or failure submits no activation requests.
+
 Supported result states:
 
 | State | Meaning |
@@ -131,7 +134,7 @@ Supported result states:
 
 Failures do not stop the batch. The summary preserves individual messages for policy failures, API failures, and transient errors.
 
-Retry behavior is conservative. The MVP allows manual retry for failed activations classified as transient or input-related, but it does not automatically retry any activation. Failures that require user action, such as approval, MFA, permission changes, or policy changes, are shown with their message and are not offered as retry candidates.
+Retry behavior is conservative. The MVP allows manual retry for failed activations classified as transient or input-related, but it does not automatically retry any activation. Failures that require user action, such as approval, incomplete MFA, permission changes, or policy changes, are shown with their message and are not offered as retry candidates.
 
 ## Error Handling
 
@@ -139,7 +142,7 @@ The app should surface Azure and PIM constraints clearly instead of collapsing t
 
 - Azure CLI not installed or not signed in.
 - Token retrieval failure.
-- MFA required.
+- Step-up login failure, conflicting authentication contexts, or an unresolved PIM authentication policy rule.
 - Approval required.
 - Invalid duration.
 - Missing justification.
@@ -158,10 +161,10 @@ Testing should focus on separable logic and avoid requiring live Azure access fo
 | Area | Test approach |
 | --- | --- |
 | Cobra command startup | Unit tests for default command behavior and error propagation. |
-| Azure auth wrapper | Unit tests around command/token parsing with mocked Azure CLI execution. |
-| PIM domain normalization | Unit tests for active Azure Resource conversion plus retained Entra and Group conversion behavior needed for future reactivation. |
+| Azure auth wrapper | Unit tests around command/token parsing and exact MFA and authentication-context command construction without executing Azure CLI. |
+| PIM domain normalization | Unit tests for active Azure Resource conversion and effective activation rules, including explicit MFA and enabled authentication contexts, plus retained Entra and Group conversion behavior needed for future reactivation. |
 | Batch activation | Unit tests for partial success, pending approval, failures, and retry eligibility. |
-| TUI models | Bubble Tea update/model tests for navigation, selection, form validation, and summaries. |
+| TUI models | Bubble Tea update/model tests for navigation, selection, form validation, step-up gating, context conflicts, failed-login blocking, wrapped errors, and summaries. |
 | Provider integration | Optional manual integration tests gated behind environment variables or explicit commands. |
 
 ## Open Extension Points

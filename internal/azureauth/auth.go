@@ -2,9 +2,11 @@ package azureauth
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 )
@@ -79,6 +81,38 @@ func (c CLI) PrincipalID(ctx context.Context) (string, error) {
 		return "", errors.New("Azure CLI returned empty signed-in user principal ID")
 	}
 	return principalID, nil
+}
+
+func StepUpLoginCommand(tenantID string, mfaRequired bool, authenticationContext string) (*exec.Cmd, error) {
+	tenantID = strings.TrimSpace(tenantID)
+	if tenantID == "" {
+		return nil, errors.New("Azure tenant ID is required for step-up authentication")
+	}
+	authenticationContext = strings.TrimSpace(authenticationContext)
+	accessTokenClaims := map[string]any{}
+	if mfaRequired {
+		accessTokenClaims["amr"] = map[string]any{"essential": true, "values": []string{"mfa"}}
+	}
+	if authenticationContext != "" {
+		accessTokenClaims["acrs"] = map[string]any{"essential": true, "value": authenticationContext}
+	}
+	if len(accessTokenClaims) == 0 {
+		return nil, errors.New("MFA or an authentication context is required for step-up authentication")
+	}
+	claimsJSON, err := json.Marshal(map[string]any{"access_token": accessTokenClaims})
+	if err != nil {
+		return nil, fmt.Errorf("encode step-up claims: %w", err)
+	}
+	claims := base64.StdEncoding.EncodeToString(claimsJSON)
+	command := exec.Command(
+		"az", "login",
+		"--tenant", tenantID,
+		"--scope", "https://management.core.windows.net//.default",
+		"--claims-challenge", claims,
+		"--output", "none",
+	)
+	command.Env = append(os.Environ(), "AZURE_CORE_LOGIN_EXPERIENCE_V2=off")
+	return command, nil
 }
 
 func execCommand(ctx context.Context, name string, args ...string) ([]byte, error) {

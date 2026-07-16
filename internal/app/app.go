@@ -23,6 +23,7 @@ func Run() error {
 	runtime := tui.Runtime{
 		AzureResources: azureresources.NewProvider(armClient),
 		Account:        auth,
+		StepUpCommand:  azureauth.StepUpLoginCommand,
 	}
 	return runProgram(tui.NewModel(runtime))
 }

@@ -2,7 +2,10 @@ package azureauth
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
+	"reflect"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -78,6 +81,55 @@ func TestAccessTokenUsesRequestedResource(t *testing.T) {
 	}
 	if token != "abc" {
 		t.Fatalf("expected token abc, got %q", token)
+	}
+}
+
+func TestStepUpLoginCommandUsesTenantARMAndMFAClaim(t *testing.T) {
+	command, err := StepUpLoginCommand(" tenant-1 ", true, "")
+	if err != nil {
+		t.Fatalf("StepUpLoginCommand returned error: %v", err)
+	}
+	claims := base64.StdEncoding.EncodeToString([]byte(`{"access_token":{"amr":{"essential":true,"values":["mfa"]}}}`))
+	want := []string{
+		"az", "login",
+		"--tenant", "tenant-1",
+		"--scope", "https://management.core.windows.net//.default",
+		"--claims-challenge", claims,
+		"--output", "none",
+	}
+	if !reflect.DeepEqual(command.Args, want) {
+		t.Fatalf("expected args %#v, got %#v", want, command.Args)
+	}
+	if !slices.Contains(command.Env, "AZURE_CORE_LOGIN_EXPERIENCE_V2=off") {
+		t.Fatalf("expected subscription selector disabled for child login, env=%#v", command.Env)
+	}
+}
+
+func TestStepUpLoginCommandUsesAuthenticationContext(t *testing.T) {
+	command, err := StepUpLoginCommand("tenant-1", false, " c1 ")
+	if err != nil {
+		t.Fatalf("StepUpLoginCommand returned error: %v", err)
+	}
+	claims := base64.StdEncoding.EncodeToString([]byte(`{"access_token":{"acrs":{"essential":true,"value":"c1"}}}`))
+	if got := command.Args[7]; got != claims {
+		t.Fatalf("expected authentication context claims %q, got %q", claims, got)
+	}
+}
+
+func TestStepUpLoginCommandCombinesMFAAndAuthenticationContext(t *testing.T) {
+	command, err := StepUpLoginCommand("tenant-1", true, "c1")
+	if err != nil {
+		t.Fatalf("StepUpLoginCommand returned error: %v", err)
+	}
+	claims := base64.StdEncoding.EncodeToString([]byte(`{"access_token":{"acrs":{"essential":true,"value":"c1"},"amr":{"essential":true,"values":["mfa"]}}}`))
+	if got := command.Args[7]; got != claims {
+		t.Fatalf("expected combined claims %q, got %q", claims, got)
+	}
+}
+
+func TestStepUpLoginCommandRejectsMissingTenant(t *testing.T) {
+	if _, err := StepUpLoginCommand("  ", true, ""); err == nil {
+		t.Fatal("expected missing tenant error")
 	}
 }
 
