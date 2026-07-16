@@ -47,6 +47,8 @@ type roleManagementPolicyRule struct {
 	RuleType        string   `json:"ruleType"`
 	MaximumDuration string   `json:"maximumDuration"`
 	EnabledRules    []string `json:"enabledRules"`
+	IsEnabled       bool     `json:"isEnabled"`
+	ClaimValue      string   `json:"claimValue"`
 }
 
 func resourceName(id string) string {
@@ -96,6 +98,11 @@ func policyForAssignment(policies []roleManagementPolicyAssignment, roleDefiniti
 		switch {
 		case strings.EqualFold(rule.ID, "Expiration_EndUser_Assignment"):
 			policy.MaximumDurationISO = strings.TrimSpace(rule.MaximumDuration)
+		case strings.EqualFold(rule.ID, "AuthenticationContext_EndUser_Assignment") && rule.IsEnabled:
+			policy.AuthenticationContext = strings.TrimSpace(rule.ClaimValue)
+			if policy.AuthenticationContext == "" {
+				return pim.ActivationPolicy{}, fmt.Errorf("empty authentication context for role definition %s", roleDefinitionID)
+			}
 		case strings.EqualFold(rule.ID, "Enablement_EndUser_Assignment"):
 			enablementFound = true
 			for _, enabled := range rule.EnabledRules {

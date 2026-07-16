@@ -83,10 +83,10 @@ func TestAccessTokenUsesRequestedResource(t *testing.T) {
 	}
 }
 
-func TestMFALoginCommandUsesTenantARMAndMFAClaim(t *testing.T) {
-	command, err := MFALoginCommand(" tenant-1 ")
+func TestStepUpLoginCommandUsesTenantARMAndMFAClaim(t *testing.T) {
+	command, err := StepUpLoginCommand(" tenant-1 ", "")
 	if err != nil {
-		t.Fatalf("MFALoginCommand returned error: %v", err)
+		t.Fatalf("StepUpLoginCommand returned error: %v", err)
 	}
 	claims := base64.StdEncoding.EncodeToString([]byte(`{"access_token":{"amr":{"essential":true,"values":["mfa"]}}}`))
 	want := []string{
@@ -101,8 +101,19 @@ func TestMFALoginCommandUsesTenantARMAndMFAClaim(t *testing.T) {
 	}
 }
 
-func TestMFALoginCommandRejectsMissingTenant(t *testing.T) {
-	if _, err := MFALoginCommand("  "); err == nil {
+func TestStepUpLoginCommandUsesAuthenticationContext(t *testing.T) {
+	command, err := StepUpLoginCommand("tenant-1", " c1 ")
+	if err != nil {
+		t.Fatalf("StepUpLoginCommand returned error: %v", err)
+	}
+	claims := base64.StdEncoding.EncodeToString([]byte(`{"access_token":{"acrs":{"essential":true,"value":"c1"}}}`))
+	if got := command.Args[7]; got != claims {
+		t.Fatalf("expected authentication context claims %q, got %q", claims, got)
+	}
+}
+
+func TestStepUpLoginCommandRejectsMissingTenant(t *testing.T) {
+	if _, err := StepUpLoginCommand("  ", ""); err == nil {
 		t.Fatal("expected missing tenant error")
 	}
 }

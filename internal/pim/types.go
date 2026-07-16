@@ -42,6 +42,7 @@ type ActivationPolicy struct {
 	MaximumDurationISO    string
 	JustificationRequired bool
 	MFARequired           bool
+	AuthenticationContext string
 }
 
 type EligibleAssignment struct {

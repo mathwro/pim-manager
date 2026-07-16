@@ -42,7 +42,7 @@ type Runtime struct {
 	AzureResources AssignmentProvider
 	Groups         AssignmentProvider
 	Account        AccountProvider
-	MFACommand     func(string) (*exec.Cmd, error)
+	StepUpCommand  func(string, string) (*exec.Cmd, error)
 }
 
 type AssignmentProvider interface {
@@ -100,7 +100,7 @@ type activationCompletedMsg struct {
 	results []pim.ActivationResult
 }
 
-type mfaCompletedMsg struct {
+type stepUpCompletedMsg struct {
 	selected []pim.EligibleAssignment
 	err      error
 }
@@ -186,10 +186,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.screen = ScreenSummary
 		m.refreshSummaryViewport()
 		return m, nil
-	case mfaCompletedMsg:
+	case stepUpCompletedMsg:
 		if typed.err != nil {
 			m.screen = ScreenConfirmation
-			m.err = fmt.Errorf("MFA authentication failed: %w", typed.err)
+			m.err = fmt.Errorf("step-up authentication failed: %w", typed.err)
 			return m, nil
 		}
 		return m.startActivation(typed.selected)
@@ -434,21 +434,26 @@ func (m Model) updateConfirmation(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.err = fmt.Errorf("select at least one assignment to continue")
 			return m, nil
 		}
-		if !requiresMFA(selected) {
-			return m.startActivation(selected)
-		}
-		if m.runtime.MFACommand == nil {
-			m.err = errors.New("MFA authentication is unavailable")
+		authenticationContext, authenticationRequired, err := authenticationRequirement(selected)
+		if err != nil {
+			m.err = err
 			return m, nil
 		}
-		command, err := m.runtime.MFACommand(m.account.TenantID)
+		if !authenticationRequired {
+			return m.startActivation(selected)
+		}
+		if m.runtime.StepUpCommand == nil {
+			m.err = errors.New("step-up authentication is unavailable")
+			return m, nil
+		}
+		command, err := m.runtime.StepUpCommand(m.account.TenantID, authenticationContext)
 		if err != nil {
 			m.err = err
 			return m, nil
 		}
 		m.err = nil
 		return m, tea.ExecProcess(command, func(err error) tea.Msg {
-			return mfaCompletedMsg{selected: selected, err: err}
+			return stepUpCompletedMsg{selected: selected, err: err}
 		})
 	case tea.KeyRunes:
 		switch string(key.Runes) {
@@ -464,13 +469,23 @@ func (m Model) updateConfirmation(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func requiresMFA(assignments []pim.EligibleAssignment) bool {
+func authenticationRequirement(assignments []pim.EligibleAssignment) (string, bool, error) {
+	authenticationContext := ""
+	required := false
 	for _, assignment := range assignments {
-		if assignment.ActivationPolicy.MFARequired {
-			return true
+		policy := assignment.ActivationPolicy
+		required = required || policy.MFARequired
+		candidate := strings.TrimSpace(policy.AuthenticationContext)
+		if candidate == "" {
+			continue
 		}
+		required = true
+		if authenticationContext != "" && authenticationContext != candidate {
+			return "", false, fmt.Errorf("selected assignments require different authentication contexts %q and %q; activate them in separate batches", authenticationContext, candidate)
+		}
+		authenticationContext = candidate
 	}
-	return false
+	return authenticationContext, required, nil
 }
 
 func (m Model) startActivation(selected []pim.EligibleAssignment) (tea.Model, tea.Cmd) {

@@ -82,14 +82,23 @@ func (c CLI) PrincipalID(ctx context.Context) (string, error) {
 	return principalID, nil
 }
 
-const mfaClaimsRequest = `{"access_token":{"amr":{"essential":true,"values":["mfa"]}}}`
-
-func MFALoginCommand(tenantID string) (*exec.Cmd, error) {
+func StepUpLoginCommand(tenantID, authenticationContext string) (*exec.Cmd, error) {
 	tenantID = strings.TrimSpace(tenantID)
 	if tenantID == "" {
-		return nil, errors.New("Azure tenant ID is required for MFA authentication")
+		return nil, errors.New("Azure tenant ID is required for step-up authentication")
 	}
-	claims := base64.StdEncoding.EncodeToString([]byte(mfaClaimsRequest))
+	authenticationContext = strings.TrimSpace(authenticationContext)
+	claim := map[string]any{"essential": true, "values": []string{"mfa"}}
+	claimName := "amr"
+	if authenticationContext != "" {
+		claim = map[string]any{"essential": true, "value": authenticationContext}
+		claimName = "acrs"
+	}
+	claimsJSON, err := json.Marshal(map[string]any{"access_token": map[string]any{claimName: claim}})
+	if err != nil {
+		return nil, fmt.Errorf("encode step-up claims: %w", err)
+	}
+	claims := base64.StdEncoding.EncodeToString(claimsJSON)
 	return exec.Command(
 		"az", "login",
 		"--tenant", tenantID,

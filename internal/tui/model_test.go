@@ -422,7 +422,7 @@ func TestConfirmationSkipsMFAForOrdinaryBatch(t *testing.T) {
 	mfaCalls := 0
 	model := NewModel(Runtime{
 		AzureResources: provider,
-		MFACommand: func(string) (*exec.Cmd, error) {
+		StepUpCommand: func(string, string) (*exec.Cmd, error) {
 			mfaCalls++
 			return exec.Command("true"), nil
 		},
@@ -449,10 +449,10 @@ func TestConfirmationGatesMixedBatchOnMFA(t *testing.T) {
 	mfaCalls := 0
 	model := NewModel(Runtime{
 		AzureResources: provider,
-		MFACommand: func(tenantID string) (*exec.Cmd, error) {
+		StepUpCommand: func(tenantID, authenticationContext string) (*exec.Cmd, error) {
 			mfaCalls++
-			if tenantID != "tenant-1" {
-				t.Fatalf("expected tenant-1, got %q", tenantID)
+			if tenantID != "tenant-1" || authenticationContext != "" {
+				t.Fatalf("expected tenant-1 with standard MFA, got %q and %q", tenantID, authenticationContext)
 			}
 			return exec.Command("true"), nil
 		},
@@ -475,19 +475,71 @@ func TestConfirmationGatesMixedBatchOnMFA(t *testing.T) {
 	}
 
 	selected := model.assignmentList.selected()
-	next, cmd = model.Update(mfaCompletedMsg{selected: selected})
+	next, cmd = model.Update(stepUpCompletedMsg{selected: selected})
 	model = runCommand(next.(Model), cmd)
 	if len(provider.activated) != 2 || model.screen != ScreenSummary {
 		t.Fatalf("expected full batch after MFA, requests=%#v screen=%s", provider.activated, model.screen)
 	}
 }
 
-func TestMFAFailureReturnsToConfirmationWithoutActivation(t *testing.T) {
+func TestConfirmationUsesRequiredAuthenticationContext(t *testing.T) {
+	provider := &scriptedProvider{}
+	var gotContext string
+	model := NewModel(Runtime{
+		AzureResources: provider,
+		StepUpCommand: func(_ string, authenticationContext string) (*exec.Cmd, error) {
+			gotContext = authenticationContext
+			return exec.Command("true"), nil
+		},
+	})
+	model.account = azureauth.Account{TenantID: "tenant-1"}
+	model.screen = ScreenConfirmation
+	model.assignmentList = newAssignmentList([]pim.EligibleAssignment{{
+		ID: "owner", ActivationPolicy: pim.ActivationPolicy{AuthenticationContext: "c1"},
+	}})
+	model.assignmentList.toggle("owner")
+
+	next, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = next.(Model)
+	if cmd == nil || gotContext != "c1" || len(provider.activated) != 0 {
+		t.Fatalf("expected c1 step-up before activation, context=%q requests=%#v", gotContext, provider.activated)
+	}
+}
+
+func TestConfirmationRejectsConflictingAuthenticationContexts(t *testing.T) {
+	provider := &scriptedProvider{}
+	stepUpCalls := 0
+	model := NewModel(Runtime{
+		AzureResources: provider,
+		StepUpCommand: func(string, string) (*exec.Cmd, error) {
+			stepUpCalls++
+			return exec.Command("true"), nil
+		},
+	})
+	model.screen = ScreenConfirmation
+	model.assignmentList = newAssignmentList([]pim.EligibleAssignment{
+		{ID: "one", ActivationPolicy: pim.ActivationPolicy{AuthenticationContext: "c1"}},
+		{ID: "two", ActivationPolicy: pim.ActivationPolicy{AuthenticationContext: "c2"}},
+	})
+	model.assignmentList.toggle("one")
+	model.assignmentList.toggle("two")
+
+	next, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = next.(Model)
+	if cmd != nil || stepUpCalls != 0 || len(provider.activated) != 0 {
+		t.Fatalf("expected conflicting contexts to block activation, calls=%d requests=%#v", stepUpCalls, provider.activated)
+	}
+	if model.err == nil || !strings.Contains(model.err.Error(), "different authentication contexts") {
+		t.Fatalf("expected conflicting-context error, got %v", model.err)
+	}
+}
+
+func TestStepUpFailureReturnsToConfirmationWithoutActivation(t *testing.T) {
 	provider := &scriptedProvider{}
 	model := NewModel(Runtime{AzureResources: provider})
 	model.screen = ScreenConfirmation
 
-	next, cmd := model.Update(mfaCompletedMsg{
+	next, cmd := model.Update(stepUpCompletedMsg{
 		selected: []pim.EligibleAssignment{{ID: "owner", ActivationPolicy: pim.ActivationPolicy{MFARequired: true}}},
 		err:      errors.New("login canceled"),
 	})
@@ -496,19 +548,19 @@ func TestMFAFailureReturnsToConfirmationWithoutActivation(t *testing.T) {
 	if cmd != nil || model.screen != ScreenConfirmation || len(provider.activated) != 0 {
 		t.Fatalf("expected blocked activation, requests=%#v screen=%s", provider.activated, model.screen)
 	}
-	if !strings.Contains(model.View(), "MFA authentication failed: login canceled") {
-		t.Fatalf("expected actionable MFA error, got %q", model.View())
+	if !strings.Contains(model.View(), "step-up authentication failed: login canceled") {
+		t.Fatalf("expected actionable step-up error, got %q", model.View())
 	}
 }
 
-func TestAssignmentDetailsShowsMFARequirement(t *testing.T) {
+func TestAssignmentDetailsShowsAuthenticationRequirement(t *testing.T) {
 	model := NewModel(Runtime{})
 	model.screen = ScreenDetails
 	model.assignmentList = newAssignmentList([]pim.EligibleAssignment{{
-		ID: "owner", DisplayName: "Owner", ActivationPolicy: pim.ActivationPolicy{MFARequired: true},
+		ID: "owner", DisplayName: "Owner", ActivationPolicy: pim.ActivationPolicy{AuthenticationContext: "c1"},
 	}})
-	if view := model.View(); !strings.Contains(view, "MFA") || !strings.Contains(view, "Required") {
-		t.Fatalf("expected MFA requirement in details, got %q", view)
+	if view := model.View(); !strings.Contains(view, "Authentication context") || !strings.Contains(view, "c1") {
+		t.Fatalf("expected authentication context in details, got %q", view)
 	}
 }
 
