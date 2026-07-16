@@ -104,6 +104,10 @@ type accountCheckedMsg struct {
 
 func NewModel(runtime Runtime) Model {
 	justification := textarea.New()
+	justification.Prompt = ""
+	justification.FocusedStyle.CursorLine = justification.FocusedStyle.Base
+	justification.FocusedStyle.Placeholder = mutedStyle
+	justification.BlurredStyle.Placeholder = mutedStyle
 	justification.Placeholder = "Why is this access needed?"
 	justification.CharLimit = 500
 	justification.ShowLineNumbers = false

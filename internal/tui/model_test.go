@@ -318,6 +318,35 @@ func TestActivationFormShowsPolicyJustificationRequirement(t *testing.T) {
 	}
 }
 
+func TestActivationFormRendersCleanEmptyJustification(t *testing.T) {
+	previousProfile := lipgloss.ColorProfile()
+	previousDarkBackground := lipgloss.HasDarkBackground()
+	lipgloss.SetColorProfile(termenv.ANSI)
+	lipgloss.SetHasDarkBackground(true)
+	defer lipgloss.SetColorProfile(previousProfile)
+	defer lipgloss.SetHasDarkBackground(previousDarkBackground)
+
+	model := NewModel(Runtime{})
+	model.screen = ScreenAssignments
+	model.assignmentList = newAssignmentList([]pim.EligibleAssignment{{
+		ID: "one", DisplayName: "Reader",
+		ActivationPolicy: pim.ActivationPolicy{MaximumDurationISO: "PT2H"},
+	}})
+	model.assignmentList.toggle("one")
+	next, _ := model.openActivationForm()
+	field := next.(Model).justification.View()
+
+	if !strings.Contains(field, "hy is this access needed?") {
+		t.Fatalf("expected placeholder, got %q", field)
+	}
+	if strings.Contains(field, "┃") {
+		t.Fatalf("expected no internal prompt rail, got %q", field)
+	}
+	if strings.Contains(field, "\x1b[40m") {
+		t.Fatalf("expected no focused-line background, got %q", field)
+	}
+}
+
 func TestActivationFormKeepsDurationEditsWhileMovingFocus(t *testing.T) {
 	model := NewModel(Runtime{})
 	model.screen = ScreenAssignments
