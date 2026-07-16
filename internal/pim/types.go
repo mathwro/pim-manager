@@ -1,6 +1,9 @@
 package pim
 
-import "fmt"
+import (
+	"fmt"
+	"time"
+)
 
 type AssignmentSource string
 
@@ -35,6 +38,11 @@ type Scope struct {
 	Type        ScopeType
 }
 
+type ActivationPolicy struct {
+	MaximumDurationISO    string
+	JustificationRequired bool
+}
+
 type EligibleAssignment struct {
 	ID                    string
 	Source                AssignmentSource
@@ -51,6 +59,9 @@ type EligibleAssignment struct {
 	Scope                 Scope
 	Condition             string
 	ConditionVersion      string
+	Active                bool
+	ActiveUntil           *time.Time
+	ActivationPolicy      ActivationPolicy
 }
 
 func (a EligibleAssignment) DisplayScope() string {

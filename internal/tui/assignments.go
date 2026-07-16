@@ -22,8 +22,12 @@ func (l assignmentList) filtered(query string) []pim.EligibleAssignment {
 	}
 	var out []pim.EligibleAssignment
 	for _, item := range l.items {
+		state := "inactive"
+		if item.Active {
+			state = "active"
+		}
 		haystack := strings.ToLower(item.DisplayName + " " + item.Scope.DisplayName + " " + string(item.Kind))
-		if strings.Contains(haystack, query) {
+		if state == query || strings.Contains(haystack, query) {
 			out = append(out, item)
 		}
 	}
@@ -31,7 +35,17 @@ func (l assignmentList) filtered(query string) []pim.EligibleAssignment {
 }
 
 func (l assignmentList) toggle(id string) {
-	l.selectedIDs[id] = !l.selectedIDs[id]
+	for _, item := range l.items {
+		if item.ID != id {
+			continue
+		}
+		if item.Active {
+			delete(l.selectedIDs, id)
+			return
+		}
+		l.selectedIDs[id] = !l.selectedIDs[id]
+		return
+	}
 }
 
 func (l assignmentList) selectedAssignments() []pim.EligibleAssignment {

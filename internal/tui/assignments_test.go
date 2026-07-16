@@ -27,3 +27,30 @@ func TestAssignmentListTogglesSelection(t *testing.T) {
 		t.Fatalf("expected selected assignment, got %#v", selected)
 	}
 }
+
+func TestAssignmentListDoesNotSelectActiveAssignment(t *testing.T) {
+	list := newAssignmentList([]pim.EligibleAssignment{
+		{ID: "inactive", DisplayName: "Contributor"},
+		{ID: "active", DisplayName: "Owner", Active: true},
+	})
+
+	list.toggle("active")
+	list.toggle("inactive")
+
+	selected := list.selected()
+	if len(selected) != 1 || selected[0].ID != "inactive" {
+		t.Fatalf("expected only inactive assignment selected, got %#v", selected)
+	}
+}
+
+func TestAssignmentListFiltersByActiveState(t *testing.T) {
+	list := newAssignmentList([]pim.EligibleAssignment{
+		{ID: "inactive", DisplayName: "Contributor"},
+		{ID: "active", DisplayName: "Owner", Active: true},
+	})
+
+	filtered := list.filtered("active")
+	if len(filtered) != 1 || filtered[0].ID != "active" {
+		t.Fatalf("expected active assignment, got %#v", filtered)
+	}
+}

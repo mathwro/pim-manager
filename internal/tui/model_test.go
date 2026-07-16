@@ -560,3 +560,18 @@ func TestNewModelPausesGraphPIMSections(t *testing.T) {
 		t.Fatalf("expected only Azure Resources discovery, got entra=%d azure=%d groups=%d", entra.discoverCalls, azureResources.discoverCalls, groups.discoverCalls)
 	}
 }
+
+func TestToggleAllFilteredSkipsActiveAssignments(t *testing.T) {
+	model := NewModel(Runtime{})
+	model.assignmentList = newAssignmentList([]pim.EligibleAssignment{
+		{ID: "inactive", DisplayName: "Contributor"},
+		{ID: "active", DisplayName: "Owner", Active: true},
+	})
+
+	model.toggleAllFiltered()
+
+	selected := model.assignmentList.selected()
+	if len(selected) != 1 || selected[0].ID != "inactive" {
+		t.Fatalf("expected select-all to skip active assignment, got %#v", selected)
+	}
+}

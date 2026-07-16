@@ -532,18 +532,25 @@ func (m *Model) toggleFocusedAssignment() {
 
 func (m *Model) toggleAllFiltered() {
 	filtered := m.assignmentList.filtered(m.query)
-	if len(filtered) == 0 {
-		return
-	}
 	allSelected := true
+	selectable := 0
 	for _, assignment := range filtered {
+		if assignment.Active {
+			delete(m.assignmentList.selectedIDs, assignment.ID)
+			continue
+		}
+		selectable++
 		if !m.assignmentList.selectedIDs[assignment.ID] {
 			allSelected = false
-			break
 		}
 	}
+	if selectable == 0 {
+		return
+	}
 	for _, assignment := range filtered {
-		m.assignmentList.selectedIDs[assignment.ID] = !allSelected
+		if !assignment.Active {
+			m.assignmentList.selectedIDs[assignment.ID] = !allSelected
+		}
 	}
 	m.err = nil
 }
