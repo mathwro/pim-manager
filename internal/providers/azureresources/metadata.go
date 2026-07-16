@@ -99,8 +99,11 @@ func policyForAssignment(policies []roleManagementPolicyAssignment, roleDefiniti
 		case strings.EqualFold(rule.ID, "Enablement_EndUser_Assignment"):
 			enablementFound = true
 			for _, enabled := range rule.EnabledRules {
-				if strings.EqualFold(enabled, "Justification") {
+				switch {
+				case strings.EqualFold(enabled, "Justification"):
 					policy.JustificationRequired = true
+				case strings.EqualFold(enabled, "MultiFactorAuthentication"):
+					policy.MFARequired = true
 				}
 			}
 		}

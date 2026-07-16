@@ -77,7 +77,7 @@ func TestPolicyForAssignmentUsesEffectiveEndUserRules(t *testing.T) {
 	if err != nil {
 		t.Fatalf("policyForAssignment returned error: %v", err)
 	}
-	if policy.MaximumDurationISO != "PT8H" || !policy.JustificationRequired {
+	if policy.MaximumDurationISO != "PT8H" || !policy.JustificationRequired || !policy.MFARequired {
 		t.Fatalf("unexpected policy: %#v", policy)
 	}
 }
@@ -98,8 +98,8 @@ func TestPolicyForAssignmentAllowsOptionalJustification(t *testing.T) {
 		[]roleManagementPolicyAssignment{testPolicy("/subscriptions/sub-1", "reader", "PT8H")},
 		"/subscriptions/sub-1/providers/Microsoft.Authorization/roleDefinitions/reader",
 	)
-	if err != nil || policy.JustificationRequired || policy.MaximumDurationISO != "PT8H" {
-		t.Fatalf("expected optional justification policy, got %#v, %v", policy, err)
+	if err != nil || policy.JustificationRequired || policy.MFARequired || policy.MaximumDurationISO != "PT8H" {
+		t.Fatalf("expected optional activation policy, got %#v, %v", policy, err)
 	}
 }
 

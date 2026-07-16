@@ -41,6 +41,7 @@ type Scope struct {
 type ActivationPolicy struct {
 	MaximumDurationISO    string
 	JustificationRequired bool
+	MFARequired           bool
 }
 
 type EligibleAssignment struct {
