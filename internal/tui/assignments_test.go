@@ -46,11 +46,17 @@ func TestAssignmentListDoesNotSelectActiveAssignment(t *testing.T) {
 func TestAssignmentListFiltersByActiveState(t *testing.T) {
 	list := newAssignmentList([]pim.EligibleAssignment{
 		{ID: "inactive", DisplayName: "Contributor"},
-		{ID: "active", DisplayName: "Owner", Active: true},
+		{ID: "inactive-collision", DisplayName: "Active Directory Administrator"},
+		{ID: "active", DisplayName: "Inactive Owner", Active: true},
 	})
 
 	filtered := list.filtered("active")
 	if len(filtered) != 1 || filtered[0].ID != "active" {
-		t.Fatalf("expected active assignment, got %#v", filtered)
+		t.Fatalf("expected only active assignment, got %#v", filtered)
+	}
+
+	filtered = list.filtered("inactive")
+	if len(filtered) != 2 || filtered[0].ID != "inactive" || filtered[1].ID != "inactive-collision" {
+		t.Fatalf("expected only inactive assignments, got %#v", filtered)
 	}
 }

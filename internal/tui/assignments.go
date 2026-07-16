@@ -20,14 +20,18 @@ func (l assignmentList) filtered(query string) []pim.EligibleAssignment {
 	if query == "" {
 		return l.items
 	}
+	stateFilter := query == "active" || query == "inactive"
+	wantActive := query == "active"
 	var out []pim.EligibleAssignment
 	for _, item := range l.items {
-		state := "inactive"
-		if item.Active {
-			state = "active"
+		if stateFilter {
+			if item.Active == wantActive {
+				out = append(out, item)
+			}
+			continue
 		}
 		haystack := strings.ToLower(item.DisplayName + " " + item.Scope.DisplayName + " " + string(item.Kind))
-		if state == query || strings.Contains(haystack, query) {
+		if strings.Contains(haystack, query) {
 			out = append(out, item)
 		}
 	}
