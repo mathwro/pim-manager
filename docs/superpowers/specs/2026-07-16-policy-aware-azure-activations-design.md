@@ -134,6 +134,7 @@ Keep one justification textarea for the batch.
 - An empty justification is valid only when every selected assignment makes it optional.
 - A non-empty optional justification is sent with every activation request.
 - Returning from confirmation preserves the entered text.
+- The empty focused textarea uses the existing outer field border, a muted placeholder, and the normal cursor; it does not render an internal prompt rail or a cursor-line background.
 
 ### Per-assignment durations
 
