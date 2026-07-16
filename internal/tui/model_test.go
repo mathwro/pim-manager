@@ -981,6 +981,23 @@ func TestSummaryViewListsPerAssignmentStatuses(t *testing.T) {
 	}
 }
 
+func TestSummaryWrapsLongAzureErrors(t *testing.T) {
+	model := NewModel(Runtime{})
+	model.screen = ScreenSummary
+	model.summary = newSummary([]pim.ActivationResult{{
+		Assignment: pim.EligibleAssignment{DisplayName: "Owner"},
+		Status:     pim.ActivationStatusFailed,
+		Message:    strings.Repeat("ARM response detail ", 12) + "MfaRule",
+	}})
+	next, _ := model.Update(tea.WindowSizeMsg{Width: 80, Height: 26})
+	model = next.(Model)
+	model.refreshSummaryViewport()
+
+	if view := model.View(); !strings.Contains(view, "MfaRule") {
+		t.Fatalf("expected complete wrapped Azure error, got %q", view)
+	}
+}
+
 func TestModelSupportsHelpBackNavigationAndQuit(t *testing.T) {
 	provider := &scriptedProvider{
 		discoveries: [][]pim.EligibleAssignment{{{ID: "one", DisplayName: "Global Reader", ActivationPolicy: pim.ActivationPolicy{MaximumDurationISO: "PT2H"}}}},

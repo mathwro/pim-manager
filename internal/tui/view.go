@@ -447,7 +447,7 @@ func (m Model) summaryContent() string {
 		}
 		b.WriteString("\n")
 	}
-	return b.String()
+	return lipgloss.NewStyle().Width(m.summaryViewport.Width).Render(b.String())
 }
 
 func (m Model) frameWidth() int {
