@@ -286,7 +286,7 @@ func (m Model) viewConfirmation() string {
 		fmt.Sprintf("%s\n%s", violetStyle.Render("Justification"), justification),
 	))
 	b.WriteString("\n\n")
-	authenticationContext, authenticationRequired, authenticationErr := authenticationRequirement(selected)
+	authenticationContext, mfaRequired, authenticationErr := authenticationRequirement(selected)
 	switch {
 	case authenticationErr != nil:
 		b.WriteString(warningStyle.Render(authenticationErr.Error()))
@@ -294,7 +294,7 @@ func (m Model) viewConfirmation() string {
 	case authenticationContext != "":
 		b.WriteString(warningStyle.Render("Authentication context " + authenticationContext + " is required before activation. Azure CLI will prompt after confirmation."))
 		b.WriteString("\n")
-	case authenticationRequired:
+	case mfaRequired:
 		b.WriteString(warningStyle.Render("MFA is required before activation. Azure CLI will prompt after confirmation."))
 		b.WriteString("\n")
 	}

@@ -422,7 +422,7 @@ func TestConfirmationSkipsMFAForOrdinaryBatch(t *testing.T) {
 	mfaCalls := 0
 	model := NewModel(Runtime{
 		AzureResources: provider,
-		StepUpCommand: func(string, string) (*exec.Cmd, error) {
+		StepUpCommand: func(string, bool, string) (*exec.Cmd, error) {
 			mfaCalls++
 			return exec.Command("true"), nil
 		},
@@ -449,10 +449,10 @@ func TestConfirmationGatesMixedBatchOnMFA(t *testing.T) {
 	mfaCalls := 0
 	model := NewModel(Runtime{
 		AzureResources: provider,
-		StepUpCommand: func(tenantID, authenticationContext string) (*exec.Cmd, error) {
+		StepUpCommand: func(tenantID string, mfaRequired bool, authenticationContext string) (*exec.Cmd, error) {
 			mfaCalls++
-			if tenantID != "tenant-1" || authenticationContext != "" {
-				t.Fatalf("expected tenant-1 with standard MFA, got %q and %q", tenantID, authenticationContext)
+			if tenantID != "tenant-1" || !mfaRequired || authenticationContext != "" {
+				t.Fatalf("expected tenant-1 with standard MFA, got %q, %v, and %q", tenantID, mfaRequired, authenticationContext)
 			}
 			return exec.Command("true"), nil
 		},
@@ -485,9 +485,11 @@ func TestConfirmationGatesMixedBatchOnMFA(t *testing.T) {
 func TestConfirmationUsesRequiredAuthenticationContext(t *testing.T) {
 	provider := &scriptedProvider{}
 	var gotContext string
+	var gotMFA bool
 	model := NewModel(Runtime{
 		AzureResources: provider,
-		StepUpCommand: func(_ string, authenticationContext string) (*exec.Cmd, error) {
+		StepUpCommand: func(_ string, mfaRequired bool, authenticationContext string) (*exec.Cmd, error) {
+			gotMFA = mfaRequired
 			gotContext = authenticationContext
 			return exec.Command("true"), nil
 		},
@@ -501,8 +503,17 @@ func TestConfirmationUsesRequiredAuthenticationContext(t *testing.T) {
 
 	next, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	model = next.(Model)
-	if cmd == nil || gotContext != "c1" || len(provider.activated) != 0 {
-		t.Fatalf("expected c1 step-up before activation, context=%q requests=%#v", gotContext, provider.activated)
+	if cmd == nil || gotMFA || gotContext != "c1" || len(provider.activated) != 0 {
+		t.Fatalf("expected c1-only step-up before activation, MFA=%v context=%q requests=%#v", gotMFA, gotContext, provider.activated)
+	}
+}
+
+func TestAuthenticationRequirementPreservesMFAWithContext(t *testing.T) {
+	context, mfaRequired, err := authenticationRequirement([]pim.EligibleAssignment{{
+		ActivationPolicy: pim.ActivationPolicy{MFARequired: true, AuthenticationContext: "c1"},
+	}})
+	if err != nil || !mfaRequired || context != "c1" {
+		t.Fatalf("expected combined MFA and c1 requirement, MFA=%v context=%q error=%v", mfaRequired, context, err)
 	}
 }
 
@@ -511,7 +522,7 @@ func TestConfirmationRejectsConflictingAuthenticationContexts(t *testing.T) {
 	stepUpCalls := 0
 	model := NewModel(Runtime{
 		AzureResources: provider,
-		StepUpCommand: func(string, string) (*exec.Cmd, error) {
+		StepUpCommand: func(string, bool, string) (*exec.Cmd, error) {
 			stepUpCalls++
 			return exec.Command("true"), nil
 		},

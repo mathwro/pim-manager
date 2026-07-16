@@ -42,7 +42,7 @@ type Runtime struct {
 	AzureResources AssignmentProvider
 	Groups         AssignmentProvider
 	Account        AccountProvider
-	StepUpCommand  func(string, string) (*exec.Cmd, error)
+	StepUpCommand  func(string, bool, string) (*exec.Cmd, error)
 }
 
 type AssignmentProvider interface {
@@ -434,19 +434,19 @@ func (m Model) updateConfirmation(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.err = fmt.Errorf("select at least one assignment to continue")
 			return m, nil
 		}
-		authenticationContext, authenticationRequired, err := authenticationRequirement(selected)
+		authenticationContext, mfaRequired, err := authenticationRequirement(selected)
 		if err != nil {
 			m.err = err
 			return m, nil
 		}
-		if !authenticationRequired {
+		if !mfaRequired && authenticationContext == "" {
 			return m.startActivation(selected)
 		}
 		if m.runtime.StepUpCommand == nil {
 			m.err = errors.New("step-up authentication is unavailable")
 			return m, nil
 		}
-		command, err := m.runtime.StepUpCommand(m.account.TenantID, authenticationContext)
+		command, err := m.runtime.StepUpCommand(m.account.TenantID, mfaRequired, authenticationContext)
 		if err != nil {
 			m.err = err
 			return m, nil
@@ -471,21 +471,20 @@ func (m Model) updateConfirmation(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func authenticationRequirement(assignments []pim.EligibleAssignment) (string, bool, error) {
 	authenticationContext := ""
-	required := false
+	mfaRequired := false
 	for _, assignment := range assignments {
 		policy := assignment.ActivationPolicy
-		required = required || policy.MFARequired
+		mfaRequired = mfaRequired || policy.MFARequired
 		candidate := strings.TrimSpace(policy.AuthenticationContext)
 		if candidate == "" {
 			continue
 		}
-		required = true
 		if authenticationContext != "" && authenticationContext != candidate {
 			return "", false, fmt.Errorf("selected assignments require different authentication contexts %q and %q; activate them in separate batches", authenticationContext, candidate)
 		}
 		authenticationContext = candidate
 	}
-	return authenticationContext, required, nil
+	return authenticationContext, mfaRequired, nil
 }
 
 func (m Model) startActivation(selected []pim.EligibleAssignment) (tea.Model, tea.Cmd) {

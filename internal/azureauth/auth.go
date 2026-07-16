@@ -82,19 +82,23 @@ func (c CLI) PrincipalID(ctx context.Context) (string, error) {
 	return principalID, nil
 }
 
-func StepUpLoginCommand(tenantID, authenticationContext string) (*exec.Cmd, error) {
+func StepUpLoginCommand(tenantID string, mfaRequired bool, authenticationContext string) (*exec.Cmd, error) {
 	tenantID = strings.TrimSpace(tenantID)
 	if tenantID == "" {
 		return nil, errors.New("Azure tenant ID is required for step-up authentication")
 	}
 	authenticationContext = strings.TrimSpace(authenticationContext)
-	claim := map[string]any{"essential": true, "values": []string{"mfa"}}
-	claimName := "amr"
-	if authenticationContext != "" {
-		claim = map[string]any{"essential": true, "value": authenticationContext}
-		claimName = "acrs"
+	accessTokenClaims := map[string]any{}
+	if mfaRequired {
+		accessTokenClaims["amr"] = map[string]any{"essential": true, "values": []string{"mfa"}}
 	}
-	claimsJSON, err := json.Marshal(map[string]any{"access_token": map[string]any{claimName: claim}})
+	if authenticationContext != "" {
+		accessTokenClaims["acrs"] = map[string]any{"essential": true, "value": authenticationContext}
+	}
+	if len(accessTokenClaims) == 0 {
+		return nil, errors.New("MFA or an authentication context is required for step-up authentication")
+	}
+	claimsJSON, err := json.Marshal(map[string]any{"access_token": accessTokenClaims})
 	if err != nil {
 		return nil, fmt.Errorf("encode step-up claims: %w", err)
 	}

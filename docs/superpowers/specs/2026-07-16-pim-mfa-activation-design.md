@@ -52,7 +52,7 @@ The application uses the current account's tenant ID and Azure Resource Manager 
 az login --tenant <tenant-id> --scope https://management.core.windows.net//.default --claims-challenge <base64-encoded-claims-request> --output none
 ```
 
-Standard MFA uses `{"access_token":{"amr":{"essential":true,"values":["mfa"]}}}`. An authentication context such as `c1` uses `{"access_token":{"acrs":{"essential":true,"value":"c1"}}}`. The selected claims request is standard-base64 encoded for Azure CLI. Bubble Tea runs the command as an interactive external process so browser and device-code prompts remain usable.
+Standard MFA uses `{"access_token":{"amr":{"essential":true,"values":["mfa"]}}}`. An authentication context such as `c1` uses `{"access_token":{"acrs":{"essential":true,"value":"c1"}}}`. When selected assignments require both, both claims are included in one request. The claims request is standard-base64 encoded for Azure CLI, and Bubble Tea runs the command as an interactive external process.
 
 The command does not log out first. Successful authentication refreshes Azure CLI's cached token for `https://management.core.windows.net/`, and ARM requests retrieve that same resource token before calling `https://management.azure.com`.
 
