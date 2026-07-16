@@ -64,19 +64,35 @@ type expandedRoleDefinition struct {
 	Type        string `json:"type"`
 }
 
-func (p Provider) Discover(ctx context.Context) ([]pim.EligibleAssignment, error) {
+func (p Provider) discoverEligibilities(ctx context.Context) ([]pim.EligibleAssignment, error) {
 	filter := url.QueryEscape("asTarget()")
 	path := fmt.Sprintf("/providers/Microsoft.Authorization/roleEligibilityScheduleInstances?$filter=%s&api-version=%s", filter, arm.AuthorizationAPIVersion)
 	var assignments []pim.EligibleAssignment
 	for path != "" {
 		var response eligibilityResponse
 		if err := p.arm.Get(ctx, path, &response); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("list eligible Azure role assignments: %w", err)
 		}
 		for _, item := range response.Value {
 			assignments = append(assignments, normalizeEligibility(item))
 		}
 		path = response.NextLink
+	}
+	return assignments, nil
+}
+
+func (p Provider) Discover(ctx context.Context) ([]pim.EligibleAssignment, error) {
+	assignments, err := p.discoverEligibilities(ctx)
+	if err != nil {
+		return nil, err
+	}
+	active, err := p.discoverActiveAssignments(ctx)
+	if err != nil {
+		return nil, err
+	}
+	applyActiveState(assignments, active, time.Now().UTC())
+	if err := p.applyPolicies(ctx, assignments); err != nil {
+		return nil, err
 	}
 	return assignments, nil
 }
