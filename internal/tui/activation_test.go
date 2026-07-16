@@ -1,26 +1,45 @@
 package tui
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/mathwro/pim-manager/internal/pim"
 )
 
-func TestActivationFormRequiresJustificationAndDuration(t *testing.T) {
-	form := activationForm{justification: "", durationISO: "PT2H"}
-	if form.valid() {
-		t.Fatal("expected empty justification to be invalid")
-	}
+func TestActivationFormRequiresJustificationOnlyWhenPolicyRequiresIt(t *testing.T) {
+	optional := []pim.EligibleAssignment{{
+		ID: "optional", DisplayName: "Reader",
+		ActivationPolicy: pim.ActivationPolicy{MaximumDurationISO: "PT8H"},
+	}}
+	required := []pim.EligibleAssignment{{
+		ID: "required", DisplayName: "Owner",
+		ActivationPolicy: pim.ActivationPolicy{MaximumDurationISO: "PT4H", JustificationRequired: true},
+	}}
+	form := activationForm{durations: map[string]string{"optional": "PT8H", "required": "PT4H"}}
 
+	if err := form.validate(optional); err != nil {
+		t.Fatalf("expected optional justification to be valid: %v", err)
+	}
+	if err := form.validate(required); err == nil || !strings.Contains(err.Error(), "justification") {
+		t.Fatalf("expected required justification error, got %v", err)
+	}
 	form.justification = "Need access"
-	form.durationISO = ""
-	if form.valid() {
-		t.Fatal("expected empty duration to be invalid")
+	if err := form.validate(required); err != nil {
+		t.Fatalf("expected completed required form to be valid: %v", err)
 	}
+}
 
-	form.durationISO = "PT2H"
-	if !form.valid() {
-		t.Fatal("expected complete form to be valid")
+func TestActivationFormRequiresEveryAssignmentDuration(t *testing.T) {
+	selected := []pim.EligibleAssignment{
+		{ID: "one", DisplayName: "Contributor"},
+		{ID: "two", DisplayName: "Owner"},
+	}
+	form := activationForm{durations: map[string]string{"one": "PT8H"}}
+
+	err := form.validate(selected)
+	if err == nil || !strings.Contains(err.Error(), "Owner") {
+		t.Fatalf("expected Owner duration error, got %v", err)
 	}
 }
 

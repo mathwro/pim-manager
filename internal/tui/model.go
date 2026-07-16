@@ -66,6 +66,7 @@ type Model struct {
 	formField       activationFormField
 	justification   textarea.Model
 	duration        textinput.Model
+	durationIndex   int
 	spinner         spinner.Model
 	summaryViewport viewport.Model
 	summary         summary
@@ -106,13 +107,11 @@ func NewModel(runtime Runtime) Model {
 	justification.Placeholder = "Why is this access needed?"
 	justification.CharLimit = 500
 	justification.ShowLineNumbers = false
-	justification.SetHeight(4)
+	justification.SetHeight(3)
 
 	duration := textinput.New()
 	duration.Prompt = ""
-	duration.Placeholder = "PT1H"
 	duration.CharLimit = 20
-	duration.SetValue("PT1H")
 
 	activity := spinner.New()
 	activity.Spinner = spinner.Line
@@ -124,9 +123,7 @@ func NewModel(runtime Runtime) Model {
 		selectedSection: SectionAzureResources,
 		sections:        []Section{SectionAzureResources},
 		assignmentList:  newAssignmentList(nil),
-		form: activationForm{
-			durationISO: "PT1H",
-		},
+		form:            activationForm{durations: map[string]string{}},
 		formField:       formFieldJustification,
 		justification:   justification,
 		duration:        duration,
@@ -358,20 +355,27 @@ func (m Model) updateDetails(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m Model) updateActivation(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch key.Type {
 	case tea.KeyEsc:
+		m.syncForm()
 		m.justification.Blur()
 		m.duration.Blur()
 		m.screen = ScreenAssignments
 		m.err = nil
 		return m, nil
-	case tea.KeyTab, tea.KeyShiftTab:
-		return m.toggleFormFocus()
+	case tea.KeyTab:
+		return m.moveFormFocus(1)
+	case tea.KeyShiftTab:
+		return m.moveFormFocus(-1)
 	case tea.KeyEnter:
+		selected := m.assignmentList.selected()
 		if m.formField == formFieldJustification {
-			return m.focusDuration()
+			return m.focusDuration(0)
 		}
 		m.syncForm()
-		if !m.form.valid() {
-			m.err = fmt.Errorf("justification and duration are required")
+		if m.durationIndex < len(selected)-1 {
+			return m.focusDuration(m.durationIndex + 1)
+		}
+		if err := m.form.validate(selected); err != nil {
+			m.err = err
 			return m, nil
 		}
 		m.err = nil
@@ -399,7 +403,7 @@ func (m Model) updateConfirmation(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch key.Type {
 	case tea.KeyEsc:
 		m.screen = ScreenActivation
-		return m.focusDuration()
+		return m.focusDuration(m.durationIndex)
 	case tea.KeyEnter:
 		selected := m.assignmentList.selected()
 		if len(selected) == 0 {
@@ -462,33 +466,70 @@ func (m Model) beginDiscovery(section Section) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) openActivationForm() (tea.Model, tea.Cmd) {
+	m.prepareActivationForm()
 	m.screen = ScreenActivation
 	m.err = nil
 	return m.focusJustification()
 }
 
+func (m *Model) prepareActivationForm() {
+	selected := m.assignmentList.selected()
+	durations := make(map[string]string, len(selected))
+	for _, assignment := range selected {
+		value := strings.TrimSpace(m.form.durations[assignment.ID])
+		if value == "" {
+			value = assignment.ActivationPolicy.MaximumDurationISO
+		}
+		durations[assignment.ID] = value
+	}
+	m.form.durations = durations
+	if m.durationIndex >= len(selected) {
+		m.durationIndex = max(0, len(selected)-1)
+	}
+}
+
 func (m Model) focusJustification() (tea.Model, tea.Cmd) {
+	m.syncForm()
 	m.formField = formFieldJustification
 	m.duration.Blur()
 	return m, m.justification.Focus()
 }
 
-func (m Model) focusDuration() (tea.Model, tea.Cmd) {
+func (m Model) focusDuration(index int) (tea.Model, tea.Cmd) {
+	selected := m.assignmentList.selected()
+	if len(selected) == 0 {
+		return m.focusJustification()
+	}
+	m.syncForm()
+	m.durationIndex = min(max(index, 0), len(selected)-1)
 	m.formField = formFieldDuration
 	m.justification.Blur()
+	m.duration.SetValue(m.form.durations[selected[m.durationIndex].ID])
 	return m, m.duration.Focus()
 }
 
-func (m Model) toggleFormFocus() (tea.Model, tea.Cmd) {
-	if m.formField == formFieldJustification {
-		return m.focusDuration()
+func (m Model) moveFormFocus(delta int) (tea.Model, tea.Cmd) {
+	selected := m.assignmentList.selected()
+	position := 0
+	if m.formField == formFieldDuration {
+		position = m.durationIndex + 1
 	}
-	return m.focusJustification()
+	position = (position + delta + len(selected) + 1) % (len(selected) + 1)
+	if position == 0 {
+		return m.focusJustification()
+	}
+	return m.focusDuration(position - 1)
 }
 
 func (m *Model) syncForm() {
 	m.form.justification = m.justification.Value()
-	m.form.durationISO = m.duration.Value()
+	if m.formField != formFieldDuration {
+		return
+	}
+	selected := m.assignmentList.selected()
+	if m.durationIndex < len(selected) {
+		m.form.durations[selected[m.durationIndex].ID] = m.duration.Value()
+	}
 }
 
 func (m Model) acceptingText() bool {
@@ -592,7 +633,6 @@ func (m Model) discoverAssignments() tea.Cmd {
 func (m Model) activateSelected(selected []pim.EligibleAssignment) tea.Cmd {
 	provider := m.providerForSection(m.activeSection)
 	justification := strings.TrimSpace(m.form.justification)
-	duration := strings.TrimSpace(m.form.durationISO)
 	return func() tea.Msg {
 		results := make([]pim.ActivationResult, 0, len(selected))
 		if provider == nil {
@@ -609,7 +649,7 @@ func (m Model) activateSelected(selected []pim.EligibleAssignment) tea.Cmd {
 			request := pim.ActivationRequest{
 				Assignment:    assignment,
 				Justification: justification,
-				DurationISO:   duration,
+				DurationISO:   strings.TrimSpace(m.form.durations[assignment.ID]),
 			}
 			result, err := provider.Activate(context.Background(), request)
 			if err != nil {

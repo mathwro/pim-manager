@@ -202,28 +202,47 @@ func (m Model) viewActivation() string {
 	b.WriteString("\n")
 	b.WriteString(m.stepLine(2))
 	b.WriteString("\n\n")
-	b.WriteString(fmt.Sprintf("One request will be applied to %s.\n\n", accentStyle.Render(fmt.Sprintf("%d selected assignments", len(m.assignmentList.selected())))))
+	selected := m.assignmentList.selected()
+	b.WriteString(fmt.Sprintf("One request will be applied to %s.\n\n", accentStyle.Render(fmt.Sprintf("%d selected assignments", len(selected)))))
 
+	required := m.form.requiredJustifications(selected)
+	justificationLabel := "Justification — optional"
+	justificationHelp := "Optional for all selected assignments."
+	if required > 0 {
+		justificationLabel = "Justification — REQUIRED"
+		justificationHelp = fmt.Sprintf("Required by %d of %d selected assignments.", required, len(selected))
+	}
 	justificationStyle := fieldStyle
-	durationStyle := fieldStyle
 	if m.formField == formFieldJustification {
 		justificationStyle = focusedFieldStyle
-	} else {
-		durationStyle = focusedFieldStyle
 	}
-	b.WriteString(violetStyle.Render("Justification"))
+	b.WriteString(violetStyle.Render(justificationLabel))
 	b.WriteString("\n")
 	b.WriteString(justificationStyle.Width(m.contentWidth() - 4).Render(m.justification.View()))
 	b.WriteString("\n")
-	b.WriteString(mutedStyle.Render("Describe the business reason Azure reviewers should see."))
+	b.WriteString(mutedStyle.Render(justificationHelp))
 	b.WriteString("\n\n")
-	b.WriteString(violetStyle.Render("Duration"))
+	b.WriteString(violetStyle.Render("Durations"))
 	b.WriteString("\n")
-	b.WriteString(durationStyle.Width(min(30, m.contentWidth()-4)).Render(m.duration.View()))
-	b.WriteString("\n")
-	b.WriteString(mutedStyle.Render("ISO 8601 duration, for example PT1H or PT4H."))
+	start, end := m.activationDurationWindow(len(selected))
+	for index := start; index < end; index++ {
+		assignment := selected[index]
+		marker := "  "
+		value := m.form.durations[assignment.ID]
+		if m.formField == formFieldDuration && index == m.durationIndex {
+			marker = "> "
+			value = m.duration.View()
+		}
+		nameWidth := max(12, m.roleColumnWidth()-4)
+		name := truncateText(displayName(assignment), nameWidth)
+		b.WriteString(fmt.Sprintf("%s%-*s  %-10s  %s\n", marker, nameWidth, name, value, mutedStyle.Render("max "+assignment.ActivationPolicy.MaximumDurationISO)))
+	}
+	if start > 0 || end < len(selected) {
+		b.WriteString(mutedStyle.Render(fmt.Sprintf("  Showing %d-%d of %d durations", start+1, end, len(selected))))
+		b.WriteString("\n")
+	}
 	if m.err != nil {
-		b.WriteString("\n\n")
+		b.WriteString("\n")
 		b.WriteString(errorStyle.Render(m.err.Error()))
 	}
 	b.WriteString(m.footer([]keyHint{{"tab", "switch field"}, {"enter", "next / review"}, {"esc", "back"}}))
@@ -241,14 +260,18 @@ func (m Model) viewConfirmation() string {
 	b.WriteString("\n")
 	limit := min(len(selected), 6)
 	for index := range limit {
-		b.WriteString(fmt.Sprintf("  - %s  %s\n", displayName(selected[index]), mutedStyle.Render(displayScope(selected[index]))))
+		b.WriteString(fmt.Sprintf("  - %s  %s  %s\n", displayName(selected[index]), accentStyle.Render(m.form.durations[selected[index].ID]), mutedStyle.Render(displayScope(selected[index]))))
 	}
 	if len(selected) > limit {
 		b.WriteString(mutedStyle.Render(fmt.Sprintf("  ...and %d more\n", len(selected)-limit)))
 	}
+	justification := strings.TrimSpace(m.form.justification)
+	if justification == "" {
+		justification = "(none)"
+	}
 	b.WriteString("\n")
 	b.WriteString(panelStyle.Width(m.contentWidth() - 6).Render(
-		fmt.Sprintf("%s\n%s\n\n%s  %s", violetStyle.Render("Justification"), strings.TrimSpace(m.form.justification), violetStyle.Render("Duration"), strings.TrimSpace(m.form.durationISO)),
+		fmt.Sprintf("%s\n%s", violetStyle.Render("Justification"), justification),
 	))
 	b.WriteString("\n\n")
 	b.WriteString(warningStyle.Render("Activation requests are submitted immediately and are never retried automatically."))
@@ -429,6 +452,22 @@ func (m Model) assignmentVisibleRows() int {
 func (m Model) assignmentWindow(total int) (int, int) {
 	visible := min(total, m.assignmentVisibleRows())
 	start := m.listCursor - visible + 1
+	if start < 0 {
+		start = 0
+	}
+	if start+visible > total {
+		start = total - visible
+	}
+	return start, start + visible
+}
+
+func (m Model) activationDurationVisibleRows() int {
+	return max(2, m.height-24)
+}
+
+func (m Model) activationDurationWindow(total int) (int, int) {
+	visible := min(total, m.activationDurationVisibleRows())
+	start := m.durationIndex - visible + 1
 	if start < 0 {
 		start = 0
 	}

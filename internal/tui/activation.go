@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/mathwro/pim-manager/internal/pim"
@@ -8,11 +9,30 @@ import (
 
 type activationForm struct {
 	justification string
-	durationISO   string
+	durations     map[string]string
 }
 
-func (f activationForm) valid() bool {
-	return strings.TrimSpace(f.justification) != "" && strings.TrimSpace(f.durationISO) != ""
+func (f activationForm) requiredJustifications(selected []pim.EligibleAssignment) int {
+	count := 0
+	for _, assignment := range selected {
+		if assignment.ActivationPolicy.JustificationRequired {
+			count++
+		}
+	}
+	return count
+}
+
+func (f activationForm) validate(selected []pim.EligibleAssignment) error {
+	required := f.requiredJustifications(selected)
+	if required > 0 && strings.TrimSpace(f.justification) == "" {
+		return fmt.Errorf("justification is required by %d selected assignment(s)", required)
+	}
+	for _, assignment := range selected {
+		if strings.TrimSpace(f.durations[assignment.ID]) == "" {
+			return fmt.Errorf("duration is required for %s", assignment.DisplayName)
+		}
+	}
+	return nil
 }
 
 type summary struct {

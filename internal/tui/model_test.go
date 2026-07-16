@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -156,7 +157,7 @@ func (p *scriptedAccountProvider) Account(context.Context) (azureauth.Account, e
 func TestModelDiscoversSelectedSectionAndActivatesSelection(t *testing.T) {
 	provider := &scriptedProvider{
 		discoveries: [][]pim.EligibleAssignment{{
-			{ID: "one", DisplayName: "Global Reader"},
+			{ID: "one", DisplayName: "Global Reader", ActivationPolicy: pim.ActivationPolicy{MaximumDurationISO: "PT2H"}},
 			{ID: "two", DisplayName: "Privileged Role Administrator"},
 		}},
 		results: []pim.ActivationResult{{Status: pim.ActivationStatusActivated}},
@@ -206,6 +207,176 @@ func TestModelDiscoversSelectedSectionAndActivatesSelection(t *testing.T) {
 	}
 	if !strings.Contains(model.View(), "1 activated") {
 		t.Fatalf("expected rendered summary, got %q", model.View())
+	}
+}
+
+func TestActivationFormDefaultsAndSubmitsPerAssignmentDurations(t *testing.T) {
+	provider := &scriptedProvider{
+		discoveries: [][]pim.EligibleAssignment{{
+			{ID: "one", DisplayName: "Contributor", ActivationPolicy: pim.ActivationPolicy{MaximumDurationISO: "PT8H"}},
+			{ID: "two", DisplayName: "Owner", ActivationPolicy: pim.ActivationPolicy{MaximumDurationISO: "PT4H"}},
+		}},
+		results: []pim.ActivationResult{
+			{Status: pim.ActivationStatusActivated},
+			{Status: pim.ActivationStatusActivated},
+		},
+	}
+	model := NewModel(Runtime{AzureResources: provider})
+	next, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = runCommand(next.(Model), cmd)
+
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeySpace})
+	model = next.(Model)
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyDown})
+	model = next.(Model)
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeySpace})
+	model = next.(Model)
+	next, cmd = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = next.(Model)
+	_ = cmd
+
+	if model.form.durations["one"] != "PT8H" || model.form.durations["two"] != "PT4H" {
+		t.Fatalf("unexpected duration defaults: %#v", model.form.durations)
+	}
+	model.form.durations["one"] = "PT6H"
+	msg := model.activateSelected(model.assignmentList.selected())()
+	next, _ = model.Update(msg)
+	model = next.(Model)
+
+	if len(provider.activated) != 2 || provider.activated[0].DurationISO != "PT6H" || provider.activated[1].DurationISO != "PT4H" {
+		t.Fatalf("unexpected activation requests: %#v", provider.activated)
+	}
+}
+
+func TestActivationFormShowsPolicyJustificationRequirement(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		required bool
+		want     string
+	}{
+		{name: "required", required: true, want: "Justification — REQUIRED"},
+		{name: "optional", want: "Justification — optional"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			model := NewModel(Runtime{})
+			model.screen = ScreenAssignments
+			model.activeSection = SectionAzureResources
+			model.assignmentList = newAssignmentList([]pim.EligibleAssignment{{
+				ID: "one", DisplayName: "Owner",
+				ActivationPolicy: pim.ActivationPolicy{MaximumDurationISO: "PT4H", JustificationRequired: test.required},
+			}})
+			model.assignmentList.toggle("one")
+			next, _ := model.openActivationForm()
+			view := next.(Model).View()
+			if !strings.Contains(view, test.want) {
+				t.Fatalf("expected %q, got %q", test.want, view)
+			}
+		})
+	}
+}
+
+func TestActivationFormKeepsDurationEditsWhileMovingFocus(t *testing.T) {
+	model := NewModel(Runtime{})
+	model.screen = ScreenAssignments
+	model.assignmentList = newAssignmentList([]pim.EligibleAssignment{
+		{ID: "one", DisplayName: "Contributor", ActivationPolicy: pim.ActivationPolicy{MaximumDurationISO: "PT8H"}},
+		{ID: "two", DisplayName: "Owner", ActivationPolicy: pim.ActivationPolicy{MaximumDurationISO: "PT4H"}},
+	})
+	model.assignmentList.toggle("one")
+	model.assignmentList.toggle("two")
+	next, _ := model.openActivationForm()
+	model = next.(Model)
+
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyTab})
+	model = next.(Model)
+	if model.formField != formFieldDuration || model.durationIndex != 0 || model.duration.Value() != "PT8H" {
+		t.Fatalf("expected first duration focus, got field %d index %d value %q", model.formField, model.durationIndex, model.duration.Value())
+	}
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyCtrlU})
+	model = sendRunes(next.(Model), "PT6H")
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyTab})
+	model = next.(Model)
+	if model.durationIndex != 1 || model.duration.Value() != "PT4H" || model.form.durations["one"] != "PT6H" {
+		t.Fatalf("expected saved first duration and focused second, got index %d input %q values %#v", model.durationIndex, model.duration.Value(), model.form.durations)
+	}
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
+	model = next.(Model)
+	if model.durationIndex != 0 || model.duration.Value() != "PT6H" {
+		t.Fatalf("expected edited first duration to be restored, got index %d value %q", model.durationIndex, model.duration.Value())
+	}
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
+	model = next.(Model)
+	if model.formField != formFieldJustification {
+		t.Fatalf("expected justification focus, got field %d", model.formField)
+	}
+}
+
+func TestActivationConfirmationPreservesEveryDurationAndOptionalJustification(t *testing.T) {
+	model := NewModel(Runtime{})
+	model.screen = ScreenAssignments
+	model.assignmentList = newAssignmentList([]pim.EligibleAssignment{
+		{ID: "one", DisplayName: "Contributor", ActivationPolicy: pim.ActivationPolicy{MaximumDurationISO: "PT8H"}},
+		{ID: "two", DisplayName: "Owner", ActivationPolicy: pim.ActivationPolicy{MaximumDurationISO: "PT4H"}},
+	})
+	model.assignmentList.toggle("one")
+	model.assignmentList.toggle("two")
+	next, _ := model.openActivationForm()
+	model = next.(Model)
+	model.form.durations["one"] = "PT6H"
+	next, _ = model.focusDuration(1)
+	model = next.(Model)
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = next.(Model)
+
+	if model.screen != ScreenConfirmation {
+		t.Fatalf("expected confirmation, got %s with error %v", model.screen, model.err)
+	}
+	view := model.View()
+	for _, want := range []string{"Contributor", "PT6H", "Owner", "PT4H", "(none)"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("expected confirmation to contain %q, got %q", want, view)
+		}
+	}
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	model = next.(Model)
+	if model.screen != ScreenActivation || model.durationIndex != 1 || model.duration.Value() != "PT4H" || model.form.durations["one"] != "PT6H" {
+		t.Fatalf("expected duration focus and values to survive back navigation: %#v", model.form.durations)
+	}
+}
+
+func TestActivationViewFitsMinimumTerminalWithPerAssignmentDurations(t *testing.T) {
+	assignments := make([]pim.EligibleAssignment, 6)
+	for index := range assignments {
+		assignments[index] = pim.EligibleAssignment{
+			ID:               fmt.Sprintf("assignment-%d", index),
+			DisplayName:      fmt.Sprintf("Role %d", index+1),
+			ActivationPolicy: pim.ActivationPolicy{MaximumDurationISO: fmt.Sprintf("PT%dH", index+1)},
+		}
+	}
+	model := NewModel(Runtime{})
+	model.screen = ScreenActivation
+	model.activeSection = SectionAzureResources
+	model.assignmentList = newAssignmentList(assignments)
+	for _, assignment := range assignments {
+		model.assignmentList.toggle(assignment.ID)
+	}
+	model.prepareActivationForm()
+	next, _ := model.focusDuration(len(assignments) - 1)
+	model = next.(Model)
+	next, _ = model.Update(tea.WindowSizeMsg{Width: 80, Height: 26})
+	model = next.(Model)
+
+	view := model.View()
+	if height := lipgloss.Height(view); height > 26 {
+		t.Fatalf("expected height at most 26, got %d for %q", height, view)
+	}
+	for _, line := range strings.Split(view, "\n") {
+		if width := lipgloss.Width(line); width > 80 {
+			t.Fatalf("expected line width at most 80, got %d for %q", width, line)
+		}
+	}
+	if !strings.Contains(view, "Role 6") || !strings.Contains(view, "Showing") {
+		t.Fatalf("expected focused final duration and range, got %q", view)
 	}
 }
 
@@ -376,7 +547,7 @@ func TestModelShowsDiscoveryErrorWithoutLeavingTUI(t *testing.T) {
 
 func TestModelMarksRetryableProviderFailuresAndShowsRetryAction(t *testing.T) {
 	provider := &scriptedProvider{
-		discoveries: [][]pim.EligibleAssignment{{{ID: "one", DisplayName: "Global Reader"}}},
+		discoveries: [][]pim.EligibleAssignment{{{ID: "one", DisplayName: "Global Reader", ActivationPolicy: pim.ActivationPolicy{MaximumDurationISO: "PT2H"}}}},
 		activateErr: []error{activation.NewRetryableError(errors.New("temporary Azure error"))},
 	}
 	model := NewModel(Runtime{AzureResources: provider})
@@ -513,7 +684,7 @@ func TestSummaryViewListsPerAssignmentStatuses(t *testing.T) {
 
 func TestModelSupportsHelpBackNavigationAndQuit(t *testing.T) {
 	provider := &scriptedProvider{
-		discoveries: [][]pim.EligibleAssignment{{{ID: "one", DisplayName: "Global Reader"}}},
+		discoveries: [][]pim.EligibleAssignment{{{ID: "one", DisplayName: "Global Reader", ActivationPolicy: pim.ActivationPolicy{MaximumDurationISO: "PT2H"}}}},
 	}
 	model := NewModel(Runtime{AzureResources: provider})
 	next, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
