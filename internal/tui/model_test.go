@@ -265,6 +265,15 @@ func TestAssignmentsViewShowsActiveStateAndCount(t *testing.T) {
 		}
 	}
 
+	next, _ := model.Update(tea.KeyMsg{Type: tea.KeySpace})
+	model = next.(Model)
+	view = model.View()
+	for _, want := range []string{"1 selected", "0 selectable", "1 active"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("expected %q after selecting inactive assignment, got %q", want, view)
+		}
+	}
+
 	model.listCursor = 1
 	model.screen = ScreenDetails
 	view = model.View()

@@ -83,13 +83,16 @@ func (m Model) viewAssignments() string {
 	}
 	b.WriteString(fieldStyle.Width(m.contentWidth() - 4).Render(searchLabel))
 	b.WriteString("\n")
-	selectedCount := len(m.assignmentList.selected())
+	selectedCount := 0
 	selectableCount := 0
 	activeCount := 0
 	for _, assignment := range m.assignmentList.items {
-		if assignment.Active {
+		switch {
+		case assignment.Active:
 			activeCount++
-		} else {
+		case m.assignmentList.selectedIDs[assignment.ID]:
+			selectedCount++
+		default:
 			selectableCount++
 		}
 	}
