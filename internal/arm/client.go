@@ -11,7 +11,7 @@ import (
 )
 
 const BaseURL = "https://management.azure.com"
-const Resource = "https://management.azure.com/"
+const Resource = "https://management.core.windows.net/"
 const AuthorizationAPIVersion = "2020-10-01"
 
 type TokenSource interface {

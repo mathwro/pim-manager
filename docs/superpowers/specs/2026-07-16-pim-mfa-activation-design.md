@@ -52,7 +52,7 @@ az login --tenant <tenant-id> --scope https://management.core.windows.net//.defa
 
 The claims request is exactly `{"access_token":{"amr":{"essential":true,"values":["mfa"]}}}` before standard base64 encoding. It asks Microsoft Entra for an ARM access token that records completed MFA, as required by Azure CLI's `--claims-challenge` argument. The application invokes the command interactively through Bubble Tea's external-process support so browser and device-code prompts remain usable.
 
-The command does not log out first. Successful authentication refreshes Azure CLI's cached account tokens, which the existing `az account get-access-token` integration then uses for ARM requests.
+The command does not log out first. Successful authentication refreshes Azure CLI's cached token for `https://management.core.windows.net/`, and ARM requests retrieve that same resource token before calling the `https://management.azure.com` endpoint. Keeping the challenged and consumed token resource identical prevents reuse of a still-valid pre-MFA cache entry.
 
 ## Components
 

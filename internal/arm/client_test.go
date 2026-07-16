@@ -38,6 +38,28 @@ func TestPutReturnsResponseErrorWithStatusCode(t *testing.T) {
 	}
 }
 
+func TestClientRequestsMFAChallengeARMResource(t *testing.T) {
+	tokenSource := &recordingTokenSource{}
+	client := NewClient(
+		&http.Client{Transport: armRoundTrip(func(*http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Status:     "200 OK",
+				Body:       io.NopCloser(strings.NewReader(`{}`)),
+				Header:     make(http.Header),
+			}, nil
+		})},
+		tokenSource,
+	)
+
+	if err := client.Get(context.Background(), "/subscriptions/sub-1", nil); err != nil {
+		t.Fatalf("Get returned error: %v", err)
+	}
+	if tokenSource.resource != "https://management.core.windows.net/" {
+		t.Fatalf("expected MFA-challenged ARM resource, got %q", tokenSource.resource)
+	}
+}
+
 type armRoundTrip func(*http.Request) (*http.Response, error)
 
 func (f armRoundTrip) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -47,5 +69,14 @@ func (f armRoundTrip) RoundTrip(req *http.Request) (*http.Response, error) {
 type staticTokenSource struct{}
 
 func (staticTokenSource) AccessToken(context.Context, string) (string, error) {
+	return "token", nil
+}
+
+type recordingTokenSource struct {
+	resource string
+}
+
+func (s *recordingTokenSource) AccessToken(_ context.Context, resource string) (string, error) {
+	s.resource = resource
 	return "token", nil
 }
