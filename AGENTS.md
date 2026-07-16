@@ -6,7 +6,7 @@ Guidance for AI coding agents working on `pim-manager`.
 
 `pim-manager` is a Go CLI for discovering and activating Microsoft PIM eligibilities through an interactive terminal UI. It uses Cobra for CLI structure, Bubble Tea for the TUI runtime, and Bubbles for reusable TUI components.
 
-The product should use the user's existing Azure CLI authentication. Do not add a custom login flow unless the design is explicitly changed.
+The product uses the user's existing Azure CLI authentication. Policy-required step-up authentication must run through interactive Azure CLI login; do not add a custom login flow unless the design explicitly changes.
 
 ## Current Design Source
 
@@ -20,11 +20,11 @@ The MVP supports three top-level PIM areas, matching the Azure portal model:
 
 | Section | Scope |
 | --- | --- |
-| Entra Roles | Eligible Microsoft Entra directory role activations. |
-| Azure Resources | Eligible Azure RBAC activations across management groups, subscriptions, and resource groups. |
-| Groups | Eligible Privileged Access Group member and owner activations. |
+| Entra Roles | Paused until Azure CLI can obtain the required Microsoft Graph PIM permissions. |
+| Azure Resources | Active: eligible Azure RBAC activations across management groups, subscriptions, and resource groups. |
+| Groups | Paused until Azure CLI can obtain the required Microsoft Graph PIM permissions. |
 
-Each section should support discovery, search/filtering, multi-select, optional detail inspection, shared justification and duration input, confirmation, batch activation, progress reporting, and a per-assignment summary.
+The active Azure Resources section supports discovery, search/filtering, multi-select, optional detail inspection, shared justification and per-assignment duration input, confirmation, policy-required step-up authentication, batch activation, progress reporting, and a per-assignment summary.
 
 ## Non-Goals for MVP
 
@@ -45,13 +45,13 @@ Keep packages small and purpose-specific:
 | --- | --- |
 | `cmd` | Cobra commands, root command setup, flags, and process exit behavior. |
 | `internal/app` | Application wiring for auth, providers, activation services, and the TUI model. |
-| `internal/azureauth` | Azure CLI login validation and access token retrieval for Microsoft Graph and Azure Resource Manager. |
-| `internal/pim` | Shared domain types for eligibility, assignment source, scope metadata, activation requests, and activation results. |
+| `internal/azureauth` | Azure CLI login validation, access token retrieval, and interactive MFA/authentication-context step-up command construction. |
+| `internal/pim` | Shared domain types for eligibility, activation policy requirements, scope metadata, activation requests, and activation results. |
 | `internal/providers/entra` | Discovery and activation for eligible Microsoft Entra directory roles. |
-| `internal/providers/azureresources` | Discovery and activation for eligible Azure Resource roles. |
+| `internal/providers/azureresources` | Discovery, effective-policy normalization, and activation for eligible Azure Resource roles. |
 | `internal/providers/groups` | Discovery and activation for eligible Privileged Access Group member and owner assignments. |
 | `internal/activation` | Batch activation orchestration, partial success handling, and retry classification. |
-| `internal/tui` | Bubble Tea screens, Bubbles components, navigation, selection state, forms, progress, and summaries. |
+| `internal/tui` | Bubble Tea screens, navigation, selection state, forms, policy-driven step-up gating, progress, and summaries. |
 
 The TUI should depend on interfaces rather than concrete Azure clients. Provider packages should translate Azure API responses into shared `pim.EligibleAssignment` values.
 
@@ -59,6 +59,10 @@ The TUI should depend on interfaces rather than concrete Azure clients. Provider
 
 - Azure CLI login state is validated on startup.
 - If the user is not signed in, show the exact `az login` command and provide a retry path.
+- Step-up authentication runs only when a selected assignment explicitly requires standard MFA or an enabled Conditional Access authentication context.
+- A batch may contain at most one authentication context; conflicting contexts must be activated separately.
+- Failed or canceled step-up authentication submits no activation requests.
+- Disable Azure CLI's subscription selector only for the child step-up process; do not mutate the user's global CLI configuration.
 - Discovery failures are isolated to the relevant top-level section.
 - Activation failures are isolated to the relevant assignment.
 - Batch activation continues after individual failures.
@@ -88,10 +92,10 @@ Prefer unit tests around isolated logic. Normal test runs should not require liv
 Cover:
 
 - Cobra startup behavior and error propagation.
-- Azure CLI command/token parsing with mocked command execution.
-- Provider response normalization into shared PIM domain records.
+- Azure CLI command/token parsing, MFA and `acrs` claims construction, and child-process environment with no live login.
+- Provider response and effective activation-policy normalization into shared PIM domain records.
 - Batch activation partial success, pending approval, failures, and retry eligibility.
-- Bubble Tea model updates for navigation, selection, form validation, and summaries.
+- Bubble Tea model updates for navigation, selection, form validation, step-up gating, context conflicts, wrapped Azure errors, and summaries.
 
 Live Azure integration checks should be optional and gated behind explicit environment variables or commands.
 
