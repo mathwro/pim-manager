@@ -74,31 +74,41 @@ func isCurrentActivation(item roleAssignmentScheduleInstance, now time.Time) boo
 
 func policyForAssignment(policies []roleManagementPolicyAssignment, roleDefinitionID string) (pim.ActivationPolicy, error) {
 	roleName := resourceName(roleDefinitionID)
-	for _, assignment := range policies {
-		if resourceName(assignment.Properties.RoleDefinitionID) != roleName {
-			continue
+	matchingIndex := -1
+	matches := 0
+	for index := range policies {
+		if resourceName(policies[index].Properties.RoleDefinitionID) == roleName {
+			matchingIndex = index
+			matches++
 		}
-		var policy pim.ActivationPolicy
-		var enablementFound bool
-		for _, rule := range assignment.Properties.EffectiveRules {
-			switch {
-			case strings.EqualFold(rule.ID, "Expiration_EndUser_Assignment"):
-				policy.MaximumDurationISO = strings.TrimSpace(rule.MaximumDuration)
-			case strings.EqualFold(rule.ID, "Enablement_EndUser_Assignment"):
-				enablementFound = true
-				for _, enabled := range rule.EnabledRules {
-					if strings.EqualFold(enabled, "Justification") {
-						policy.JustificationRequired = true
-					}
+	}
+	if matches == 0 {
+		return pim.ActivationPolicy{}, fmt.Errorf("no activation policy for role definition %s", roleDefinitionID)
+	}
+	if matches > 1 {
+		return pim.ActivationPolicy{}, fmt.Errorf("multiple activation policies for role definition %s", roleDefinitionID)
+	}
+
+	assignment := policies[matchingIndex]
+	var policy pim.ActivationPolicy
+	var enablementFound bool
+	for _, rule := range assignment.Properties.EffectiveRules {
+		switch {
+		case strings.EqualFold(rule.ID, "Expiration_EndUser_Assignment"):
+			policy.MaximumDurationISO = strings.TrimSpace(rule.MaximumDuration)
+		case strings.EqualFold(rule.ID, "Enablement_EndUser_Assignment"):
+			enablementFound = true
+			for _, enabled := range rule.EnabledRules {
+				if strings.EqualFold(enabled, "Justification") {
+					policy.JustificationRequired = true
 				}
 			}
 		}
-		if policy.MaximumDurationISO == "" || !enablementFound {
-			return pim.ActivationPolicy{}, fmt.Errorf("incomplete end-user activation policy for role definition %s", roleDefinitionID)
-		}
-		return policy, nil
 	}
-	return pim.ActivationPolicy{}, fmt.Errorf("no activation policy for role definition %s", roleDefinitionID)
+	if policy.MaximumDurationISO == "" || !enablementFound {
+		return pim.ActivationPolicy{}, fmt.Errorf("incomplete end-user activation policy for role definition %s", roleDefinitionID)
+	}
+	return policy, nil
 }
 
 func (p Provider) discoverActiveAssignments(ctx context.Context) ([]roleAssignmentScheduleInstance, error) {

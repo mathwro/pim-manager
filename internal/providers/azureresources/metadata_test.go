@@ -130,3 +130,14 @@ func TestPolicyForAssignmentRejectsMissingEnablement(t *testing.T) {
 		t.Fatalf("expected incomplete policy error, got %v", err)
 	}
 }
+
+func TestPolicyForAssignmentRejectsAmbiguousMatches(t *testing.T) {
+	roleDefinitionID := "/subscriptions/sub-1/providers/Microsoft.Authorization/roleDefinitions/reader"
+	_, err := policyForAssignment([]roleManagementPolicyAssignment{
+		testPolicy("/subscriptions/sub-1", "reader", "PT8H"),
+		testPolicy("/subscriptions/SUB-1", "READER", "PT4H", "Justification"),
+	}, roleDefinitionID)
+	if err == nil || !strings.Contains(err.Error(), "multiple activation policies") || !strings.Contains(err.Error(), roleDefinitionID) {
+		t.Fatalf("expected role-specific ambiguity error, got %v", err)
+	}
+}
