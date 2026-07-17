@@ -10,62 +10,72 @@ import (
 	"testing"
 )
 
-func TestAccountReturnsCurrentAzureAccount(t *testing.T) {
+func TestTenantsReturnsDistinctAzureTenants(t *testing.T) {
 	runner := fakeRunner{outputs: map[string][]byte{
-		"az account show --output json": []byte(`{"id":"sub-1","tenantId":"tenant-1","user":{"name":"user@example.com"}}`),
+		"az account tenant list --output json": []byte(`[
+			{"tenantId":"tenant-1","displayName":"Contoso","defaultDomain":"contoso.onmicrosoft.com"},
+			{"tenantId":"tenant-2","defaultDomain":"fabrikam.onmicrosoft.com"},
+			{"tenantId":"tenant-1","displayName":"duplicate"},
+			{"tenantId":"  "}
+		]`),
 	}}
-	client := NewCLI(runner.Run)
 
-	account, err := client.Account(context.Background())
+	tenants, err := NewCLI(runner.Run).Tenants(context.Background())
 	if err != nil {
-		t.Fatalf("Account returned error: %v", err)
+		t.Fatalf("Tenants returned error: %v", err)
 	}
-	if account.SubscriptionID != "sub-1" || account.TenantID != "tenant-1" || account.UserName != "user@example.com" {
-		t.Fatalf("unexpected account: %#v", account)
+	want := []Tenant{
+		{ID: "tenant-1", DisplayName: "Contoso", DefaultDomain: "contoso.onmicrosoft.com"},
+		{ID: "tenant-2", DefaultDomain: "fabrikam.onmicrosoft.com"},
+	}
+	if !reflect.DeepEqual(tenants, want) {
+		t.Fatalf("expected %#v, got %#v", want, tenants)
 	}
 }
 
-func TestAccountReturnsLoginHintOnAzFailure(t *testing.T) {
-	client := NewCLI(func(context.Context, string, ...string) ([]byte, error) {
-		return nil, errors.New("not logged in")
-	})
+func TestTenantsReturnsLoginHintWhenNoneAreUsable(t *testing.T) {
+	client := NewCLI(fakeRunner{outputs: map[string][]byte{
+		"az account tenant list --output json": []byte(`[{"tenantId":" "}]`),
+	}}.Run)
 
-	_, err := client.Account(context.Background())
+	_, err := client.Tenants(context.Background())
 	if !errors.Is(err, ErrNotLoggedIn) {
 		t.Fatalf("expected ErrNotLoggedIn, got %v", err)
 	}
 }
 
-func TestAccountReturnsContextErrorsUnchanged(t *testing.T) {
+func TestTenantsPreservesContextErrors(t *testing.T) {
 	for _, contextErr := range []error{context.Canceled, context.DeadlineExceeded} {
 		t.Run(contextErr.Error(), func(t *testing.T) {
 			client := NewCLI(func(context.Context, string, ...string) ([]byte, error) {
 				return nil, contextErr
 			})
-
-			_, err := client.Account(context.Background())
-			if !errors.Is(err, contextErr) {
-				t.Fatalf("expected %v, got %v", contextErr, err)
-			}
-			if errors.Is(err, ErrNotLoggedIn) {
-				t.Fatalf("did not expect ErrNotLoggedIn, got %v", err)
+			_, err := client.Tenants(context.Background())
+			if !errors.Is(err, contextErr) || errors.Is(err, ErrNotLoggedIn) {
+				t.Fatalf("expected unchanged %v, got %v", contextErr, err)
 			}
 		})
 	}
 }
 
-func TestAccountWrapsUnexpectedAzFailureWithLoginHint(t *testing.T) {
-	commandErr := errors.New("az account show failed")
+func TestTenantsWrapsAzureCLIErrorWithLoginHint(t *testing.T) {
+	commandErr := errors.New("az account tenant list failed")
 	client := NewCLI(func(context.Context, string, ...string) ([]byte, error) {
 		return nil, commandErr
 	})
 
-	_, err := client.Account(context.Background())
-	if !errors.Is(err, ErrNotLoggedIn) {
-		t.Fatalf("expected ErrNotLoggedIn, got %v", err)
+	_, err := client.Tenants(context.Background())
+	if !errors.Is(err, ErrNotLoggedIn) || !strings.Contains(err.Error(), commandErr.Error()) {
+		t.Fatalf("expected login hint with command details, got %v", err)
 	}
-	if !strings.Contains(err.Error(), commandErr.Error()) {
-		t.Fatalf("expected command error details, got %v", err)
+}
+
+func TestTenantsRejectsInvalidJSON(t *testing.T) {
+	client := NewCLI(fakeRunner{outputs: map[string][]byte{
+		"az account tenant list --output json": []byte(`not-json`),
+	}}.Run)
+	if _, err := client.Tenants(context.Background()); err == nil || !strings.Contains(err.Error(), "parse az account tenant list output") {
+		t.Fatalf("expected parse error, got %v", err)
 	}
 }
 
@@ -81,6 +91,21 @@ func TestAccessTokenUsesRequestedResource(t *testing.T) {
 	}
 	if token != "abc" {
 		t.Fatalf("expected token abc, got %q", token)
+	}
+}
+
+func TestAccessTokenUsesTenantFromContext(t *testing.T) {
+	runner := fakeRunner{outputs: map[string][]byte{
+		"az account get-access-token --resource https://management.core.windows.net/ --tenant tenant-1 --output json": []byte(`{"accessToken":"abc"}`),
+	}}
+	ctx := WithTenant(context.Background(), " tenant-1 ")
+
+	token, err := NewCLI(runner.Run).AccessToken(ctx, "https://management.core.windows.net/")
+	if err != nil || token != "abc" {
+		t.Fatalf("expected tenant-scoped token abc, got %q, %v", token, err)
+	}
+	if got := TenantFromContext(ctx); got != "tenant-1" {
+		t.Fatalf("expected tenant-1 in context, got %q", got)
 	}
 }
 

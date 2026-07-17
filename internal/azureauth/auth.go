@@ -21,10 +21,10 @@ type CLI struct {
 	run Runner
 }
 
-type Account struct {
-	SubscriptionID string
-	TenantID       string
-	UserName       string
+type Tenant struct {
+	ID            string
+	DisplayName   string
+	DefaultDomain string
 }
 
 func NewCLI(run Runner) CLI {
@@ -34,30 +34,70 @@ func NewCLI(run Runner) CLI {
 	return CLI{run: run}
 }
 
-func (c CLI) Account(ctx context.Context) (Account, error) {
-	out, err := c.run(ctx, "az", "account", "show", "--output", "json")
+type tenantContextKey struct{}
+
+func WithTenant(ctx context.Context, tenantID string) context.Context {
+	tenantID = strings.TrimSpace(tenantID)
+	if tenantID == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, tenantContextKey{}, tenantID)
+}
+
+func TenantFromContext(ctx context.Context) string {
+	tenantID, _ := ctx.Value(tenantContextKey{}).(string)
+	return tenantID
+}
+
+func (c CLI) Tenants(ctx context.Context) ([]Tenant, error) {
+	out, err := c.run(ctx, "az", "account", "tenant", "list", "--output", "json")
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return Account{}, err
+			return nil, err
 		}
-		return Account{}, fmt.Errorf("%w: %v", ErrNotLoggedIn, err)
+		return nil, fmt.Errorf("%w: %v", ErrNotLoggedIn, err)
 	}
 
-	var payload struct {
-		ID       string `json:"id"`
-		TenantID string `json:"tenantId"`
-		User     struct {
-			Name string `json:"name"`
-		} `json:"user"`
+	var payload []struct {
+		TenantID      string `json:"tenantId"`
+		DisplayName   string `json:"displayName"`
+		DefaultDomain string `json:"defaultDomain"`
 	}
 	if err := json.Unmarshal(out, &payload); err != nil {
-		return Account{}, fmt.Errorf("parse az account output: %w", err)
+		return nil, fmt.Errorf("parse az account tenant list output: %w", err)
 	}
-	return Account{SubscriptionID: payload.ID, TenantID: payload.TenantID, UserName: payload.User.Name}, nil
+
+	tenants := make([]Tenant, 0, len(payload))
+	seen := make(map[string]struct{}, len(payload))
+	for _, item := range payload {
+		id := strings.TrimSpace(item.TenantID)
+		if id == "" {
+			continue
+		}
+		key := strings.ToLower(id)
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		tenants = append(tenants, Tenant{
+			ID:            id,
+			DisplayName:   strings.TrimSpace(item.DisplayName),
+			DefaultDomain: strings.TrimSpace(item.DefaultDomain),
+		})
+	}
+	if len(tenants) == 0 {
+		return nil, fmt.Errorf("%w: Azure CLI returned no tenants", ErrNotLoggedIn)
+	}
+	return tenants, nil
 }
 
 func (c CLI) AccessToken(ctx context.Context, resource string) (string, error) {
-	out, err := c.run(ctx, "az", "account", "get-access-token", "--resource", resource, "--output", "json")
+	args := []string{"account", "get-access-token", "--resource", resource}
+	if tenantID := TenantFromContext(ctx); tenantID != "" {
+		args = append(args, "--tenant", tenantID)
+	}
+	args = append(args, "--output", "json")
+	out, err := c.run(ctx, "az", args...)
 	if err != nil {
 		return "", fmt.Errorf("get Azure CLI access token for %s: %w", resource, err)
 	}
