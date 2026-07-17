@@ -22,7 +22,7 @@ func Run() error {
 	armClient := arm.NewClient(http.DefaultClient, auth)
 	runtime := tui.Runtime{
 		AzureResources:    azureresources.NewProvider(armClient),
-		Account:           auth,
+		Tenants:           auth,
 		StepUpCommand:     azureauth.StepUpLoginCommand,
 		ARMAuthentication: auth.ARMAuthentication,
 	}

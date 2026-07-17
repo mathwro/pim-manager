@@ -92,7 +92,7 @@ func TestRunDefersAzureCliLookupUntilTuiInteraction(t *testing.T) {
 	}
 }
 
-func TestRunInitChecksAccountWithoutSectionDiscovery(t *testing.T) {
+func TestRunInitListsTenantsWithoutSectionDiscovery(t *testing.T) {
 	oldNewCLI := newCLI
 	oldRunProgram := runProgram
 	t.Cleanup(func() {
@@ -108,8 +108,8 @@ func TestRunInitChecksAccountWithoutSectionDiscovery(t *testing.T) {
 				command += " " + arg
 			}
 			commands = append(commands, command)
-			if command == "az account show --output json" {
-				return []byte(`{"id":"sub-1","tenantId":"tenant-1","user":{"name":"user@example.com"}}`), nil
+			if command == "az account tenant list --output json" {
+				return []byte(`[{"tenantId":"tenant-1","defaultDomain":"contoso.com"}]`), nil
 			}
 			return nil, errors.New("unexpected command: " + command)
 		})
@@ -126,7 +126,7 @@ func TestRunInitChecksAccountWithoutSectionDiscovery(t *testing.T) {
 	if err := Run(); err != nil {
 		t.Fatalf("Run returned error: %v", err)
 	}
-	if len(commands) != 1 || commands[0] != "az account show --output json" {
-		t.Fatalf("expected only account-show call, got %#v", commands)
+	if len(commands) != 1 || commands[0] != "az account tenant list --output json" {
+		t.Fatalf("expected only tenant-list call, got %#v", commands)
 	}
 }
