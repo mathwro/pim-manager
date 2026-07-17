@@ -31,15 +31,21 @@ The flow becomes:
 
 ## Azure CLI Behavior
 
-Tenant discovery uses:
+Tenant identity discovery uses:
 
 ```text
 az account tenant list --output json
 ```
 
-Each usable record must have a non-empty `tenantId`. The UI displays the tenant's domain or display name when Azure CLI provides one and always includes its tenant ID. Missing optional display metadata falls back to the tenant ID. Duplicate tenant IDs are collapsed.
+Each usable record must have a non-empty `tenantId`, and duplicate tenant IDs are collapsed. Because some Azure CLI versions return only IDs from this experimental command, `pim-manager` enriches missing display metadata with one filtered subscription-cache query:
 
-Azure CLI failures preserve their details. A failure that indicates no usable login shows the exact `az login` guidance and a retry action.
+```text
+az account list --all --query "[].{tenantId:tenantId,displayName:tenantDisplayName,defaultDomain:tenantDefaultDomain}" --output json
+```
+
+Enrichment merges the first non-empty display name and default domain found for each tenant ID without removing tenants absent from the subscription cache. The UI displays the tenant display name first, then the default domain, then the tenant ID as the final fallback. The tenant ID remains on the row's second line for disambiguation.
+
+Azure CLI command and parsing failures preserve their details. A failure that indicates no usable login shows the exact `az login` guidance and a retry action.
 
 The selected tenant is session-local. Token retrieval uses:
 
@@ -121,6 +127,7 @@ A failed or canceled token check or step-up submits no activation requests. The 
 - If refresh removes the selected tenant, the model returns to tenant selection and clears tenant-specific workflow state.
 - Invalid JSON and records without tenant IDs produce an actionable parsing error when no usable tenant remains.
 - Tenant-list errors remain on the tenant screen and can be retried.
+- Tenant-name enrichment failures remain on the tenant screen with their Azure CLI details and can be retried.
 - Assignment discovery errors remain inside the selected PIM area.
 - Authentication and activation errors retain the existing per-batch and per-assignment isolation.
 - Stale tenant-list or discovery messages are ignored by request generation.
@@ -131,9 +138,9 @@ Normal tests use fake Azure CLI runners and providers; they require no live Azur
 
 ### Azure Authentication Tests
 
-- Parse one and multiple tenant records.
-- Use optional display metadata and tenant-ID fallback.
-- Collapse duplicate tenant IDs.
+- Parse and deduplicate one or multiple tenant records.
+- Enrich missing tenant names/domains from duplicate subscription records, including records where metadata appears after an empty record.
+- Prefer display name, then default domain, then tenant-ID fallback without dropping tenants absent from the subscription cache.
 - Reject an empty or unusable tenant response with login guidance.
 - Preserve context cancellation and command details.
 - Add the exact `--tenant <tenant-id>` arguments to token retrieval when a selected tenant is present.
