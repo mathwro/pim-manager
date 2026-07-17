@@ -132,7 +132,7 @@ func (m Model) viewAssignments() string {
 		b.WriteString("\n")
 	}
 	if m.preparingPolicies {
-		loading := fmt.Sprintf("%s  Loading activation requirements...\n\n", m.spinner.View())
+		loading := m.policyLoadingBanner()
 		if m.waitingForPolicies {
 			b.WriteString(warningStyle.Render(loading))
 		} else {
@@ -245,10 +245,15 @@ func (m Model) viewDetails() string {
 		authentication = "MFA"
 	}
 	maximumDuration := assignment.ActivationPolicy.MaximumDurationISO
-	if !m.policiesReady {
+	switch {
+	case m.preparingPolicies:
 		maximumDuration = "Loading..."
 		justification = "Loading..."
 		authentication = "Loading..."
+	case !m.policiesReady:
+		maximumDuration = "Unavailable"
+		justification = "Unavailable"
+		authentication = "Unavailable"
 	}
 	rows := [][2]string{
 		{"Status", status},
@@ -270,6 +275,15 @@ func (m Model) viewDetails() string {
 			continue
 		}
 		b.WriteString(fmt.Sprintf("%-22s %s\n", mutedStyle.Render(row[0]), row[1]))
+	}
+	if !m.policiesReady && !m.preparingPolicies {
+		if assignmentError := m.assignmentError(); assignmentError != "" {
+			b.WriteString("\n")
+			b.WriteString(assignmentError)
+		}
+		b.WriteString("\n")
+		b.WriteString(warningStyle.Render("Activation requirements are unavailable; press r to retry discovery."))
+		b.WriteString("\n")
 	}
 	b.WriteString(m.footer([]keyHint{{"esc", "back to assignments"}, {"q", "quit"}}))
 	return b.String()
@@ -537,13 +551,21 @@ func (m Model) tenantWindow(total int) (int, int) {
 	return start, start + visible
 }
 
+func (m Model) policyLoadingBanner() string {
+	return fmt.Sprintf("%s  Loading activation requirements...\n\n", m.spinner.View())
+}
+
 func (m Model) assignmentVisibleRows() int {
 	footerExtraRows := max(0, lipgloss.Height(m.assignmentFooter())-2)
 	errorRows := 0
 	if assignmentError := m.assignmentError(); assignmentError != "" {
 		errorRows = lipgloss.Height(assignmentError)
 	}
-	return max(4, m.height-19-footerExtraRows-errorRows)
+	visibleRows := max(4, m.height-19-footerExtraRows-errorRows)
+	if m.preparingPolicies || m.waitingForPolicies {
+		visibleRows = max(1, visibleRows-lipgloss.Height(m.policyLoadingBanner()))
+	}
+	return visibleRows
 }
 
 func (m Model) assignmentWindow(total int) (int, int) {

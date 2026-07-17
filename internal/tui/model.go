@@ -577,6 +577,9 @@ func (m Model) updateAssignments(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) updateDetails(key tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if key.String() == "r" && !m.policiesReady && !m.preparingPolicies {
+		return m.beginDiscovery(m.activeSection, true)
+	}
 	if key.Type == tea.KeyEsc || key.Type == tea.KeyEnter || key.String() == "b" {
 		m.screen = ScreenAssignments
 	}

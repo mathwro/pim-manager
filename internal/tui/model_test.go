@@ -1101,6 +1101,25 @@ func TestAssignmentDetailsShowsAuthenticationRequirement(t *testing.T) {
 	}
 }
 
+func TestAssignmentDetailsShowsPreparationFailureAndRetries(t *testing.T) {
+	sentinel := errors.New("policy lookup failed")
+	model, provider := progressiveTestModel(pim.EligibleAssignment{ID: "reader", DisplayName: "Reader"})
+	provider.prepareErr = fmt.Errorf("prepare activation policies: %w", sentinel)
+	model, prepare := startProgressiveDiscovery(t, model)
+	next, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'i'}})
+	model = runCommand(next.(Model), prepare)
+
+	view := model.View()
+	if strings.Contains(view, "Loading...") || !strings.Contains(view, "Unavailable") || !strings.Contains(view, "prepare activation policies") || !strings.Contains(view, "press r to retry discovery") {
+		t.Fatalf("expected actionable unavailable policy details, got %q", view)
+	}
+	next, cmd := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	model = next.(Model)
+	if cmd == nil || model.screen != ScreenAssignments || !model.loading {
+		t.Fatalf("expected details retry to start discovery, screen=%s loading=%v cmd=%v", model.screen, model.loading, cmd != nil)
+	}
+}
+
 func TestConfirmationShowsMFARequirement(t *testing.T) {
 	model := NewModel(Runtime{})
 	model.screen = ScreenConfirmation
@@ -1904,6 +1923,37 @@ func TestAssignmentsViewFitsMinimumSupportedTerminal(t *testing.T) {
 		if width := lipgloss.Width(line); width > 80 {
 			t.Fatalf("expected line width at most 80, got %d for %q", width, line)
 		}
+	}
+}
+
+func TestAssignmentsPolicyLoadingFitsMinimumSupportedTerminal(t *testing.T) {
+	assignments := make([]pim.EligibleAssignment, 20)
+	for index := range assignments {
+		assignments[index] = pim.EligibleAssignment{
+			ID:          fmt.Sprintf("assignment-%d", index),
+			DisplayName: "Privileged Role Administrator",
+			Scope: pim.Scope{
+				DisplayName: "production-management-group-with-long-name",
+				Type:        pim.ScopeTypeManagementGroup,
+			},
+		}
+	}
+
+	model := NewModel(Runtime{})
+	model.screen = ScreenAssignments
+	model.activeSection = SectionAzureResources
+	model.assignmentList = newAssignmentList(assignments)
+	model.policiesReady = false
+	model.preparingPolicies = true
+	next, _ := model.Update(tea.WindowSizeMsg{Width: 80, Height: 26})
+	model = next.(Model)
+	view := model.View()
+
+	if got, want := lipgloss.Height(view), 26; got > want {
+		t.Fatalf("expected policy-loading assignments height at most %d, got %d for %q", want, got, view)
+	}
+	if !strings.Contains(view, "Loading activation requirements") || !strings.Contains(view, "select all") {
+		t.Fatalf("expected loading state and footer to remain visible, got %q", view)
 	}
 }
 
