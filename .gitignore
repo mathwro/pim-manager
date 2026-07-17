@@ -1,3 +1,39 @@
-.worktrees/
-.superpowers/
-.worktrees
+# Local agent and worktree state
+/.worktrees/
+/.superpowers/
+
+# Go binaries and shared libraries
+/pim-manager
+/pim-manager.exe
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Go test and profiling artifacts
+*.test
+*.out
+coverage.*
+*.coverprofile
+profile.cov
+
+# Local Go workspace files
+go.work
+go.work.sum
+
+# Local environment files
+.env
+
+# Editors and operating systems
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Graphify local and machine-specific state
+graphify-out/cost.json
+graphify-out/.graphify_python
+graphify-out/.graphify_root
+graphify-out/.graphify_*.json
+graphify-out/.needs_update

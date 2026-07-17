@@ -1,0 +1,7 @@
+# Graphify also respects .gitignore. Keep only project content exclusions here.
+
+# Graphify's generated knowledge graph is output, never source input.
+graphify-out/
+
+# Completed implementation plans duplicate the current design specs and code.
+docs/superpowers/plans/
