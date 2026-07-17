@@ -46,6 +46,7 @@ type Runtime struct {
 	Tenants           TenantProvider
 	StepUpCommand     func(string, bool, string) (*exec.Cmd, error)
 	ARMAuthentication func(context.Context, bool, string) (azureauth.ARMAuthentication, error)
+	CheckUpdate       func(context.Context) (string, error)
 }
 
 type AssignmentProvider interface {
@@ -89,6 +90,7 @@ type Model struct {
 	tenantIndex            int
 	selectedTenant         azureauth.Tenant
 	tenantErr              error
+	availableUpdate        string
 	discoveryCheck         int
 	discoveryCancel        context.CancelFunc
 	discoveryCancelKey     discoveryKey
@@ -164,6 +166,11 @@ type tenantsCheckedMsg struct {
 	err     error
 }
 
+type updateCheckedMsg struct {
+	version string
+	err     error
+}
+
 func NewModel(runtime Runtime) Model {
 	justification := textarea.New()
 	justification.Prompt = ""
@@ -210,10 +217,17 @@ func NewModel(runtime Runtime) Model {
 }
 
 func (m Model) Init() tea.Cmd {
-	if m.runtime.Tenants == nil {
+	var commands []tea.Cmd
+	if m.runtime.Tenants != nil {
+		commands = append(commands, m.checkTenants(m.tenantCheck), m.spinner.Tick)
+	}
+	if m.runtime.CheckUpdate != nil {
+		commands = append(commands, m.checkUpdate())
+	}
+	if len(commands) == 0 {
 		return nil
 	}
-	return tea.Batch(m.checkTenants(m.tenantCheck), m.spinner.Tick)
+	return tea.Batch(commands...)
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -230,6 +244,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.spinner, cmd = m.spinner.Update(typed)
 		return m, cmd
+	case updateCheckedMsg:
+		if typed.err == nil {
+			m.availableUpdate = strings.TrimSpace(typed.version)
+		}
+		return m, nil
 	case assignmentsDiscoveredMsg:
 		key := discoveryKey{tenantID: typed.tenantID, section: typed.section}
 		if typed.checkID != m.discoveryCheck || typed.tenantID != m.selectedTenant.ID {
@@ -1131,6 +1150,13 @@ func (m Model) checkTenants(checkID int) tea.Cmd {
 	return func() tea.Msg {
 		tenants, err := provider.Tenants(context.Background())
 		return tenantsCheckedMsg{tenants: tenants, checkID: checkID, err: err}
+	}
+}
+
+func (m Model) checkUpdate() tea.Cmd {
+	return func() tea.Msg {
+		version, err := m.runtime.CheckUpdate(context.Background())
+		return updateCheckedMsg{version: version, err: err}
 	}
 }
 

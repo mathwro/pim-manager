@@ -47,6 +47,12 @@ func runCommand(model Model, cmd tea.Cmd) Model {
 	}
 	return model
 }
+type tenantProviderFunc func(context.Context) ([]azureauth.Tenant, error)
+
+func (f tenantProviderFunc) Tenants(ctx context.Context) ([]azureauth.Tenant, error) {
+	return f(ctx)
+}
+
 
 type fakeAssignmentProvider struct{}
 
@@ -2261,5 +2267,91 @@ func TestToggleAllFilteredSkipsActiveAssignmentsThroughUpdate(t *testing.T) {
 	selected := model.assignmentList.selected()
 	if len(selected) != 1 || selected[0].ID != "inactive" || model.listCursor != 1 {
 		t.Fatalf("expected select-all to skip active assignment and retain focus, cursor=%d selected=%#v", model.listCursor, selected)
+	}
+}
+
+func TestInitStartsTenantAndUpdateChecksTogether(t *testing.T) {
+	started := make(chan string, 2)
+	release := make(chan struct{})
+	model := NewModel(Runtime{
+		Tenants: tenantProviderFunc(func(context.Context) ([]azureauth.Tenant, error) {
+			started <- "tenants"
+			<-release
+			return []azureauth.Tenant{{ID: "tenant-1"}}, nil
+		}),
+		CheckUpdate: func(context.Context) (string, error) {
+			started <- "update"
+			<-release
+			return "v0.1.2", nil
+		},
+	})
+	batch, ok := model.Init()().(tea.BatchMsg)
+	if !ok {
+		t.Fatalf("expected Init batch, got %T", model.Init()())
+	}
+	done := make(chan struct{}, len(batch))
+	for _, command := range batch {
+		go func() {
+			_ = command()
+			done <- struct{}{}
+		}()
+	}
+	seen := map[string]bool{<-started: true, <-started: true}
+	close(release)
+	for range batch {
+		<-done
+	}
+	if !seen["tenants"] || !seen["update"] {
+		t.Fatalf("expected both checks to start, got %#v", seen)
+	}
+}
+
+func TestUpdateCheckStoresOnlySuccessfulAvailability(t *testing.T) {
+	model := NewModel(Runtime{})
+	next, _ := model.Update(updateCheckedMsg{version: " v0.1.2 "})
+	model = next.(Model)
+	if model.availableUpdate != "v0.1.2" {
+		t.Fatalf("expected available version, got %q", model.availableUpdate)
+	}
+	want := errors.New("existing workflow error")
+	model.err = want
+	next, _ = model.Update(updateCheckedMsg{version: "v0.1.3", err: errors.New("proxy unavailable")})
+	model = next.(Model)
+	if model.availableUpdate != "v0.1.2" || !errors.Is(model.err, want) {
+		t.Fatalf("update failure changed model state: version=%q err=%v", model.availableUpdate, model.err)
+	}
+}
+
+func TestUpdateNoticeAppearsOnlyOnHome(t *testing.T) {
+	model := NewModel(Runtime{})
+	model.availableUpdate = "v0.1.2"
+	model.screen = ScreenHome
+	home := model.View()
+	for _, want := range []string{"Update v0.1.2 available", "pim-manager update"} {
+		if !strings.Contains(home, want) {
+			t.Fatalf("expected home notice %q, got %q", want, home)
+		}
+	}
+	model.screen = ScreenTenants
+	if view := model.View(); strings.Contains(view, "pim-manager update") {
+		t.Fatalf("tenant screen included update notice: %q", view)
+	}
+	model.screen = ScreenAssignments
+	if view := model.View(); strings.Contains(view, "pim-manager update") {
+		t.Fatalf("assignment screen included update notice: %q", view)
+	}
+}
+
+func TestHomeUpdateNoticeFitsMinimumTerminal(t *testing.T) {
+	model := NewModel(Runtime{})
+	model.screen = ScreenHome
+	model.availableUpdate = "v0.1.2"
+	next, _ := model.Update(tea.WindowSizeMsg{Width: 80, Height: 26})
+	view := next.(Model).View()
+	if got := lipgloss.Height(view); got > 26 {
+		t.Fatalf("expected home height at most 26, got %d for %q", got, view)
+	}
+	if !strings.Contains(view, "enter  open") {
+		t.Fatalf("expected home footer to remain visible, got %q", view)
 	}
 }

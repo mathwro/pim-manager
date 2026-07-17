@@ -98,9 +98,11 @@ func TestRunDefersAzureCliLookupUntilTuiInteraction(t *testing.T) {
 func TestRunInitListsTenantsWithoutSectionDiscovery(t *testing.T) {
 	oldNewCLI := newCLI
 	oldRunProgram := runProgram
+	oldCheckLatest := checkLatest
 	t.Cleanup(func() {
 		newCLI = oldNewCLI
 		runProgram = oldRunProgram
+		checkLatest = oldCheckLatest
 	})
 
 	var commandMu sync.Mutex
@@ -123,6 +125,11 @@ func TestRunInitListsTenantsWithoutSectionDiscovery(t *testing.T) {
 				return nil, errors.New("unexpected command: " + command)
 			}
 		})
+	}
+	var checkCalls int
+	checkLatest = func(context.Context) (string, error) {
+		checkCalls++
+		return "", nil
 	}
 	runProgram = func(model tea.Model) error {
 		cmd := model.Init()
@@ -153,5 +160,8 @@ func TestRunInitListsTenantsWithoutSectionDiscovery(t *testing.T) {
 	slices.Sort(want)
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("expected tenant discovery and name enrichment calls, got %#v", got)
+	}
+	if checkCalls != 1 {
+		t.Fatalf("expected one background update check, got %d", checkCalls)
 	}
 }

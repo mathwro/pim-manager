@@ -7,10 +7,12 @@ import (
 	"github.com/mathwro/pim-manager/internal/arm"
 	"github.com/mathwro/pim-manager/internal/azureauth"
 	"github.com/mathwro/pim-manager/internal/providers/azureresources"
+	"github.com/mathwro/pim-manager/internal/selfupdate"
 	"github.com/mathwro/pim-manager/internal/tui"
 )
 
 var newCLI = azureauth.NewCLI
+var checkLatest = selfupdate.CheckLatest
 
 var runProgram = func(model tea.Model) error {
 	_, err := tea.NewProgram(model, tea.WithAltScreen()).Run()
@@ -25,6 +27,7 @@ func Run() error {
 		Tenants:           auth,
 		StepUpCommand:     azureauth.StepUpLoginCommand,
 		ARMAuthentication: auth.ARMAuthentication,
+		CheckUpdate:       checkLatest,
 	}
 	return runProgram(tui.NewModel(runtime))
 }

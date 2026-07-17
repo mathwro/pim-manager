@@ -80,11 +80,21 @@ func (m Model) viewHome() string {
 	b.WriteString(m.stepLine(1))
 	b.WriteString("\n\n")
 	b.WriteString(m.tenantPanel())
-	b.WriteString("\n\n")
+	if m.availableUpdate != "" {
+		b.WriteString("\n")
+		b.WriteString(warningStyle.Render(fmt.Sprintf("Update %s available — exit and run: pim-manager update", m.availableUpdate)))
+		b.WriteString("\n")
+	} else {
+		b.WriteString("\n\n")
+	}
 	b.WriteString(violetStyle.Render("Choose where to request privileged access"))
 	b.WriteString("\n")
 	b.WriteString(mutedStyle.Render("Assignments stay inside one Azure PIM area per activation batch."))
-	b.WriteString("\n\n")
+	if m.availableUpdate != "" {
+		b.WriteString("\n")
+	} else {
+		b.WriteString("\n\n")
+	}
 	b.WriteString(mutedStyle.Render("Entra Roles and Groups are paused until Azure CLI can request the required\nMicrosoft Graph PIM permissions."))
 	b.WriteString("\n\n")
 
