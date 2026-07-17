@@ -174,7 +174,6 @@ func startProgressiveDiscovery(t *testing.T, model Model) (Model, tea.Cmd) {
 	return model, nil
 }
 
-
 type cancellableProgressiveProvider struct {
 	*scriptedProvider
 	prepareStarted  chan struct{}
@@ -514,7 +513,6 @@ func TestCancelingSummaryAuthenticationRetryStartsFreshDiscovery(t *testing.T) {
 		t.Fatalf("expected canceling summary retry to refresh assignments, checking=%v loading=%v assignments=%#v selected=%#v cmd=%v", model.checkingAuthentication, model.loading, model.assignmentList.items, model.assignmentList.selectedIDs, cmd != nil)
 	}
 }
-
 
 func TestStalePreparationCannotOverwriteRefreshedDiscovery(t *testing.T) {
 	model := NewModel(Runtime{})
