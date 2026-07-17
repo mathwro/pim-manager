@@ -70,8 +70,28 @@ func azureCLILoginRequired(err error) bool {
 	return strings.Contains(message, "az login") || strings.Contains(message, "not logged in")
 }
 
+type commandResult struct {
+	out []byte
+	err error
+}
+
 func (c CLI) Tenants(ctx context.Context) ([]Tenant, error) {
-	out, err := c.run(ctx, "az", "account", "tenant", "list", "--output", "json")
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	tenantResults := make(chan commandResult, 1)
+	accountResults := make(chan commandResult, 1)
+	go func() {
+		out, err := c.run(ctx, "az", "account", "tenant", "list", "--output", "json")
+		tenantResults <- commandResult{out: out, err: err}
+	}()
+	go func() {
+		out, err := c.run(ctx, "az", "account", "list", "--all", "--query", tenantMetadataQuery, "--output", "json")
+		accountResults <- commandResult{out: out, err: err}
+	}()
+
+	tenantResult := <-tenantResults
+	out, err := tenantResult.out, tenantResult.err
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return nil, err
@@ -124,7 +144,8 @@ func (c CLI) Tenants(ctx context.Context) ([]Tenant, error) {
 		return tenants, nil
 	}
 
-	out, err = c.run(ctx, "az", "account", "list", "--all", "--query", tenantMetadataQuery, "--output", "json")
+	accountResult := <-accountResults
+	out, err = accountResult.out, accountResult.err
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return nil, err
