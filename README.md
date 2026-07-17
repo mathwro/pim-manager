@@ -20,6 +20,14 @@ go install github.com/mathwro/pim-manager@latest
 pim-manager
 ```
 
+Update to the latest tagged release without opening the TUI:
+
+```bash
+pim-manager update
+```
+
+The command requires the Go toolchain and follows Go's `@latest` module version. Tagged builds also check once in the background and show the external update command on the home screen when a newer tag is available.
+
 ## Authentication
 
 The app uses your existing Azure CLI session. Sign in before running:
