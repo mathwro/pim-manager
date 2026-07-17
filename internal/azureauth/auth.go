@@ -49,13 +49,36 @@ func TenantFromContext(ctx context.Context) string {
 	return tenantID
 }
 
+func azureCLIError(out []byte, err error) error {
+	details := strings.TrimSpace(string(out))
+	if details == "" {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			details = strings.TrimSpace(string(exitErr.Stderr))
+		}
+	}
+	if details == "" {
+		return err
+	}
+	return fmt.Errorf("%w: %s", err, details)
+}
+
+func azureCLILoginRequired(err error) bool {
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "az login") || strings.Contains(message, "not logged in")
+}
+
 func (c CLI) Tenants(ctx context.Context) ([]Tenant, error) {
 	out, err := c.run(ctx, "az", "account", "tenant", "list", "--output", "json")
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return nil, err
 		}
-		return nil, fmt.Errorf("%w: %v", ErrNotLoggedIn, err)
+		commandErr := azureCLIError(out, err)
+		if azureCLILoginRequired(commandErr) {
+			return nil, fmt.Errorf("%w: %w", ErrNotLoggedIn, commandErr)
+		}
+		return nil, fmt.Errorf("list Azure CLI tenants: %w", commandErr)
 	}
 
 	var payload []struct {

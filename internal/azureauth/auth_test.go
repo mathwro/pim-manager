@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"os"
 	"reflect"
 	"slices"
 	"strings"
@@ -58,15 +59,27 @@ func TestTenantsPreservesContextErrors(t *testing.T) {
 	}
 }
 
-func TestTenantsWrapsAzureCLIErrorWithLoginHint(t *testing.T) {
-	commandErr := errors.New("az account tenant list failed")
+func TestTenantsClassifiesAzureCLILoginFailure(t *testing.T) {
+	commandErr := errors.New("exit status 1")
 	client := NewCLI(func(context.Context, string, ...string) ([]byte, error) {
-		return nil, commandErr
+		return []byte("Please run 'az login' to setup account."), commandErr
 	})
 
 	_, err := client.Tenants(context.Background())
-	if !errors.Is(err, ErrNotLoggedIn) || !strings.Contains(err.Error(), commandErr.Error()) {
-		t.Fatalf("expected login hint with command details, got %v", err)
+	if !errors.Is(err, ErrNotLoggedIn) || !strings.Contains(err.Error(), "Please run 'az login'") {
+		t.Fatalf("expected login failure with Azure CLI details, got %v", err)
+	}
+}
+
+func TestTenantsPreservesNonLoginAzureCLIError(t *testing.T) {
+	commandErr := errors.New("exit status 1")
+	client := NewCLI(func(context.Context, string, ...string) ([]byte, error) {
+		return []byte("network unavailable"), commandErr
+	})
+
+	_, err := client.Tenants(context.Background())
+	if errors.Is(err, ErrNotLoggedIn) || !strings.Contains(err.Error(), "network unavailable") || !errors.Is(err, commandErr) {
+		t.Fatalf("expected non-login error with Azure CLI details, got %v", err)
 	}
 }
 
@@ -200,6 +213,37 @@ func TestPrincipalIDUsesSignedInUser(t *testing.T) {
 	}
 	if principalID != "principal-1" {
 		t.Fatalf("expected principal-1, got %q", principalID)
+	}
+}
+
+func TestExecCommandSeparatesStdoutFromSuccessfulStderr(t *testing.T) {
+	if os.Args[len(os.Args)-1] == "helper-success" {
+		_, _ = os.Stdout.WriteString(`{"tenantId":"tenant-1"}`)
+		_, _ = os.Stderr.WriteString("Azure CLI warning")
+		os.Exit(0)
+	}
+
+	out, err := execCommand(context.Background(), os.Args[0], "-test.run=^TestExecCommandSeparatesStdoutFromSuccessfulStderr$", "--", "helper-success")
+	if err != nil {
+		t.Fatalf("execCommand returned error: %v", err)
+	}
+	if got := string(out); got != `{"tenantId":"tenant-1"}` {
+		t.Fatalf("expected clean stdout JSON, got %q", got)
+	}
+}
+
+func TestAzureCLIErrorIncludesExitStderr(t *testing.T) {
+	if os.Args[len(os.Args)-1] == "helper-failure" {
+		_, _ = os.Stderr.WriteString("network unavailable")
+		os.Exit(3)
+	}
+
+	out, err := execCommand(context.Background(), os.Args[0], "-test.run=^TestAzureCLIErrorIncludesExitStderr$", "--", "helper-failure")
+	if err == nil {
+		t.Fatal("expected helper failure")
+	}
+	if detailed := azureCLIError(out, err); !strings.Contains(detailed.Error(), "network unavailable") {
+		t.Fatalf("expected stderr details, got %v", detailed)
 	}
 }
 
