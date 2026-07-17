@@ -41,7 +41,7 @@ func runCommand(model Model, cmd tea.Cmd) Model {
 		for _, child := range typed {
 			model = runCommand(model, child)
 		}
-	case assignmentsDiscoveredMsg, activationCompletedMsg, tenantsCheckedMsg:
+	case assignmentsDiscoveredMsg, assignmentsPreparedMsg, activationCompletedMsg, tenantsCheckedMsg:
 		next, _ := model.Update(msg)
 		model = next.(Model)
 	}
@@ -137,6 +137,226 @@ func (p *scriptedProvider) Activate(ctx context.Context, request pim.ActivationR
 	p.results = p.results[1:]
 	result.Assignment = request.Assignment
 	return result, nil
+}
+
+type progressiveProvider struct {
+	*scriptedProvider
+	prepared     chan []pim.EligibleAssignment
+	prepareErr   error
+	prepareCalls int
+}
+
+func (p *progressiveProvider) Prepare(context.Context, []pim.EligibleAssignment) ([]pim.EligibleAssignment, error) {
+	p.prepareCalls++
+	if p.prepareErr != nil {
+		return nil, p.prepareErr
+	}
+	return <-p.prepared, nil
+}
+
+func startProgressiveDiscovery(t *testing.T, model Model) (Model, tea.Cmd) {
+	t.Helper()
+	next, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = next.(Model)
+	batch, ok := cmd().(tea.BatchMsg)
+	if !ok {
+		t.Fatalf("expected discovery batch, got %T", cmd())
+	}
+	for _, child := range batch {
+		msg := child()
+		if _, ok := msg.(assignmentsDiscoveredMsg); !ok {
+			continue
+		}
+		next, prepare := model.Update(msg)
+		return next.(Model), prepare
+	}
+	t.Fatal("discovery batch did not contain a discovery command")
+	return model, nil
+}
+
+func progressiveTestModel(assignments ...pim.EligibleAssignment) (Model, *progressiveProvider) {
+	provider := &progressiveProvider{
+		scriptedProvider: &scriptedProvider{discoveries: [][]pim.EligibleAssignment{assignments}},
+		prepared:         make(chan []pim.EligibleAssignment, 1),
+	}
+	model := NewModel(Runtime{AzureResources: provider})
+	model.selectedTenant = azureauth.Tenant{ID: "tenant-1"}
+	return model, provider
+}
+
+func TestAssignmentsDisplayBeforePoliciesFinish(t *testing.T) {
+	model, provider := progressiveTestModel(pim.EligibleAssignment{ID: "reader", DisplayName: "Reader"})
+	model, prepare := startProgressiveDiscovery(t, model)
+
+	view := model.View()
+	if !strings.Contains(view, "Reader") || !strings.Contains(view, "Loading activation requirements") {
+		t.Fatalf("expected list-ready assignment and policy loading state, got %q", view)
+	}
+	next, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'i'}})
+	if details := next.(Model).View(); !strings.Contains(details, "Maximum duration") || !strings.Contains(details, "Loading...") {
+		t.Fatalf("expected policy fields to remain loading in details, got %q", details)
+	}
+
+	provider.prepared <- []pim.EligibleAssignment{{ID: "reader", DisplayName: "Reader", ActivationPolicy: pim.ActivationPolicy{MaximumDurationISO: "PT4H"}}}
+	model = runCommand(model, prepare)
+	if !model.policiesReady || model.assignmentList.items[0].ActivationPolicy.MaximumDurationISO != "PT4H" {
+		t.Fatalf("expected prepared policy, ready=%v assignments=%#v", model.policiesReady, model.assignmentList.items)
+	}
+}
+
+func TestEnterWaitsForPoliciesThenOpensActivationForm(t *testing.T) {
+	model, provider := progressiveTestModel(pim.EligibleAssignment{ID: "reader", DisplayName: "Reader"})
+	model, prepare := startProgressiveDiscovery(t, model)
+	next, _ := model.Update(tea.KeyMsg{Type: tea.KeySpace})
+	model = next.(Model)
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = next.(Model)
+	if model.screen != ScreenAssignments || !model.waitingForPolicies || !strings.Contains(model.View(), "Loading activation requirements") {
+		t.Fatalf("expected activation to wait on assignments, screen=%s waiting=%v view=%q", model.screen, model.waitingForPolicies, model.View())
+	}
+
+	provider.prepared <- []pim.EligibleAssignment{{ID: "reader", DisplayName: "Reader", ActivationPolicy: pim.ActivationPolicy{MaximumDurationISO: "PT6H"}}}
+	model = runCommand(model, prepare)
+	if model.screen != ScreenActivation || model.form.durations["reader"] != "PT6H" {
+		t.Fatalf("expected prepared activation form, screen=%s durations=%#v", model.screen, model.form.durations)
+	}
+}
+
+func TestPreparedAssignmentsPreserveSelectionQueryAndCursor(t *testing.T) {
+	model, provider := progressiveTestModel(
+		pim.EligibleAssignment{ID: "one", DisplayName: "Role one"},
+		pim.EligibleAssignment{ID: "two", DisplayName: "Role two"},
+	)
+	model, prepare := startProgressiveDiscovery(t, model)
+	model.assignmentList.selectedIDs["two"] = true
+	model.query = "Role"
+	model.listCursor = 1
+	provider.prepared <- []pim.EligibleAssignment{
+		{ID: "one", DisplayName: "Role one", ActivationPolicy: pim.ActivationPolicy{MaximumDurationISO: "PT1H"}},
+		{ID: "two", DisplayName: "Role two", ActivationPolicy: pim.ActivationPolicy{MaximumDurationISO: "PT2H"}},
+	}
+	model = runCommand(model, prepare)
+
+	if !model.assignmentList.selectedIDs["two"] || model.query != "Role" || model.listCursor != 1 {
+		t.Fatalf("prepared merge lost interaction state: selected=%#v query=%q cursor=%d", model.assignmentList.selectedIDs, model.query, model.listCursor)
+	}
+}
+
+func TestDiscoveryCacheReusesPreparedAssignments(t *testing.T) {
+	model, provider := progressiveTestModel(pim.EligibleAssignment{ID: "reader", DisplayName: "Reader"})
+	model, prepare := startProgressiveDiscovery(t, model)
+	provider.prepared <- []pim.EligibleAssignment{{ID: "reader", DisplayName: "Reader", ActivationPolicy: pim.ActivationPolicy{MaximumDurationISO: "PT2H"}}}
+	model = runCommand(model, prepare)
+	next, _ := model.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	next, cmd := next.(Model).Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = next.(Model)
+
+	if cmd != nil || provider.discoverCalls != 1 || provider.prepareCalls != 1 || !model.policiesReady {
+		t.Fatalf("expected prepared cache hit, cmd=%v discover=%d prepare=%d ready=%v", cmd != nil, provider.discoverCalls, provider.prepareCalls, model.policiesReady)
+	}
+}
+
+func TestRefreshInvalidatesDiscoveryCache(t *testing.T) {
+	model, provider := progressiveTestModel(pim.EligibleAssignment{ID: "reader", DisplayName: "Reader"})
+	provider.discoveries = append(provider.discoveries, []pim.EligibleAssignment{{ID: "owner", DisplayName: "Owner"}})
+	model, prepare := startProgressiveDiscovery(t, model)
+	provider.prepared <- []pim.EligibleAssignment{{ID: "reader", DisplayName: "Reader"}}
+	model = runCommand(model, prepare)
+	oldGeneration := model.discoveryCheck
+
+	next, cmd := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	model, _ = startDiscoveryBatch(t, next.(Model), cmd)
+	if provider.discoverCalls != 2 || model.discoveryCheck <= oldGeneration || model.assignmentList.items[0].ID != "owner" {
+		t.Fatalf("expected fresh generation, calls=%d generation=%d assignments=%#v", provider.discoverCalls, model.discoveryCheck, model.assignmentList.items)
+	}
+}
+
+func startDiscoveryBatch(t *testing.T, model Model, cmd tea.Cmd) (Model, tea.Cmd) {
+	t.Helper()
+	if cmd == nil {
+		t.Fatal("expected discovery command")
+	}
+	batch, ok := cmd().(tea.BatchMsg)
+	if !ok {
+		t.Fatalf("expected discovery batch")
+	}
+	for _, child := range batch {
+		msg := child()
+		if _, ok := msg.(assignmentsDiscoveredMsg); ok {
+			next, follow := model.Update(msg)
+			return next.(Model), follow
+		}
+	}
+	t.Fatal("discovery batch did not contain discovery result")
+	return model, nil
+}
+
+func TestActivationCompletionInvalidatesDiscoveryCache(t *testing.T) {
+	model := NewModel(Runtime{})
+	model.selectedTenant = azureauth.Tenant{ID: "tenant-1"}
+	model.activeSection = SectionAzureResources
+	key := discoveryKey{tenantID: "tenant-1", section: SectionAzureResources}
+	model.discoveryCache[key] = discoveryEntry{assignments: []pim.EligibleAssignment{{ID: "reader"}}, policiesReady: true, generation: 1}
+
+	next, _ := model.Update(activationCompletedMsg{})
+	if _, ok := next.(Model).discoveryCache[key]; ok {
+		t.Fatal("activation completion retained stale discovery cache")
+	}
+}
+
+func TestStalePreparationCannotOverwriteRefreshedDiscovery(t *testing.T) {
+	model := NewModel(Runtime{})
+	model.selectedTenant = azureauth.Tenant{ID: "tenant-1"}
+	model.activeSection = SectionAzureResources
+	model.assignmentList = newAssignmentList([]pim.EligibleAssignment{{ID: "current"}})
+	key := discoveryKey{tenantID: "tenant-1", section: SectionAzureResources}
+	model.discoveryCache[key] = discoveryEntry{assignments: model.assignmentList.items, generation: 2}
+
+	next, _ := model.Update(assignmentsPreparedMsg{key: key, generation: 1, assignments: []pim.EligibleAssignment{{ID: "stale"}}})
+	got := next.(Model)
+	if got.assignmentList.items[0].ID != "current" || got.discoveryCache[key].assignments[0].ID != "current" {
+		t.Fatalf("stale preparation overwrote current assignments: list=%#v cache=%#v", got.assignmentList.items, got.discoveryCache[key])
+	}
+}
+
+func TestPreparationCompletesForInactiveCacheKey(t *testing.T) {
+	model := NewModel(Runtime{})
+	model.selectedTenant = azureauth.Tenant{ID: "tenant-2"}
+	model.activeSection = SectionAzureResources
+	model.assignmentList = newAssignmentList([]pim.EligibleAssignment{{ID: "current"}})
+	key := discoveryKey{tenantID: "tenant-1", section: SectionAzureResources}
+	model.discoveryCache[key] = discoveryEntry{assignments: []pim.EligibleAssignment{{ID: "raw"}}, generation: 1}
+
+	next, _ := model.Update(assignmentsPreparedMsg{key: key, generation: 1, assignments: []pim.EligibleAssignment{{ID: "prepared"}}})
+	got := next.(Model)
+	if got.discoveryCache[key].assignments[0].ID != "prepared" || !got.discoveryCache[key].policiesReady || got.assignmentList.items[0].ID != "current" {
+		t.Fatalf("inactive preparation updated wrong state: cache=%#v list=%#v", got.discoveryCache[key], got.assignmentList.items)
+	}
+}
+
+func TestPreparationFailureKeepsListAndBlocksActivation(t *testing.T) {
+	sentinel := errors.New("policy lookup failed")
+	model, provider := progressiveTestModel(pim.EligibleAssignment{ID: "reader", DisplayName: "Reader"})
+	provider.scriptedProvider.discoveries = append(provider.scriptedProvider.discoveries, []pim.EligibleAssignment{{ID: "reader", DisplayName: "Reader"}})
+	provider.prepareErr = fmt.Errorf("prepare activation policies: %w", sentinel)
+	model, prepare := startProgressiveDiscovery(t, model)
+	model = runCommand(model, prepare)
+	if len(model.assignmentList.items) != 1 || !errors.Is(model.err, sentinel) || !strings.Contains(model.View(), "prepare activation policies") {
+		t.Fatalf("expected visible role and actionable wrapped error, assignments=%#v err=%v view=%q", model.assignmentList.items, model.err, model.View())
+	}
+
+	next, _ := model.Update(tea.KeyMsg{Type: tea.KeySpace})
+	next, _ = next.(Model).Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = next.(Model)
+	if model.screen != ScreenAssignments || !strings.Contains(model.err.Error(), "press r to retry discovery") {
+		t.Fatalf("expected blocked activation with retry guidance, screen=%s err=%v", model.screen, model.err)
+	}
+	oldGeneration := model.discoveryCheck
+	next, cmd := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	model, _ = startDiscoveryBatch(t, next.(Model), cmd)
+	if provider.discoverCalls != 2 || model.discoveryCheck <= oldGeneration {
+		t.Fatalf("expected retry discovery, calls=%d generation=%d", provider.discoverCalls, model.discoveryCheck)
+	}
 }
 
 type scriptedTenantProvider struct {

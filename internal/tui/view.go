@@ -131,6 +131,14 @@ func (m Model) viewAssignments() string {
 		b.WriteString(assignmentError)
 		b.WriteString("\n")
 	}
+	if m.preparingPolicies {
+		loading := fmt.Sprintf("%s  Loading activation requirements...\n\n", m.spinner.View())
+		if m.waitingForPolicies {
+			b.WriteString(warningStyle.Render(loading))
+		} else {
+			b.WriteString(mutedStyle.Render(loading))
+		}
+	}
 
 	searchLabel := "/  Search roles, scopes, and assignment types"
 	if m.query != "" || m.searchMode {
@@ -236,10 +244,16 @@ func (m Model) viewDetails() string {
 	} else if assignment.ActivationPolicy.MFARequired {
 		authentication = "MFA"
 	}
+	maximumDuration := assignment.ActivationPolicy.MaximumDurationISO
+	if !m.policiesReady {
+		maximumDuration = "Loading..."
+		justification = "Loading..."
+		authentication = "Loading..."
+	}
 	rows := [][2]string{
 		{"Status", status},
 		{"Active until", activeUntil},
-		{"Maximum duration", assignment.ActivationPolicy.MaximumDurationISO},
+		{"Maximum duration", maximumDuration},
 		{"Justification", justification},
 		{"Authentication", authentication},
 		{"Source", string(assignment.Source)},
