@@ -4,10 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/mathwro/pim-manager/internal/arm"
 	"github.com/mathwro/pim-manager/internal/pim"
 )
 
@@ -59,55 +62,56 @@ func TestActivationRequestBody(t *testing.T) {
 	}
 }
 
-func TestDiscoverEnrichesActiveStateAndActivationPolicy(t *testing.T) {
-	scope := "/subscriptions/sub-1"
+func TestDiscoverUsesScopedActiveLookupWithoutLoadingPolicies(t *testing.T) {
+	scope := "/subscriptions/sub-1/resourceGroups/rg-prod"
 	eligibilityPath := "/providers/Microsoft.Authorization/roleEligibilityScheduleInstances?$filter=asTarget%28%29&api-version=2020-10-01"
-	activePath := "/providers/Microsoft.Authorization/roleAssignmentScheduleInstances?$filter=asTarget%28%29&api-version=2020-10-01"
-	policyPath := scope + "/providers/Microsoft.Authorization/roleManagementPolicyAssignments?api-version=2020-10-01"
+	activePath := scope + "/providers/Microsoft.Authorization/roleAssignmentScheduleInstances?$filter=asTarget%28%29&api-version=2020-10-01"
 	end := time.Now().UTC().Add(time.Hour)
-	arm := &providerFakeARM{responses: map[string]any{
-		eligibilityPath: eligibilityResponse{Value: []roleEligibilityScheduleInstance{{
-			ID: "eligibility-1",
-			Properties: roleEligibilityProperties{
-				Scope: scope, RoleDefinitionID: scope + "/providers/Microsoft.Authorization/roleDefinitions/owner",
-				RoleEligibilityScheduleID: "schedule-1",
-				ExpandedProperties:        expandedProperties{RoleDefinition: expandedRoleDefinition{DisplayName: "Owner"}},
-			},
-		}}},
+	armClient := newProviderFakeARM(map[string]any{
+		eligibilityPath: eligibilityResponse{Value: []roleEligibilityScheduleInstance{{Properties: roleEligibilityProperties{
+			Scope: scope, RoleDefinitionID: scope + "/providers/Microsoft.Authorization/roleDefinitions/owner", RoleEligibilityScheduleID: "schedule-1",
+		}}}},
 		activePath: activeAssignmentResponse{Value: []roleAssignmentScheduleInstance{{Properties: roleAssignmentScheduleProperties{
-			LinkedRoleEligibilityScheduleID: "/providers/Microsoft.Authorization/roleEligibilitySchedules/SCHEDULE-1",
-			AssignmentType:                  "Activated", Status: "Provisioned", EndDateTime: &end,
+			LinkedRoleEligibilityScheduleID: "schedule-1", AssignmentType: "Activated", Status: "Provisioned", EndDateTime: &end,
 		}}}},
-		policyPath: policyAssignmentResponse{Value: []roleManagementPolicyAssignment{{Properties: roleManagementPolicyAssignmentProperties{
-			Scope: scope, RoleDefinitionID: scope + "/providers/Microsoft.Authorization/roleDefinitions/owner",
-			EffectiveRules: []roleManagementPolicyRule{
-				{ID: "Expiration_EndUser_Assignment", MaximumDuration: "PT4H"},
-				{ID: "Enablement_EndUser_Assignment", EnabledRules: []string{"Justification"}},
-			},
-		}}}},
-	}}
+	})
 
-	assignments, err := NewProvider(arm).Discover(context.Background())
+	assignments, err := NewProvider(armClient).Discover(context.Background())
 	if err != nil {
-		t.Fatalf("Discover returned error: %v", err)
+		t.Fatal(err)
 	}
-	if len(assignments) != 1 || !assignments[0].Active || assignments[0].ActiveUntil == nil {
-		t.Fatalf("expected active assignment, got %#v", assignments)
+	if len(assignments) != 1 || !assignments[0].Active || assignments[0].ActivationPolicy.MaximumDurationISO != "" {
+		t.Fatalf("expected list-ready active assignment, got %#v", assignments)
 	}
-	if assignments[0].ActivationPolicy.MaximumDurationISO != "PT4H" || !assignments[0].ActivationPolicy.JustificationRequired {
-		t.Fatalf("unexpected policy: %#v", assignments[0].ActivationPolicy)
+	if armClient.pinCalls != 1 || slices.Contains(armClient.recordedPaths(), "/providers/Microsoft.Authorization/roleAssignmentScheduleInstances?$filter=asTarget%28%29&api-version=2020-10-01") {
+		t.Fatalf("expected one pin and scoped active path, pins=%d paths=%#v", armClient.pinCalls, armClient.recordedPaths())
 	}
-	if !assignments[0].ActiveUntil.Equal(end) {
-		t.Fatalf("expected active expiry %s, got %v", end, assignments[0].ActiveUntil)
+}
+
+func TestPrepareLoadsPoliciesOncePerNormalizedScope(t *testing.T) {
+	scope := "/subscriptions/SUB-1/"
+	policyPath := "/subscriptions/SUB-1/providers/Microsoft.Authorization/roleManagementPolicyAssignments?api-version=2020-10-01"
+	armClient := newProviderFakeARM(map[string]any{policyPath: policyAssignmentResponse{Value: []roleManagementPolicyAssignment{
+		testPolicy("/subscriptions/sub-1", "reader", "PT8H"),
+		testPolicy("/subscriptions/sub-1", "owner", "PT4H", "Justification"),
+	}}})
+	assignments := []pim.EligibleAssignment{
+		{ID: "reader", AzureScope: scope, RoleDefinitionID: "/subscriptions/sub-1/providers/Microsoft.Authorization/roleDefinitions/reader"},
+		{ID: "owner", AzureScope: "/subscriptions/sub-1", RoleDefinitionID: "/subscriptions/sub-1/providers/Microsoft.Authorization/roleDefinitions/owner"},
 	}
-	wantPaths := []string{eligibilityPath, activePath, policyPath}
-	if len(arm.paths) != len(wantPaths) {
-		t.Fatalf("expected paths %#v, got %#v", wantPaths, arm.paths)
+
+	prepared, err := NewProvider(armClient).Prepare(context.Background(), assignments)
+	if err != nil {
+		t.Fatal(err)
 	}
-	for index := range wantPaths {
-		if arm.paths[index] != wantPaths[index] {
-			t.Fatalf("expected paths %#v, got %#v", wantPaths, arm.paths)
-		}
+	if prepared[0].ActivationPolicy.MaximumDurationISO != "PT8H" || prepared[1].ActivationPolicy.MaximumDurationISO != "PT4H" {
+		t.Fatalf("unexpected policies: %#v", prepared)
+	}
+	if assignments[0].ActivationPolicy.MaximumDurationISO != "" {
+		t.Fatal("Prepare mutated the list-ready input slice")
+	}
+	if armClient.pinCalls != 1 || countPath(armClient.recordedPaths(), policyPath) != 1 {
+		t.Fatalf("expected one token and one scope request, pins=%d paths=%#v", armClient.pinCalls, armClient.recordedPaths())
 	}
 }
 
@@ -115,9 +119,8 @@ func TestDiscoverFollowsPaginatedEligibilities(t *testing.T) {
 	scope := "/subscriptions/sub-1"
 	firstPath := "/providers/Microsoft.Authorization/roleEligibilityScheduleInstances?$filter=asTarget%28%29&api-version=2020-10-01"
 	nextPath := "https://management.azure.com/subscriptions/sub-1/providers/Microsoft.Authorization/roleEligibilityScheduleInstances?$skiptoken=next"
-	activePath := "/providers/Microsoft.Authorization/roleAssignmentScheduleInstances?$filter=asTarget%28%29&api-version=2020-10-01"
-	policyPath := scope + "/providers/Microsoft.Authorization/roleManagementPolicyAssignments?api-version=2020-10-01"
-	arm := &providerFakeARM{responses: map[string]any{
+	activePath := scope + "/providers/Microsoft.Authorization/roleAssignmentScheduleInstances?$filter=asTarget%28%29&api-version=2020-10-01"
+	armClient := newProviderFakeARM(map[string]any{
 		firstPath: eligibilityResponse{
 			Value: []roleEligibilityScheduleInstance{{
 				ID: "eligibility-1",
@@ -138,71 +141,37 @@ func TestDiscoverFollowsPaginatedEligibilities(t *testing.T) {
 			},
 		}}},
 		activePath: activeAssignmentResponse{},
-		policyPath: policyAssignmentResponse{Value: []roleManagementPolicyAssignment{
-			testPolicy(scope, "reader", "PT8H"),
-			testPolicy(scope, "contributor", "PT4H", "Justification"),
-		}},
-	}}
+	})
 
-	assignments, err := NewProvider(arm).Discover(context.Background())
+	assignments, err := NewProvider(armClient).Discover(context.Background())
 	if err != nil {
 		t.Fatalf("Discover returned error: %v", err)
 	}
 	if len(assignments) != 2 || assignments[1].DisplayName != "Contributor" {
 		t.Fatalf("expected paginated assignments, got %#v", assignments)
 	}
-	if assignments[0].ActivationPolicy.MaximumDurationISO != "PT8H" || assignments[1].ActivationPolicy.MaximumDurationISO != "PT4H" {
-		t.Fatalf("expected policies on both pages, got %#v", assignments)
+	if countPath(armClient.recordedPaths(), nextPath) != 1 {
+		t.Fatalf("expected eligibility next page, got %#v", armClient.recordedPaths())
 	}
 }
 
 func TestMetadataLookupsFollowPagination(t *testing.T) {
-	activePath := "/providers/Microsoft.Authorization/roleAssignmentScheduleInstances?$filter=asTarget%28%29&api-version=2020-10-01"
+	scope := "/subscriptions/sub-1"
+	activePath := scope + "/providers/Microsoft.Authorization/roleAssignmentScheduleInstances?$filter=asTarget%28%29&api-version=2020-10-01"
 	activeNext := "https://management.azure.com/active-next"
-	policyPath := "/subscriptions/sub-1/providers/Microsoft.Authorization/roleManagementPolicyAssignments?api-version=2020-10-01"
+	policyPath := scope + "/providers/Microsoft.Authorization/roleManagementPolicyAssignments?api-version=2020-10-01"
 	policyNext := "https://management.azure.com/policy-next"
-	arm := &providerFakeARM{responses: map[string]any{
+	armClient := newProviderFakeARM(map[string]any{
 		activePath: activeAssignmentResponse{Value: []roleAssignmentScheduleInstance{{}}, NextLink: activeNext},
 		activeNext: activeAssignmentResponse{Value: []roleAssignmentScheduleInstance{{}}},
 		policyPath: policyAssignmentResponse{Value: []roleManagementPolicyAssignment{{}}, NextLink: policyNext},
 		policyNext: policyAssignmentResponse{Value: []roleManagementPolicyAssignment{{}}},
-	}}
-	provider := NewProvider(arm)
-	active, activeErr := provider.discoverActiveAssignments(context.Background())
-	policies, policyErr := provider.policiesForScope(context.Background(), "/subscriptions/sub-1")
+	})
+	provider := NewProvider(armClient)
+	active, activeErr := provider.discoverActiveAssignments(context.Background(), scope)
+	policies, policyErr := provider.policiesForScope(context.Background(), scope)
 	if activeErr != nil || policyErr != nil || len(active) != 2 || len(policies) != 2 {
 		t.Fatalf("expected paginated metadata, active=%d policies=%d errors=%v/%v", len(active), len(policies), activeErr, policyErr)
-	}
-}
-
-func TestDiscoverLoadsPolicyOncePerNormalizedScope(t *testing.T) {
-	firstScope := "/subscriptions/SUB-1/"
-	secondScope := "/subscriptions/sub-1"
-	eligibilityPath := "/providers/Microsoft.Authorization/roleEligibilityScheduleInstances?$filter=asTarget%28%29&api-version=2020-10-01"
-	activePath := "/providers/Microsoft.Authorization/roleAssignmentScheduleInstances?$filter=asTarget%28%29&api-version=2020-10-01"
-	policyPath := "/subscriptions/SUB-1/providers/Microsoft.Authorization/roleManagementPolicyAssignments?api-version=2020-10-01"
-	arm := &providerFakeARM{responses: map[string]any{
-		eligibilityPath: eligibilityResponse{Value: []roleEligibilityScheduleInstance{
-			{Properties: roleEligibilityProperties{Scope: firstScope, RoleDefinitionID: firstScope + "providers/Microsoft.Authorization/roleDefinitions/reader", RoleEligibilityScheduleID: "schedule-1"}},
-			{Properties: roleEligibilityProperties{Scope: secondScope, RoleDefinitionID: secondScope + "/providers/Microsoft.Authorization/roleDefinitions/owner", RoleEligibilityScheduleID: "schedule-2"}},
-		}},
-		activePath: activeAssignmentResponse{},
-		policyPath: policyAssignmentResponse{Value: []roleManagementPolicyAssignment{
-			testPolicy(secondScope, "reader", "PT8H"),
-			testPolicy(secondScope, "owner", "PT4H", "Justification"),
-		}},
-	}}
-	if _, err := NewProvider(arm).Discover(context.Background()); err != nil {
-		t.Fatalf("Discover returned error: %v", err)
-	}
-	count := 0
-	for _, path := range arm.paths {
-		if strings.Contains(path, "/roleManagementPolicyAssignments?") {
-			count++
-		}
-	}
-	if count != 1 {
-		t.Fatalf("expected one policy lookup for normalized shared scope, got %d paths=%#v", count, arm.paths)
 	}
 }
 
@@ -216,90 +185,205 @@ func TestDiscoverPropagatesEligibilityLookupError(t *testing.T) {
 }
 
 func TestDiscoverPropagatesActiveLookupError(t *testing.T) {
+	scope := "/subscriptions/sub-1/resourceGroups/rg-prod"
 	eligibilityPath := "/providers/Microsoft.Authorization/roleEligibilityScheduleInstances?$filter=asTarget%28%29&api-version=2020-10-01"
-	activePath := "/providers/Microsoft.Authorization/roleAssignmentScheduleInstances?$filter=asTarget%28%29&api-version=2020-10-01"
-	arm := &providerFakeARM{
-		responses: map[string]any{eligibilityPath: eligibilityResponse{}},
+	activePath := scope + "/providers/Microsoft.Authorization/roleAssignmentScheduleInstances?$filter=asTarget%28%29&api-version=2020-10-01"
+	armClient := &providerFakeARM{
+		responses: map[string]any{eligibilityPath: eligibilityResponse{Value: []roleEligibilityScheduleInstance{{Properties: roleEligibilityProperties{Scope: scope}}}}},
 		errs:      map[string]error{activePath: errors.New("authorization denied")},
 	}
-	_, err := NewProvider(arm).Discover(context.Background())
-	if err == nil || !strings.Contains(err.Error(), "list active Azure role assignments") || !strings.Contains(err.Error(), "authorization denied") {
+	_, err := NewProvider(armClient).Discover(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "list active Azure role assignments at "+scope) || !strings.Contains(err.Error(), "authorization denied") {
 		t.Fatalf("expected active lookup context, got %v", err)
 	}
 }
 
-func TestDiscoverPropagatesPolicyLookupError(t *testing.T) {
+func TestPreparePropagatesPolicyLookupError(t *testing.T) {
 	scope := "/subscriptions/sub-1"
-	eligibilityPath := "/providers/Microsoft.Authorization/roleEligibilityScheduleInstances?$filter=asTarget%28%29&api-version=2020-10-01"
-	activePath := "/providers/Microsoft.Authorization/roleAssignmentScheduleInstances?$filter=asTarget%28%29&api-version=2020-10-01"
 	policyPath := scope + "/providers/Microsoft.Authorization/roleManagementPolicyAssignments?api-version=2020-10-01"
-	arm := &providerFakeARM{
-		responses: map[string]any{
-			eligibilityPath: eligibilityResponse{Value: []roleEligibilityScheduleInstance{{Properties: roleEligibilityProperties{Scope: scope}}}},
-			activePath:      activeAssignmentResponse{},
-		},
-		errs: map[string]error{policyPath: errors.New("authorization denied")},
-	}
-	_, err := NewProvider(arm).Discover(context.Background())
+	armClient := &providerFakeARM{errs: map[string]error{policyPath: errors.New("authorization denied")}}
+	_, err := NewProvider(armClient).Prepare(context.Background(), []pim.EligibleAssignment{{AzureScope: scope}})
 	if err == nil || !strings.Contains(err.Error(), "list Azure activation policies at "+scope) || !strings.Contains(err.Error(), "authorization denied") {
 		t.Fatalf("expected policy lookup context, got %v", err)
 	}
 }
 
-func TestDiscoverRejectsMissingPolicyForEligibility(t *testing.T) {
+func TestPrepareRejectsMissingPolicyForEligibility(t *testing.T) {
 	scope := "/subscriptions/sub-1"
-	eligibilityPath := "/providers/Microsoft.Authorization/roleEligibilityScheduleInstances?$filter=asTarget%28%29&api-version=2020-10-01"
-	activePath := "/providers/Microsoft.Authorization/roleAssignmentScheduleInstances?$filter=asTarget%28%29&api-version=2020-10-01"
 	policyPath := scope + "/providers/Microsoft.Authorization/roleManagementPolicyAssignments?api-version=2020-10-01"
-	arm := &providerFakeARM{responses: map[string]any{
-		eligibilityPath: eligibilityResponse{Value: []roleEligibilityScheduleInstance{{Properties: roleEligibilityProperties{
-			Scope: scope, RoleDefinitionID: scope + "/providers/Microsoft.Authorization/roleDefinitions/reader",
-			ExpandedProperties: expandedProperties{RoleDefinition: expandedRoleDefinition{DisplayName: "Reader"}},
-		}}}},
-		activePath: activeAssignmentResponse{},
-		policyPath: policyAssignmentResponse{},
+	armClient := newProviderFakeARM(map[string]any{policyPath: policyAssignmentResponse{}})
+	assignments := []pim.EligibleAssignment{{
+		AzureScope: scope, RoleDefinitionID: scope + "/providers/Microsoft.Authorization/roleDefinitions/reader", DisplayName: "Reader",
 	}}
-	_, err := NewProvider(arm).Discover(context.Background())
+	_, err := NewProvider(armClient).Prepare(context.Background(), assignments)
 	if err == nil || !strings.Contains(err.Error(), "activation policy for Reader at "+scope) || !strings.Contains(err.Error(), "no activation policy") {
 		t.Fatalf("expected contextual missing policy error, got %v", err)
 	}
 }
 
-func TestDiscoverRejectsMalformedPolicyForEligibility(t *testing.T) {
+func TestPrepareRejectsMalformedPolicyForEligibility(t *testing.T) {
 	scope := "/subscriptions/sub-1"
 	roleDefinitionID := scope + "/providers/Microsoft.Authorization/roleDefinitions/reader"
-	eligibilityPath := "/providers/Microsoft.Authorization/roleEligibilityScheduleInstances?$filter=asTarget%28%29&api-version=2020-10-01"
-	activePath := "/providers/Microsoft.Authorization/roleAssignmentScheduleInstances?$filter=asTarget%28%29&api-version=2020-10-01"
 	policyPath := scope + "/providers/Microsoft.Authorization/roleManagementPolicyAssignments?api-version=2020-10-01"
-	arm := &providerFakeARM{responses: map[string]any{
-		eligibilityPath: eligibilityResponse{Value: []roleEligibilityScheduleInstance{{Properties: roleEligibilityProperties{
-			Scope: scope, RoleDefinitionID: roleDefinitionID,
-			ExpandedProperties: expandedProperties{RoleDefinition: expandedRoleDefinition{DisplayName: "Reader"}},
-		}}}},
-		activePath: activeAssignmentResponse{},
-		policyPath: policyAssignmentResponse{Value: []roleManagementPolicyAssignment{{Properties: roleManagementPolicyAssignmentProperties{
-			RoleDefinitionID: roleDefinitionID,
-			EffectiveRules:   []roleManagementPolicyRule{{ID: "Enablement_EndUser_Assignment"}},
-		}}}},
-	}}
-	_, err := NewProvider(arm).Discover(context.Background())
+	armClient := newProviderFakeARM(map[string]any{policyPath: policyAssignmentResponse{Value: []roleManagementPolicyAssignment{{Properties: roleManagementPolicyAssignmentProperties{
+		RoleDefinitionID: roleDefinitionID,
+		EffectiveRules:   []roleManagementPolicyRule{{ID: "Enablement_EndUser_Assignment"}},
+	}}}}})
+	assignments := []pim.EligibleAssignment{{AzureScope: scope, RoleDefinitionID: roleDefinitionID, DisplayName: "Reader"}}
+	_, err := NewProvider(armClient).Prepare(context.Background(), assignments)
 	if err == nil || !strings.Contains(err.Error(), "activation policy for Reader at "+scope) || !strings.Contains(err.Error(), "incomplete end-user activation policy") {
 		t.Fatalf("expected contextual malformed policy error, got %v", err)
 	}
 }
 
-type providerFakeARM struct {
-	responses map[string]any
-	errs      map[string]error
-	paths     []string
+func TestDiscoverCapsScopedActiveLookupsAtFour(t *testing.T) {
+	eligibilityPath := "/providers/Microsoft.Authorization/roleEligibilityScheduleInstances?$filter=asTarget%28%29&api-version=2020-10-01"
+	responses := map[string]any{}
+	var eligibilities []roleEligibilityScheduleInstance
+	for index := range 5 {
+		scope := fmt.Sprintf("/subscriptions/sub-%d", index)
+		eligibilities = append(eligibilities, roleEligibilityScheduleInstance{Properties: roleEligibilityProperties{Scope: scope}})
+		responses[scope+"/providers/Microsoft.Authorization/roleAssignmentScheduleInstances?$filter=asTarget%28%29&api-version=2020-10-01"] = activeAssignmentResponse{}
+	}
+	responses[eligibilityPath] = eligibilityResponse{Value: eligibilities}
+	armClient := newProviderFakeARM(responses)
+	started := make(chan string, 5)
+	release := make(chan struct{})
+	armClient.onGet = func(ctx context.Context, path string) error {
+		if !strings.Contains(path, "/roleAssignmentScheduleInstances?") {
+			return nil
+		}
+		started <- path
+		select {
+		case <-release:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := NewProvider(armClient).Discover(context.Background())
+		done <- err
+	}()
+	for range 4 {
+		<-started
+	}
+	select {
+	case path := <-started:
+		t.Fatalf("fifth request started before capacity was released: %s", path)
+	default:
+	}
+	if got := armClient.maximumInFlight(); got != maxConcurrentScopeRequests {
+		t.Fatalf("expected %d in-flight requests, got %d", maxConcurrentScopeRequests, got)
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if got := activeRequestCount(armClient.recordedPaths()); got != 5 {
+		t.Fatalf("expected all five scoped requests, got %d paths=%#v", got, armClient.recordedPaths())
+	}
 }
 
-func (f *providerFakeARM) Get(_ context.Context, path string, out any) error {
+func TestDiscoverCancelsQueuedScopedActiveLookupsAfterError(t *testing.T) {
+	eligibilityPath := "/providers/Microsoft.Authorization/roleEligibilityScheduleInstances?$filter=asTarget%28%29&api-version=2020-10-01"
+	responses := map[string]any{}
+	var eligibilities []roleEligibilityScheduleInstance
+	for index := range 5 {
+		scope := fmt.Sprintf("/subscriptions/sub-%d", index)
+		eligibilities = append(eligibilities, roleEligibilityScheduleInstance{Properties: roleEligibilityProperties{Scope: scope}})
+		responses[scope+"/providers/Microsoft.Authorization/roleAssignmentScheduleInstances?$filter=asTarget%28%29&api-version=2020-10-01"] = activeAssignmentResponse{}
+	}
+	responses[eligibilityPath] = eligibilityResponse{Value: eligibilities}
+	armClient := newProviderFakeARM(responses)
+	started := make(chan string, 5)
+	failedPath := make(chan string, 1)
+	releaseFailure := make(chan struct{})
+	var first sync.Once
+	armClient.onGet = func(ctx context.Context, path string) error {
+		if !strings.Contains(path, "/roleAssignmentScheduleInstances?") {
+			return nil
+		}
+		started <- path
+		isFirst := false
+		first.Do(func() {
+			isFirst = true
+			failedPath <- path
+		})
+		if isFirst {
+			<-releaseFailure
+			return errors.New("authorization denied")
+		}
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := NewProvider(armClient).Discover(context.Background())
+		done <- err
+	}()
+	for range 4 {
+		<-started
+	}
+	close(releaseFailure)
+	err := <-done
+	failedScope := strings.Split(<-failedPath, "/providers/Microsoft.Authorization")[0]
+	if err == nil || !strings.Contains(err.Error(), "list active Azure role assignments at "+failedScope) || !strings.Contains(err.Error(), "authorization denied") {
+		t.Fatalf("expected wrapped scoped error, got %v", err)
+	}
+	if got := activeRequestCount(armClient.recordedPaths()); got != 4 {
+		t.Fatalf("expected queued request cancellation after four starts, got %d paths=%#v", got, armClient.recordedPaths())
+	}
+}
+
+type providerFakeARM struct {
+	mu          sync.Mutex
+	responses   map[string]any
+	errs        map[string]error
+	paths       []string
+	pinCalls    int
+	onGet       func(context.Context, string) error
+	inFlight    int
+	maxInFlight int
+}
+
+func newProviderFakeARM(responses map[string]any) *providerFakeARM {
+	return &providerFakeARM{responses: responses}
+}
+
+func (f *providerFakeARM) PinAccessToken(ctx context.Context) (context.Context, error) {
+	f.mu.Lock()
+	f.pinCalls++
+	f.mu.Unlock()
+	return arm.WithAccessToken(ctx, "phase-token"), nil
+}
+
+func (f *providerFakeARM) Get(ctx context.Context, path string, out any) error {
+	f.mu.Lock()
 	f.paths = append(f.paths, path)
-	if err := f.errs[path]; err != nil {
+	err := f.errs[path]
+	response, ok := f.responses[path]
+	onGet := f.onGet
+	if onGet != nil {
+		f.inFlight++
+		if f.inFlight > f.maxInFlight {
+			f.maxInFlight = f.inFlight
+		}
+	}
+	f.mu.Unlock()
+	if err != nil {
 		return err
 	}
-	response, ok := f.responses[path]
+	if onGet != nil {
+		err = onGet(ctx, path)
+		f.mu.Lock()
+		f.inFlight--
+		f.mu.Unlock()
+		if err != nil {
+			return err
+		}
+	}
 	if !ok {
 		return fmt.Errorf("unexpected GET %s", path)
 	}
@@ -314,6 +398,38 @@ func (f *providerFakeARM) Get(_ context.Context, path string, out any) error {
 		return fmt.Errorf("unsupported response target %T", out)
 	}
 	return nil
+}
+
+func (f *providerFakeARM) recordedPaths() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.paths)
+}
+
+func (f *providerFakeARM) maximumInFlight() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.maxInFlight
+}
+
+func activeRequestCount(paths []string) int {
+	count := 0
+	for _, path := range paths {
+		if strings.Contains(path, "/roleAssignmentScheduleInstances?") {
+			count++
+		}
+	}
+	return count
+}
+
+func countPath(paths []string, want string) int {
+	count := 0
+	for _, path := range paths {
+		if path == want {
+			count++
+		}
+	}
+	return count
 }
 
 func (f *providerFakeARM) Put(context.Context, string, any, any) error {

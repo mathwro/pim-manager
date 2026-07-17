@@ -53,6 +53,10 @@ type AssignmentProvider interface {
 	Activate(context.Context, pim.ActivationRequest) (pim.ActivationResult, error)
 }
 
+type assignmentPreparer interface {
+	Prepare(context.Context, []pim.EligibleAssignment) ([]pim.EligibleAssignment, error)
+}
+
 type TenantProvider interface {
 	Tenants(context.Context) ([]azureauth.Tenant, error)
 }
@@ -86,6 +90,12 @@ type Model struct {
 	selectedTenant         azureauth.Tenant
 	tenantErr              error
 	discoveryCheck         int
+	discoveryCancel        context.CancelFunc
+	discoveryCancelKey     discoveryKey
+	discoveryCache         map[discoveryKey]discoveryEntry
+	policiesReady          bool
+	preparingPolicies      bool
+	waitingForPolicies     bool
 	err                    error
 	helpVisible            bool
 	width                  int
@@ -99,10 +109,29 @@ const (
 	formFieldDuration
 )
 
+type discoveryKey struct {
+	tenantID string
+	section  Section
+}
+
+type discoveryEntry struct {
+	assignments   []pim.EligibleAssignment
+	policiesReady bool
+	generation    int
+}
+
 type assignmentsDiscoveredMsg struct {
 	assignments []pim.EligibleAssignment
 	tenantID    string
 	checkID     int
+	section     Section
+	err         error
+}
+
+type assignmentsPreparedMsg struct {
+	assignments []pim.EligibleAssignment
+	key         discoveryKey
+	generation  int
 	err         error
 }
 
@@ -160,6 +189,8 @@ func NewModel(runtime Runtime) Model {
 		selectedSection: SectionAzureResources,
 		sections:        []Section{SectionAzureResources},
 		assignmentList:  newAssignmentList(nil),
+		discoveryCache:  make(map[discoveryKey]discoveryEntry),
+		policiesReady:   true,
 		form:            activationForm{durations: map[string]string{}},
 		formField:       formFieldJustification,
 		justification:   justification,
@@ -193,27 +224,84 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.resizeComponents()
 		return m, nil
 	case spinner.TickMsg:
-		if !m.loading && !m.checkingTenants {
+		if !m.loading && !m.checkingTenants && !m.preparingPolicies && !m.waitingForPolicies {
 			return m, nil
 		}
 		var cmd tea.Cmd
 		m.spinner, cmd = m.spinner.Update(typed)
 		return m, cmd
 	case assignmentsDiscoveredMsg:
+		key := discoveryKey{tenantID: typed.tenantID, section: typed.section}
 		if typed.checkID != m.discoveryCheck || typed.tenantID != m.selectedTenant.ID {
 			return m, nil
 		}
+		m.cancelDiscovery(false)
 		m.loading = false
 		m.err = typed.err
 		if typed.err != nil {
+			delete(m.discoveryCache, key)
 			m.assignmentList = newAssignmentList(nil)
 			return m, nil
 		}
+		entry := discoveryEntry{assignments: typed.assignments, policiesReady: true, generation: typed.checkID}
 		m.assignmentList = newAssignmentList(typed.assignments)
 		m.listCursor = 0
+		m.policiesReady = true
+		m.preparingPolicies = false
+		if preparer, ok := m.providerForSection(typed.section).(assignmentPreparer); ok {
+			entry.policiesReady = false
+			m.policiesReady = false
+			m.preparingPolicies = true
+			m.discoveryCache[key] = entry
+			ctx, cancel := context.WithCancel(azureauth.WithTenant(context.Background(), typed.tenantID))
+			m.discoveryCancel = cancel
+			m.discoveryCancelKey = key
+			return m, tea.Batch(m.prepareAssignments(ctx, preparer, key, typed.checkID, typed.assignments), m.spinner.Tick)
+		}
+		m.discoveryCache[key] = entry
+		return m, nil
+	case assignmentsPreparedMsg:
+		entry, ok := m.discoveryCache[typed.key]
+		if !ok || entry.generation != typed.generation {
+			return m, nil
+		}
+		m.cancelDiscovery(false)
+		current := typed.key == (discoveryKey{tenantID: m.selectedTenant.ID, section: m.activeSection})
+		if typed.err != nil {
+			delete(m.discoveryCache, typed.key)
+			if current {
+				m.preparingPolicies = false
+				m.waitingForPolicies = false
+				m.err = typed.err
+			}
+			return m, nil
+		}
+		entry.assignments = typed.assignments
+		entry.policiesReady = true
+		m.discoveryCache[typed.key] = entry
+		if !current {
+			return m, nil
+		}
+		selected := m.assignmentList.selectedIDs
+		m.assignmentList = newAssignmentList(typed.assignments)
+		for id, enabled := range selected {
+			if enabled {
+				m.assignmentList.selectedIDs[id] = true
+			}
+		}
+		m.clampCursor()
+		m.policiesReady = true
+		m.preparingPolicies = false
+		m.err = nil
+		if m.waitingForPolicies {
+			m.waitingForPolicies = false
+			return m.openActivationForm()
+		}
 		return m, nil
 	case activationCompletedMsg:
 		m.loading = false
+		m.cancelDiscovery(true)
+		delete(m.discoveryCache, discoveryKey{tenantID: m.selectedTenant.ID, section: m.activeSection})
 		m.summary = newSummary(typed.results)
 		m.screen = ScreenSummary
 		m.refreshSummaryViewport()
@@ -402,7 +490,7 @@ func (m Model) updateHome(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case tea.KeyDown:
 		m.moveSection(1)
 	case tea.KeyEnter:
-		return m.beginDiscovery(m.selectedSection)
+		return m.beginDiscovery(m.selectedSection, false)
 	case tea.KeyRunes:
 		switch string(key.Runes) {
 		case "k":
@@ -415,6 +503,13 @@ func (m Model) updateHome(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) updateAssignments(key tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.waitingForPolicies {
+		if key.Type == tea.KeyEsc {
+			m.waitingForPolicies = false
+		}
+		return m, nil
+	}
+
 	if m.searchMode {
 		switch key.Type {
 		case tea.KeyEsc, tea.KeyEnter:
@@ -433,6 +528,9 @@ func (m Model) updateAssignments(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	if m.loading {
+		if key.String() == "r" {
+			return m.beginDiscovery(m.activeSection, true)
+		}
 		if key.Type == tea.KeyEsc {
 			m.screen = ScreenHome
 		}
@@ -455,6 +553,15 @@ func (m Model) updateAssignments(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.err = fmt.Errorf("select at least one assignment to continue")
 			return m, nil
 		}
+		if !m.policiesReady {
+			if m.preparingPolicies {
+				m.waitingForPolicies = true
+				m.err = nil
+				return m, m.spinner.Tick
+			}
+			m.err = errors.New("activation requirements are unavailable; press r to retry discovery")
+			return m, nil
+		}
 		return m.openActivationForm()
 	case tea.KeyRunes:
 		switch string(key.Runes) {
@@ -474,13 +581,16 @@ func (m Model) updateAssignments(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "a":
 			m.toggleAllFiltered()
 		case "r":
-			return m.beginDiscovery(m.activeSection)
+			return m.beginDiscovery(m.activeSection, true)
 		}
 	}
 	return m, nil
 }
 
 func (m Model) updateDetails(key tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if key.String() == "r" && !m.policiesReady && !m.preparingPolicies {
+		return m.beginDiscovery(m.activeSection, true)
+	}
 	if key.Type == tea.KeyEsc || key.Type == tea.KeyEnter || key.String() == "b" {
 		m.screen = ScreenAssignments
 	}
@@ -658,14 +768,13 @@ func (m Model) updateSummary(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if key.Type == tea.KeyEsc {
 			m.checkingAuthentication = false
 			m.authenticationCheck++
-			m.screen = ScreenAssignments
+			return m.beginDiscovery(m.activeSection, true)
 		}
 		return m, nil
 	}
 	switch key.Type {
 	case tea.KeyEsc:
-		m.screen = ScreenAssignments
-		return m, nil
+		return m.beginDiscovery(m.activeSection, true)
 	case tea.KeyRunes:
 		switch string(key.Runes) {
 		case "h":
@@ -688,17 +797,40 @@ func (m Model) updateSummary(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-func (m Model) beginDiscovery(section Section) (tea.Model, tea.Cmd) {
+func (m Model) beginDiscovery(section Section, refresh bool) (tea.Model, tea.Cmd) {
 	m.activeSection = section
 	m.screen = ScreenAssignments
+	key := discoveryKey{tenantID: m.selectedTenant.ID, section: section}
+	if refresh {
+		m.cancelDiscovery(true)
+	}
+	if refresh {
+		delete(m.discoveryCache, key)
+	}
+	if entry, ok := m.discoveryCache[key]; ok {
+		m.loading = false
+		m.err = nil
+		m.assignmentList = newAssignmentList(entry.assignments)
+		m.policiesReady = entry.policiesReady
+		m.preparingPolicies = !entry.policiesReady
+		m.waitingForPolicies = false
+		return m, nil
+	}
+	m.cancelDiscovery(true)
 	m.loading = true
+	m.policiesReady = false
+	m.preparingPolicies = false
+	m.waitingForPolicies = false
 	m.err = nil
 	m.query = ""
 	m.searchMode = false
 	m.assignmentList = newAssignmentList(nil)
 	m.listCursor = 0
 	m.discoveryCheck++
-	return m, tea.Batch(m.discoverAssignments(m.discoveryCheck, m.selectedTenant.ID), m.spinner.Tick)
+	ctx, cancel := context.WithCancel(azureauth.WithTenant(context.Background(), m.selectedTenant.ID))
+	m.discoveryCancel = cancel
+	m.discoveryCancelKey = key
+	return m, tea.Batch(m.discoverAssignments(ctx, m.discoveryCheck, m.selectedTenant.ID, section), m.spinner.Tick)
 }
 
 func (m Model) openActivationForm() (tea.Model, tea.Cmd) {
@@ -788,10 +920,14 @@ func (m *Model) selectTenant(index int) {
 }
 
 func (m *Model) clearTenantWorkflow() {
+	m.cancelDiscovery(true)
 	m.discoveryCheck++
 	m.authenticationCheck++
 	m.checkingAuthentication = false
 	m.loading = false
+	m.policiesReady = false
+	m.preparingPolicies = false
+	m.waitingForPolicies = false
 	m.activeSection = ""
 	m.query = ""
 	m.searchMode = false
@@ -911,17 +1047,34 @@ func (m Model) providerForSection(section Section) AssignmentProvider {
 	}
 }
 
-func (m Model) discoverAssignments(checkID int, tenantID string) tea.Cmd {
-	provider := m.providerForSection(m.activeSection)
+func (m Model) discoverAssignments(ctx context.Context, checkID int, tenantID string, section Section) tea.Cmd {
+	provider := m.providerForSection(section)
 	if provider == nil {
 		return func() tea.Msg {
-			return assignmentsDiscoveredMsg{tenantID: tenantID, checkID: checkID, err: fmt.Errorf("provider for %s is unavailable", m.activeSection)}
+			return assignmentsDiscoveredMsg{tenantID: tenantID, checkID: checkID, section: section, err: fmt.Errorf("provider for %s is unavailable", section)}
 		}
 	}
-	ctx := azureauth.WithTenant(context.Background(), tenantID)
 	return func() tea.Msg {
 		assignments, err := provider.Discover(ctx)
-		return assignmentsDiscoveredMsg{assignments: assignments, tenantID: tenantID, checkID: checkID, err: err}
+		return assignmentsDiscoveredMsg{assignments: assignments, tenantID: tenantID, checkID: checkID, section: section, err: err}
+	}
+}
+
+func (m *Model) cancelDiscovery(deletePending bool) {
+	if m.discoveryCancel != nil {
+		m.discoveryCancel()
+		m.discoveryCancel = nil
+	}
+	if deletePending {
+		delete(m.discoveryCache, m.discoveryCancelKey)
+	}
+	m.discoveryCancelKey = discoveryKey{}
+}
+
+func (m Model) prepareAssignments(ctx context.Context, preparer assignmentPreparer, key discoveryKey, generation int, assignments []pim.EligibleAssignment) tea.Cmd {
+	return func() tea.Msg {
+		prepared, err := preparer.Prepare(ctx, assignments)
+		return assignmentsPreparedMsg{assignments: prepared, key: key, generation: generation, err: err}
 	}
 }
 

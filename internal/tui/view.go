@@ -131,6 +131,14 @@ func (m Model) viewAssignments() string {
 		b.WriteString(assignmentError)
 		b.WriteString("\n")
 	}
+	if m.preparingPolicies {
+		loading := m.policyLoadingBanner()
+		if m.waitingForPolicies {
+			b.WriteString(warningStyle.Render(loading))
+		} else {
+			b.WriteString(mutedStyle.Render(loading))
+		}
+	}
 
 	searchLabel := "/  Search roles, scopes, and assignment types"
 	if m.query != "" || m.searchMode {
@@ -236,10 +244,21 @@ func (m Model) viewDetails() string {
 	} else if assignment.ActivationPolicy.MFARequired {
 		authentication = "MFA"
 	}
+	maximumDuration := assignment.ActivationPolicy.MaximumDurationISO
+	switch {
+	case m.preparingPolicies:
+		maximumDuration = "Loading..."
+		justification = "Loading..."
+		authentication = "Loading..."
+	case !m.policiesReady:
+		maximumDuration = "Unavailable"
+		justification = "Unavailable"
+		authentication = "Unavailable"
+	}
 	rows := [][2]string{
 		{"Status", status},
 		{"Active until", activeUntil},
-		{"Maximum duration", assignment.ActivationPolicy.MaximumDurationISO},
+		{"Maximum duration", maximumDuration},
 		{"Justification", justification},
 		{"Authentication", authentication},
 		{"Source", string(assignment.Source)},
@@ -257,7 +276,20 @@ func (m Model) viewDetails() string {
 		}
 		b.WriteString(fmt.Sprintf("%-22s %s\n", mutedStyle.Render(row[0]), row[1]))
 	}
-	b.WriteString(m.footer([]keyHint{{"esc", "back to assignments"}, {"q", "quit"}}))
+	detailHints := []keyHint{{"esc", "back to assignments"}, {"q", "quit"}}
+	if !m.policiesReady && !m.preparingPolicies {
+		if m.err != nil {
+			message := strings.Join(strings.Fields(m.err.Error()), " ")
+			const prefix = "Error: "
+			b.WriteString("\n")
+			b.WriteString(errorStyle.Render(prefix + truncateMiddle(message, m.contentWidth()-4-len(prefix))))
+		}
+		b.WriteString("\n")
+		b.WriteString(warningStyle.Render("Activation requirements are unavailable; press r to retry discovery."))
+		b.WriteString("\n")
+		detailHints = []keyHint{{"r", "retry discovery"}, {"esc", "back to assignments"}, {"q", "quit"}}
+	}
+	b.WriteString(m.footer(detailHints))
 	return b.String()
 }
 
@@ -523,13 +555,21 @@ func (m Model) tenantWindow(total int) (int, int) {
 	return start, start + visible
 }
 
+func (m Model) policyLoadingBanner() string {
+	return fmt.Sprintf("%s  Loading activation requirements...\n\n", m.spinner.View())
+}
+
 func (m Model) assignmentVisibleRows() int {
 	footerExtraRows := max(0, lipgloss.Height(m.assignmentFooter())-2)
 	errorRows := 0
 	if assignmentError := m.assignmentError(); assignmentError != "" {
 		errorRows = lipgloss.Height(assignmentError)
 	}
-	return max(4, m.height-19-footerExtraRows-errorRows)
+	visibleRows := max(4, m.height-19-footerExtraRows-errorRows)
+	if m.preparingPolicies || m.waitingForPolicies {
+		visibleRows = max(1, visibleRows-lipgloss.Height(m.policyLoadingBanner()))
+	}
+	return visibleRows
 }
 
 func (m Model) assignmentWindow(total int) (int, int) {
@@ -644,6 +684,19 @@ func valueOrUnknown(value string) string {
 		return "unknown"
 	}
 	return value
+}
+
+func truncateMiddle(value string, width int) string {
+	runes := []rune(value)
+	if len(runes) <= width {
+		return value
+	}
+	if width <= 3 {
+		return string(runes[:width])
+	}
+	prefix := (width - 3) / 2
+	suffix := width - 3 - prefix
+	return string(runes[:prefix]) + "..." + string(runes[len(runes)-suffix:])
 }
 
 func truncateText(value string, width int) string {

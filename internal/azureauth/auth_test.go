@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"os"
 	"reflect"
 	"slices"
@@ -38,6 +39,44 @@ func TestTenantsEnrichesNamesFromAzureAccounts(t *testing.T) {
 	}
 	if !reflect.DeepEqual(tenants, want) {
 		t.Fatalf("expected %#v, got %#v", want, tenants)
+	}
+}
+
+func TestTenantsRunsTenantAndMetadataLookupsConcurrently(t *testing.T) {
+	started := make(chan string, 2)
+	release := make(chan struct{})
+	client := NewCLI(func(_ context.Context, name string, args ...string) ([]byte, error) {
+		command := name + " " + strings.Join(args, " ")
+		started <- command
+		<-release
+		switch command {
+		case "az account tenant list --output json":
+			return []byte(`[{"tenantId":"tenant-1"}]`), nil
+		case "az account list --all --query [].{tenantId:tenantId,displayName:tenantDisplayName,defaultDomain:tenantDefaultDomain} --output json":
+			return []byte(`[{"tenantId":"tenant-1","displayName":"Contoso"}]`), nil
+		default:
+			return nil, fmt.Errorf("unexpected command %s", command)
+		}
+	})
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := client.Tenants(context.Background())
+		done <- err
+	}()
+
+	commands := []string{<-started, <-started}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatalf("Tenants returned error: %v", err)
+	}
+	slices.Sort(commands)
+	want := []string{
+		"az account list --all --query [].{tenantId:tenantId,displayName:tenantDisplayName,defaultDomain:tenantDefaultDomain} --output json",
+		"az account tenant list --output json",
+	}
+	if !reflect.DeepEqual(commands, want) {
+		t.Fatalf("expected both lookups, got %#v", commands)
 	}
 }
 

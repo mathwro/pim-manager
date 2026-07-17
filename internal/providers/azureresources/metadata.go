@@ -3,12 +3,16 @@ package azureresources
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/mathwro/pim-manager/internal/arm"
 	"github.com/mathwro/pim-manager/internal/pim"
 )
+
+const maxConcurrentScopeRequests = 4
 
 type activeAssignmentResponse struct {
 	Value    []roleAssignmentScheduleInstance `json:"value"`
@@ -121,13 +125,75 @@ func policyForAssignment(policies []roleManagementPolicyAssignment, roleDefiniti
 	return policy, nil
 }
 
-func (p Provider) discoverActiveAssignments(ctx context.Context) ([]roleAssignmentScheduleInstance, error) {
-	path := fmt.Sprintf("/providers/Microsoft.Authorization/roleAssignmentScheduleInstances?$filter=asTarget%%28%%29&api-version=%s", arm.AuthorizationAPIVersion)
+func assignmentScopes(assignments []pim.EligibleAssignment) []string {
+	byKey := make(map[string]string)
+	for _, assignment := range assignments {
+		scope := strings.TrimRight(strings.TrimSpace(assignment.AzureScope), "/")
+		if scope == "" {
+			continue
+		}
+		key := strings.ToLower(scope)
+		if _, exists := byKey[key]; !exists {
+			byKey[key] = scope
+		}
+	}
+	scopes := make([]string, 0, len(byKey))
+	for _, scope := range byKey {
+		scopes = append(scopes, scope)
+	}
+	sort.Strings(scopes)
+	return scopes
+}
+
+func forEachScope(ctx context.Context, scopes []string, fn func(context.Context, int, string) error) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	semaphore := make(chan struct{}, maxConcurrentScopeRequests)
+	errCh := make(chan error, 1)
+	var wg sync.WaitGroup
+	for index, scope := range scopes {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			select {
+			case semaphore <- struct{}{}:
+				defer func() { <-semaphore }()
+			case <-ctx.Done():
+				return
+			}
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+			if err := fn(ctx, index, scope); err != nil {
+				select {
+				case errCh <- err:
+				default:
+				}
+				cancel()
+			}
+		}()
+	}
+	wg.Wait()
+	select {
+	case err := <-errCh:
+		return err
+	default:
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		return nil
+	}
+}
+
+func (p Provider) discoverActiveAssignments(ctx context.Context, scope string) ([]roleAssignmentScheduleInstance, error) {
+	path := fmt.Sprintf("%s/providers/Microsoft.Authorization/roleAssignmentScheduleInstances?$filter=asTarget%%28%%29&api-version=%s", strings.TrimRight(scope, "/"), arm.AuthorizationAPIVersion)
 	var out []roleAssignmentScheduleInstance
 	for path != "" {
 		var response activeAssignmentResponse
 		if err := p.arm.Get(ctx, path, &response); err != nil {
-			return nil, fmt.Errorf("list active Azure role assignments: %w", err)
+			return nil, fmt.Errorf("list active Azure role assignments at %s: %w", scope, err)
 		}
 		out = append(out, response.Value...)
 		path = response.NextLink
@@ -174,21 +240,25 @@ func applyActiveState(assignments []pim.EligibleAssignment, active []roleAssignm
 func (p Provider) applyPolicies(ctx context.Context, assignments []pim.EligibleAssignment) error {
 	byScope := make(map[string][]int)
 	for index := range assignments {
-		key := strings.ToLower(strings.TrimRight(assignments[index].AzureScope, "/"))
+		key := strings.ToLower(strings.TrimRight(strings.TrimSpace(assignments[index].AzureScope), "/"))
 		byScope[key] = append(byScope[key], index)
 	}
-	for _, indexes := range byScope {
-		scope := assignments[indexes[0]].AzureScope
+	scopes := assignmentScopes(assignments)
+	policiesByScope := make([][]roleManagementPolicyAssignment, len(scopes))
+	if err := forEachScope(ctx, scopes, func(ctx context.Context, index int, scope string) error {
 		policies, err := p.policiesForScope(ctx, scope)
-		if err != nil {
-			return err
-		}
-		for _, index := range indexes {
-			policy, err := policyForAssignment(policies, assignments[index].RoleDefinitionID)
+		policiesByScope[index] = policies
+		return err
+	}); err != nil {
+		return err
+	}
+	for scopeIndex, scope := range scopes {
+		for _, assignmentIndex := range byScope[strings.ToLower(scope)] {
+			policy, err := policyForAssignment(policiesByScope[scopeIndex], assignments[assignmentIndex].RoleDefinitionID)
 			if err != nil {
-				return fmt.Errorf("activation policy for %s at %s: %w", assignments[index].DisplayName, scope, err)
+				return fmt.Errorf("activation policy for %s at %s: %w", assignments[assignmentIndex].DisplayName, scope, err)
 			}
-			assignments[index].ActivationPolicy = policy
+			assignments[assignmentIndex].ActivationPolicy = policy
 		}
 	}
 	return nil

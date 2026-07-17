@@ -86,6 +86,27 @@ func TestClientUsesPinnedContextToken(t *testing.T) {
 	}
 }
 
+func TestPinnedPhaseUsesOneTokenForMultipleRequests(t *testing.T) {
+	tokenSource := &recordingTokenSource{}
+	client := NewClient(&http.Client{Transport: armRoundTrip(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Body: io.NopCloser(strings.NewReader(`{}`)), Header: make(http.Header)}, nil
+	})}, tokenSource)
+
+	ctx, err := client.PinAccessToken(context.Background())
+	if err != nil {
+		t.Fatalf("PinAccessToken returned error: %v", err)
+	}
+	if err := client.Get(ctx, "/one", nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Get(ctx, "/two", nil); err != nil {
+		t.Fatal(err)
+	}
+	if tokenSource.calls != 1 {
+		t.Fatalf("expected one token lookup, got %d", tokenSource.calls)
+	}
+}
+
 type armRoundTrip func(*http.Request) (*http.Response, error)
 
 func (f armRoundTrip) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -100,9 +121,11 @@ func (staticTokenSource) AccessToken(context.Context, string) (string, error) {
 
 type recordingTokenSource struct {
 	resource string
+	calls    int
 }
 
 func (s *recordingTokenSource) AccessToken(_ context.Context, resource string) (string, error) {
+	s.calls++
 	s.resource = resource
 	return "token", nil
 }
