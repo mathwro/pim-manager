@@ -43,7 +43,7 @@ Each usable record must have a non-empty `tenantId`, and duplicate tenant IDs ar
 az account list --all --query "[].{tenantId:tenantId,displayName:tenantDisplayName,defaultDomain:tenantDefaultDomain}" --output json
 ```
 
-Enrichment merges the first non-empty display name and default domain found for each tenant ID without removing tenants absent from the subscription cache. The UI displays the tenant display name first, then the default domain, then the tenant ID as the final fallback. The tenant ID remains on the row's second line for disambiguation.
+Enrichment merges the first non-empty display name and default domain found for each tenant ID without removing tenants absent from the subscription cache. When both values exist, the menu and selected-tenant panel render `Display Name (default.domain)`; otherwise they use the display name, then the default domain, then the tenant ID as the final fallback. The tenant ID remains on each menu row's second line for disambiguation.
 
 Azure CLI command and parsing failures preserve their details. A failure that indicates no usable login shows the exact `az login` guidance and a retry action.
 
@@ -59,7 +59,7 @@ This follows Azure CLI's supported per-command tenant selection and does not mut
 
 ### Startup
 
-The Bubble Tea model starts on a tenant-loading state and requests the tenant list without starting PIM discovery.
+The Bubble Tea model starts on a tenant-loading state, starts the loading spinner immediately, and requests the tenant list without starting PIM discovery.
 
 - Zero usable tenants or a command error shows an actionable Azure CLI error and `az login` guidance. Pressing `r` retries tenant discovery.
 - One usable tenant is selected automatically and the PIM-area home opens.
@@ -156,6 +156,8 @@ Normal tests use fake Azure CLI runners and providers; they require no live Azur
 - Delayed results from an earlier tenant or request generation are ignored.
 - Failed or canceled authentication after a tenant switch submits nothing.
 - Views render selected-tenant context and the six-step progress line.
+- Tenant labels format name plus parenthesized domain and preserve name-only, domain-only, and ID-only fallbacks.
+- Startup schedules spinner ticks while the initial tenant lookup is running.
 
 ### App Wiring and Verification
 
