@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"slices"
+	"sync"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -101,6 +103,7 @@ func TestRunInitListsTenantsWithoutSectionDiscovery(t *testing.T) {
 		runProgram = oldRunProgram
 	})
 
+	var commandMu sync.Mutex
 	var commands []string
 	newCLI = func(run azureauth.Runner) azureauth.CLI {
 		return azureauth.NewCLI(func(_ context.Context, name string, args ...string) ([]byte, error) {
@@ -108,7 +111,9 @@ func TestRunInitListsTenantsWithoutSectionDiscovery(t *testing.T) {
 			for _, arg := range args {
 				command += " " + arg
 			}
+			commandMu.Lock()
 			commands = append(commands, command)
+			commandMu.Unlock()
 			switch command {
 			case "az account tenant list --output json":
 				return []byte(`[{"tenantId":"tenant-1"}]`), nil
@@ -137,11 +142,16 @@ func TestRunInitListsTenantsWithoutSectionDiscovery(t *testing.T) {
 	if err := Run(); err != nil {
 		t.Fatalf("Run returned error: %v", err)
 	}
+	commandMu.Lock()
+	got := slices.Clone(commands)
+	commandMu.Unlock()
 	want := []string{
 		"az account tenant list --output json",
 		"az account list --all --query [].{tenantId:tenantId,displayName:tenantDisplayName,defaultDomain:tenantDefaultDomain} --output json",
 	}
-	if !reflect.DeepEqual(commands, want) {
-		t.Fatalf("expected tenant discovery and name enrichment calls, got %#v", commands)
+	slices.Sort(got)
+	slices.Sort(want)
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("expected tenant discovery and name enrichment calls, got %#v", got)
 	}
 }
