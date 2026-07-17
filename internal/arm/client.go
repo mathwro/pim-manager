@@ -54,6 +54,17 @@ func NewClient(httpClient *http.Client, tokenSource TokenSource) Client {
 	return Client{httpClient: httpClient, tokenSource: tokenSource, baseURL: BaseURL}
 }
 
+func (c Client) PinAccessToken(ctx context.Context) (context.Context, error) {
+	if PinnedAccessToken(ctx) != "" {
+		return ctx, nil
+	}
+	token, err := c.tokenSource.AccessToken(ctx, Resource)
+	if err != nil {
+		return nil, err
+	}
+	return WithAccessToken(ctx, token), nil
+}
+
 func (c Client) Get(ctx context.Context, path string, out any) error {
 	return c.do(ctx, http.MethodGet, path, nil, out)
 }
@@ -63,14 +74,11 @@ func (c Client) Put(ctx context.Context, path string, body any, out any) error {
 }
 
 func (c Client) do(ctx context.Context, method string, path string, body any, out any) error {
-	token := PinnedAccessToken(ctx)
-	if token == "" {
-		var err error
-		token, err = c.tokenSource.AccessToken(ctx, Resource)
-		if err != nil {
-			return err
-		}
+	ctx, err := c.PinAccessToken(ctx)
+	if err != nil {
+		return err
 	}
+	token := PinnedAccessToken(ctx)
 	u := c.baseURL + path
 	if strings.HasPrefix(path, "https://") {
 		u = path

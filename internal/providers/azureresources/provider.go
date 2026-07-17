@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 )
 
 type ARMClient interface {
+	PinAccessToken(context.Context) (context.Context, error)
 	Get(context.Context, string, any) error
 	Put(context.Context, string, any, any) error
 }
@@ -82,19 +84,44 @@ func (p Provider) discoverEligibilities(ctx context.Context) ([]pim.EligibleAssi
 }
 
 func (p Provider) Discover(ctx context.Context) ([]pim.EligibleAssignment, error) {
-	assignments, err := p.discoverEligibilities(ctx)
+	ctx, err := p.arm.PinAccessToken(ctx)
 	if err != nil {
+		return nil, fmt.Errorf("authenticate Azure Resource discovery: %w", err)
+	}
+	assignments, err := p.discoverEligibilities(ctx)
+	if err != nil || len(assignments) == 0 {
+		return assignments, err
+	}
+	scopes := assignmentScopes(assignments)
+	activeByScope := make([][]roleAssignmentScheduleInstance, len(scopes))
+	if err := forEachScope(ctx, scopes, func(ctx context.Context, index int, scope string) error {
+		active, err := p.discoverActiveAssignments(ctx, scope)
+		activeByScope[index] = active
+		return err
+	}); err != nil {
 		return nil, err
 	}
-	active, err := p.discoverActiveAssignments(ctx)
-	if err != nil {
-		return nil, err
+	var active []roleAssignmentScheduleInstance
+	for _, scoped := range activeByScope {
+		active = append(active, scoped...)
 	}
 	applyActiveState(assignments, active, time.Now().UTC())
-	if err := p.applyPolicies(ctx, assignments); err != nil {
+	return assignments, nil
+}
+
+func (p Provider) Prepare(ctx context.Context, assignments []pim.EligibleAssignment) ([]pim.EligibleAssignment, error) {
+	prepared := slices.Clone(assignments)
+	if len(prepared) == 0 {
+		return prepared, nil
+	}
+	ctx, err := p.arm.PinAccessToken(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("authenticate Azure activation policy discovery: %w", err)
+	}
+	if err := p.applyPolicies(ctx, prepared); err != nil {
 		return nil, err
 	}
-	return assignments, nil
+	return prepared, nil
 }
 
 func normalizeEligibility(item roleEligibilityScheduleInstance) pim.EligibleAssignment {
