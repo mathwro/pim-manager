@@ -15,13 +15,62 @@ type keyHint struct {
 	label string
 }
 
+func (m Model) viewTenants() string {
+	var b strings.Builder
+	title := "Azure CLI sign-in"
+	if !m.checkingTenants && m.tenantErr == nil && len(m.tenants) > 1 {
+		title = "Choose Azure tenant"
+	}
+	b.WriteString(m.header(title, "Account"))
+	b.WriteString("\n")
+	b.WriteString(m.stepLine(0))
+	b.WriteString("\n\n")
+	if m.checkingTenants {
+		b.WriteString(panelStyle.Width(m.contentWidth() - 6).Render(fmt.Sprintf("%s  Checking Azure CLI tenants...", m.spinner.View())))
+		b.WriteString(m.footer([]keyHint{{"q", "quit"}}))
+		return b.String()
+	}
+	if m.tenantErr != nil {
+		guidance := "Resolve the Azure CLI error, then press r to retry."
+		if errors.Is(m.tenantErr, azureauth.ErrNotLoggedIn) {
+			guidance = "Run az login, then press r to retry."
+		}
+		b.WriteString(errorStyle.Width(m.contentWidth() - 4).Render("Azure sign-in required\n" + guidance + "\n" + mutedStyle.Render(m.tenantErr.Error())))
+		b.WriteString(m.footer([]keyHint{{"r", "retry"}, {"?", "help"}, {"q", "quit"}}))
+		return b.String()
+	}
+	for index, tenant := range m.tenants {
+		marker := "  "
+		style := cardStyle
+		if index == m.tenantIndex {
+			marker = "> "
+			style = activeCardStyle
+		}
+		body := fmt.Sprintf("%s%s\n  %s", marker, tenantLabel(tenant), mutedStyle.Render(tenant.ID))
+		b.WriteString(style.Width(m.contentWidth() - 4).Render(body))
+		b.WriteString("\n")
+	}
+	b.WriteString(m.footer([]keyHint{{"up/down", "move"}, {"enter", "select"}, {"r", "refresh"}, {"?", "help"}, {"q", "quit"}}))
+	return b.String()
+}
+
+func tenantLabel(tenant azureauth.Tenant) string {
+	if tenant.DisplayName != "" {
+		return tenant.DisplayName
+	}
+	if tenant.DefaultDomain != "" {
+		return tenant.DefaultDomain
+	}
+	return tenant.ID
+}
+
 func (m Model) viewHome() string {
 	var b strings.Builder
 	b.WriteString(m.header("Access console", "Home"))
 	b.WriteString("\n")
-	b.WriteString(m.stepLine(0))
+	b.WriteString(m.stepLine(1))
 	b.WriteString("\n\n")
-	b.WriteString(m.accountPanel())
+	b.WriteString(m.tenantPanel())
 	b.WriteString("\n\n")
 	b.WriteString(violetStyle.Render("Choose where to request privileged access"))
 	b.WriteString("\n")
@@ -48,8 +97,8 @@ func (m Model) viewHome() string {
 	}
 
 	hints := []keyHint{{"up/down", "move"}, {"enter", "open"}, {"?", "help"}, {"q", "quit"}}
-	if m.runtime.Account != nil && m.accountErr != nil {
-		hints = append([]keyHint{{"r", "check sign-in"}}, hints...)
+	if len(m.tenants) > 1 {
+		hints = append([]keyHint{{"esc", "change account"}}, hints...)
 	}
 	b.WriteString(m.footer(hints))
 	return b.String()
@@ -59,7 +108,7 @@ func (m Model) viewAssignments() string {
 	var b strings.Builder
 	b.WriteString(m.header("Eligible assignments", string(m.activeSection)))
 	b.WriteString("\n")
-	b.WriteString(m.stepLine(1))
+	b.WriteString(m.stepLine(2))
 	b.WriteString("\n\n")
 
 	if m.loading {
@@ -207,7 +256,7 @@ func (m Model) viewActivation() string {
 	var b strings.Builder
 	b.WriteString(m.header("Activation request", string(m.activeSection)))
 	b.WriteString("\n")
-	b.WriteString(m.stepLine(2))
+	b.WriteString(m.stepLine(3))
 	b.WriteString("\n\n")
 	selected := m.assignmentList.selected()
 	b.WriteString(fmt.Sprintf("One request will be applied to %s.\n\n", accentStyle.Render(fmt.Sprintf("%d selected assignments", len(selected)))))
@@ -260,7 +309,7 @@ func (m Model) viewConfirmation() string {
 	var b strings.Builder
 	b.WriteString(m.header("Review activation", string(m.activeSection)))
 	b.WriteString("\n")
-	b.WriteString(m.stepLine(3))
+	b.WriteString(m.stepLine(4))
 	b.WriteString("\n\n")
 	selected := m.assignmentList.selected()
 	b.WriteString(accentStyle.Render(fmt.Sprintf("%d assignments", len(selected))))
@@ -311,7 +360,7 @@ func (m Model) viewProgress() string {
 	var b strings.Builder
 	b.WriteString(m.header("Activating access", string(m.activeSection)))
 	b.WriteString("\n")
-	b.WriteString(m.stepLine(3))
+	b.WriteString(m.stepLine(5))
 	b.WriteString("\n\n")
 	b.WriteString(panelStyle.Width(m.contentWidth() - 6).Render(
 		fmt.Sprintf("%s  Submitting %d activation requests\n%s", m.spinner.View(), len(m.assignmentList.selected()), mutedStyle.Render("The batch continues if an individual assignment fails.")),
@@ -324,7 +373,7 @@ func (m Model) viewSummary() string {
 	var b strings.Builder
 	b.WriteString(m.header("Activation summary", string(m.activeSection)))
 	b.WriteString("\n")
-	b.WriteString(m.stepLine(4))
+	b.WriteString(m.stepLine(5))
 	b.WriteString("\n\n")
 	counts := lipgloss.JoinHorizontal(lipgloss.Top,
 		panelStyle.Render(successStyle.Render(fmt.Sprintf("%d activated", len(m.summary.activated)))),
@@ -373,7 +422,7 @@ func (m Model) header(title, route string) string {
 }
 
 func (m Model) stepLine(active int) string {
-	labels := []string{"Choose", "Select", "Request", "Review", "Result"}
+	labels := []string{"Account", "Type", "Select", "Request", "Review", "Result"}
 	parts := make([]string, 0, len(labels))
 	for index, label := range labels {
 		marker := "o"
@@ -387,31 +436,16 @@ func (m Model) stepLine(active int) string {
 		}
 		parts = append(parts, style.Render(marker+" "+label))
 	}
-	return strings.Join(parts, mutedStyle.Render("  --  "))
+	return strings.Join(parts, mutedStyle.Render("  "))
 }
 
-func (m Model) accountPanel() string {
-	if m.runtime.Account == nil {
-		return panelStyle.Width(m.contentWidth() - 6).Render(mutedStyle.Render("Azure CLI account validation is not configured."))
+func (m Model) tenantPanel() string {
+	if m.selectedTenant.ID == "" {
+		return panelStyle.Width(m.contentWidth() - 6).Render(mutedStyle.Render("No Azure tenant selected."))
 	}
-	if m.checkingAccount {
-		return panelStyle.Width(m.contentWidth() - 6).Render(fmt.Sprintf("%s  Checking Azure CLI sign-in...", m.spinner.View()))
-	}
-	if m.accountErr != nil {
-		guidance := "Run az login, then press r to check again."
-		if !errors.Is(m.accountErr, azureauth.ErrNotLoggedIn) {
-			guidance = "Resolve the Azure CLI error, then press r to check again."
-		}
-		return errorStyle.Width(m.contentWidth() - 4).Render(fmt.Sprintf("Azure sign-in required\n%s\n%s", guidance, mutedStyle.Render(m.accountErr.Error())))
-	}
-	if !m.accountChecked {
-		return panelStyle.Width(m.contentWidth() - 6).Render(mutedStyle.Render("Azure CLI account has not been checked yet."))
-	}
-	identity := successStyle.Render("CONNECTED") + "  " + valueOrUnknown(m.account.UserName)
-	tenant := fmt.Sprintf("%-13s %s", "Tenant", valueOrUnknown(m.account.TenantID))
-	subscription := fmt.Sprintf("%-13s %s", "Subscription", valueOrUnknown(m.account.SubscriptionID))
-	context := mutedStyle.Render(tenant + "\n" + subscription)
-	return panelStyle.Width(m.contentWidth() - 6).Render(identity + "\n" + context)
+	identity := successStyle.Render("CONNECTED") + "  " + tenantLabel(m.selectedTenant)
+	id := mutedStyle.Render(fmt.Sprintf("%-13s %s", "Tenant", m.selectedTenant.ID))
+	return panelStyle.Width(m.contentWidth() - 6).Render(identity + "\n" + id)
 }
 
 func (m *Model) resizeComponents() {

@@ -21,6 +21,7 @@ import (
 type Screen string
 
 const (
+	ScreenTenants      Screen = "tenants"
 	ScreenHome         Screen = "home"
 	ScreenAssignments  Screen = "assignments"
 	ScreenDetails      Screen = "details"
@@ -42,7 +43,7 @@ type Runtime struct {
 	Entra             AssignmentProvider
 	AzureResources    AssignmentProvider
 	Groups            AssignmentProvider
-	Account           AccountProvider
+	Tenants           TenantProvider
 	StepUpCommand     func(string, bool, string) (*exec.Cmd, error)
 	ARMAuthentication func(context.Context, bool, string) (azureauth.ARMAuthentication, error)
 }
@@ -52,8 +53,8 @@ type AssignmentProvider interface {
 	Activate(context.Context, pim.ActivationRequest) (pim.ActivationResult, error)
 }
 
-type AccountProvider interface {
-	Account(context.Context) (azureauth.Account, error)
+type TenantProvider interface {
+	Tenants(context.Context) ([]azureauth.Tenant, error)
 }
 
 type Model struct {
@@ -78,10 +79,13 @@ type Model struct {
 	loading                bool
 	checkingAuthentication bool
 	authenticationCheck    int
-	checkingAccount        bool
-	accountChecked         bool
-	account                azureauth.Account
-	accountErr             error
+	checkingTenants        bool
+	tenantCheck            int
+	tenants                []azureauth.Tenant
+	tenantIndex            int
+	selectedTenant         azureauth.Tenant
+	tenantErr              error
+	discoveryCheck         int
 	err                    error
 	helpVisible            bool
 	width                  int
@@ -97,6 +101,8 @@ const (
 
 type assignmentsDiscoveredMsg struct {
 	assignments []pim.EligibleAssignment
+	tenantID    string
+	checkID     int
 	err         error
 }
 
@@ -123,8 +129,9 @@ type authenticationCheckedMsg struct {
 	err                   error
 }
 
-type accountCheckedMsg struct {
-	account azureauth.Account
+type tenantsCheckedMsg struct {
+	tenants []azureauth.Tenant
+	checkID int
 	err     error
 }
 
@@ -159,19 +166,23 @@ func NewModel(runtime Runtime) Model {
 		duration:        duration,
 		spinner:         activity,
 		summaryViewport: viewport.New(0, 0),
-		checkingAccount: runtime.Account != nil,
 		width:           96,
 		height:          30,
+	}
+	if runtime.Tenants != nil {
+		model.screen = ScreenTenants
+		model.checkingTenants = true
+		model.tenantCheck = 1
 	}
 	model.resizeComponents()
 	return model
 }
 
 func (m Model) Init() tea.Cmd {
-	if m.runtime.Account == nil {
+	if m.runtime.Tenants == nil {
 		return nil
 	}
-	return m.checkAccount()
+	return m.checkTenants(m.tenantCheck)
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -182,13 +193,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.resizeComponents()
 		return m, nil
 	case spinner.TickMsg:
-		if !m.loading && !m.checkingAccount {
+		if !m.loading && !m.checkingTenants {
 			return m, nil
 		}
 		var cmd tea.Cmd
 		m.spinner, cmd = m.spinner.Update(typed)
 		return m, cmd
 	case assignmentsDiscoveredMsg:
+		if typed.checkID != m.discoveryCheck || typed.tenantID != m.selectedTenant.ID {
+			return m, nil
+		}
 		m.loading = false
 		m.err = typed.err
 		if typed.err != nil {
@@ -245,11 +259,33 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return m.startStepUp(typed.selected, typed.mfaRequired, typed.authenticationContext, typed.origin, typed.authentication.PrincipalID)
-	case accountCheckedMsg:
-		m.checkingAccount = false
-		m.accountChecked = true
-		m.account = typed.account
-		m.accountErr = typed.err
+	case tenantsCheckedMsg:
+		if typed.checkID != m.tenantCheck {
+			return m, nil
+		}
+		m.checkingTenants = false
+		m.tenantErr = typed.err
+		if typed.err != nil {
+			m.screen = ScreenTenants
+			return m, nil
+		}
+		m.tenants = typed.tenants
+		m.clampTenantCursor()
+		if len(m.tenants) == 1 {
+			m.selectTenant(0)
+			return m, nil
+		}
+		m.screen = ScreenTenants
+		if m.selectedTenant.ID != "" {
+			index := m.indexOfTenant(m.selectedTenant.ID)
+			if index < 0 {
+				m.clearTenantWorkflow()
+				m.selectedTenant = azureauth.Tenant{}
+			} else {
+				m.selectedTenant = m.tenants[index]
+				m.tenantIndex = index
+			}
+		}
 		return m, nil
 	}
 
@@ -277,6 +313,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	switch m.screen {
+	case ScreenTenants:
+		return m.updateTenants(key)
 	case ScreenHome:
 		return m.updateHome(key)
 	case ScreenAssignments:
@@ -299,6 +337,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m Model) View() string {
 	var content string
 	switch m.screen {
+	case ScreenTenants:
+		content = m.viewTenants()
 	case ScreenHome:
 		content = m.viewHome()
 	case ScreenAssignments:
@@ -322,16 +362,46 @@ func (m Model) View() string {
 	return appFrameStyle.Width(m.frameWidth()).Render(content)
 }
 
+func (m Model) updateTenants(key tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.checkingTenants {
+		return m, nil
+	}
+	switch key.Type {
+	case tea.KeyUp:
+		m.moveTenant(-1)
+	case tea.KeyDown:
+		m.moveTenant(1)
+	case tea.KeyEnter:
+		if m.tenantErr == nil && len(m.tenants) > 0 {
+			m.selectTenant(m.tenantIndex)
+		}
+	case tea.KeyRunes:
+		switch string(key.Runes) {
+		case "j":
+			m.moveTenant(1)
+		case "k":
+			m.moveTenant(-1)
+		case "r":
+			m.tenantCheck++
+			m.checkingTenants = true
+			m.tenantErr = nil
+			return m, tea.Batch(m.checkTenants(m.tenantCheck), m.spinner.Tick)
+		}
+	}
+	return m, nil
+}
+
 func (m Model) updateHome(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch key.Type {
+	case tea.KeyEsc:
+		if len(m.tenants) > 1 {
+			m.screen = ScreenTenants
+		}
 	case tea.KeyUp:
 		m.moveSection(-1)
 	case tea.KeyDown:
 		m.moveSection(1)
 	case tea.KeyEnter:
-		if m.runtime.Account != nil && (m.checkingAccount || m.accountErr != nil) {
-			return m, nil
-		}
 		return m.beginDiscovery(m.selectedSection)
 	case tea.KeyRunes:
 		switch string(key.Runes) {
@@ -339,12 +409,6 @@ func (m Model) updateHome(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.moveSection(-1)
 		case "j":
 			m.moveSection(1)
-		case "r":
-			if m.runtime.Account != nil {
-				m.checkingAccount = true
-				m.accountErr = nil
-				return m, tea.Batch(m.checkAccount(), m.spinner.Tick)
-			}
 		}
 	}
 	return m, nil
@@ -533,7 +597,7 @@ func (m Model) startStepUp(selected []pim.EligibleAssignment, mfaRequired bool, 
 		m.err = errors.New("step-up authentication is unavailable")
 		return m, nil
 	}
-	command, err := m.runtime.StepUpCommand(m.account.TenantID, mfaRequired, authenticationContext)
+	command, err := m.runtime.StepUpCommand(m.selectedTenant.ID, mfaRequired, authenticationContext)
 	if err != nil {
 		m.err = err
 		return m, nil
@@ -552,8 +616,9 @@ func (m Model) startAuthenticationCheck(selected []pim.EligibleAssignment, mfaRe
 }
 
 func (m Model) checkAuthentication(selected []pim.EligibleAssignment, mfaRequired bool, authenticationContext string, afterStepUp bool, checkID int, origin Screen, expectedPrincipalID string) tea.Cmd {
+	ctx := m.tenantContext()
 	return func() tea.Msg {
-		authentication, err := m.runtime.ARMAuthentication(context.Background(), mfaRequired, authenticationContext)
+		authentication, err := m.runtime.ARMAuthentication(ctx, mfaRequired, authenticationContext)
 		return authenticationCheckedMsg{
 			selected: selected, authentication: authentication,
 			mfaRequired: mfaRequired, authenticationContext: authenticationContext,
@@ -632,7 +697,8 @@ func (m Model) beginDiscovery(section Section) (tea.Model, tea.Cmd) {
 	m.searchMode = false
 	m.assignmentList = newAssignmentList(nil)
 	m.listCursor = 0
-	return m, tea.Batch(m.discoverAssignments(), m.spinner.Tick)
+	m.discoveryCheck++
+	return m, tea.Batch(m.discoverAssignments(m.discoveryCheck, m.selectedTenant.ID), m.spinner.Tick)
 }
 
 func (m Model) openActivationForm() (tea.Model, tea.Cmd) {
@@ -705,6 +771,63 @@ func (m *Model) syncForm() {
 
 func (m Model) acceptingText() bool {
 	return m.searchMode || m.screen == ScreenActivation
+}
+
+func (m *Model) selectTenant(index int) {
+	if index < 0 || index >= len(m.tenants) {
+		return
+	}
+	next := m.tenants[index]
+	if m.selectedTenant.ID != next.ID {
+		m.clearTenantWorkflow()
+	}
+	m.selectedTenant = next
+	m.tenantIndex = index
+	m.screen = ScreenHome
+	m.tenantErr = nil
+}
+
+func (m *Model) clearTenantWorkflow() {
+	m.discoveryCheck++
+	m.authenticationCheck++
+	m.checkingAuthentication = false
+	m.loading = false
+	m.activeSection = ""
+	m.query = ""
+	m.searchMode = false
+	m.assignmentList = newAssignmentList(nil)
+	m.form = activationForm{durations: map[string]string{}}
+	m.justification.SetValue("")
+	m.duration.SetValue("")
+	m.durationIndex = 0
+	m.summary = summary{}
+	m.err = nil
+}
+
+func (m Model) tenantContext() context.Context {
+	return azureauth.WithTenant(context.Background(), m.selectedTenant.ID)
+}
+
+func (m *Model) moveTenant(delta int) {
+	m.tenantIndex += delta
+	m.clampTenantCursor()
+}
+
+func (m *Model) clampTenantCursor() {
+	if len(m.tenants) == 0 {
+		m.tenantIndex = 0
+		return
+	}
+	m.tenantIndex = min(max(m.tenantIndex, 0), len(m.tenants)-1)
+}
+
+func (m Model) indexOfTenant(tenantID string) int {
+	for index, tenant := range m.tenants {
+		if strings.EqualFold(tenant.ID, tenantID) {
+			return index
+		}
+	}
+	return -1
 }
 
 func (m *Model) moveSection(delta int) {
@@ -788,23 +911,24 @@ func (m Model) providerForSection(section Section) AssignmentProvider {
 	}
 }
 
-func (m Model) discoverAssignments() tea.Cmd {
+func (m Model) discoverAssignments(checkID int, tenantID string) tea.Cmd {
 	provider := m.providerForSection(m.activeSection)
 	if provider == nil {
 		return func() tea.Msg {
-			return assignmentsDiscoveredMsg{err: fmt.Errorf("provider for %s is unavailable", m.activeSection)}
+			return assignmentsDiscoveredMsg{tenantID: tenantID, checkID: checkID, err: fmt.Errorf("provider for %s is unavailable", m.activeSection)}
 		}
 	}
+	ctx := azureauth.WithTenant(context.Background(), tenantID)
 	return func() tea.Msg {
-		assignments, err := provider.Discover(context.Background())
-		return assignmentsDiscoveredMsg{assignments: assignments, err: err}
+		assignments, err := provider.Discover(ctx)
+		return assignmentsDiscoveredMsg{assignments: assignments, tenantID: tenantID, checkID: checkID, err: err}
 	}
 }
 
 func (m Model) activateSelected(selected []pim.EligibleAssignment, authentication azureauth.ARMAuthentication) tea.Cmd {
 	provider := m.providerForSection(m.activeSection)
 	justification := strings.TrimSpace(m.form.justification)
-	ctx := arm.WithAccessToken(context.Background(), authentication.AccessToken)
+	ctx := arm.WithAccessToken(m.tenantContext(), authentication.AccessToken)
 	return func() tea.Msg {
 		results := make([]pim.ActivationResult, 0, len(selected))
 		if provider == nil {
@@ -846,14 +970,14 @@ func (m Model) activateSelected(selected []pim.EligibleAssignment, authenticatio
 	}
 }
 
-func (m Model) checkAccount() tea.Cmd {
-	provider := m.runtime.Account
+func (m Model) checkTenants(checkID int) tea.Cmd {
+	provider := m.runtime.Tenants
 	if provider == nil {
 		return nil
 	}
 	return func() tea.Msg {
-		account, err := provider.Account(context.Background())
-		return accountCheckedMsg{account: account, err: err}
+		tenants, err := provider.Tenants(context.Background())
+		return tenantsCheckedMsg{tenants: tenants, checkID: checkID, err: err}
 	}
 }
 

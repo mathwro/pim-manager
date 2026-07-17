@@ -40,7 +40,7 @@ func runCommand(model Model, cmd tea.Cmd) Model {
 		for _, child := range typed {
 			model = runCommand(model, child)
 		}
-	case assignmentsDiscoveredMsg, activationCompletedMsg, accountCheckedMsg:
+	case assignmentsDiscoveredMsg, activationCompletedMsg, tenantsCheckedMsg:
 		next, _ := model.Update(msg)
 		model = next.(Model)
 	}
@@ -93,16 +93,18 @@ func TestHomeEnterOpensAzureResources(t *testing.T) {
 }
 
 type scriptedProvider struct {
-	discoveries   [][]pim.EligibleAssignment
-	discoverCalls int
-	results       []pim.ActivationResult
-	activateErr   []error
-	discoverErr   error
-	activated     []pim.ActivationRequest
-	tokens        []string
+	discoveries      [][]pim.EligibleAssignment
+	discoverCalls    int
+	results          []pim.ActivationResult
+	activateErr      []error
+	discoverErr      error
+	activated        []pim.ActivationRequest
+	tokens           []string
+	discoveryTenants []string
 }
 
-func (p *scriptedProvider) Discover(context.Context) ([]pim.EligibleAssignment, error) {
+func (p *scriptedProvider) Discover(ctx context.Context) ([]pim.EligibleAssignment, error) {
+	p.discoveryTenants = append(p.discoveryTenants, azureauth.TenantFromContext(ctx))
 	p.discoverCalls++
 	if p.discoverErr != nil {
 		return nil, p.discoverErr
@@ -134,28 +136,27 @@ func (p *scriptedProvider) Activate(ctx context.Context, request pim.ActivationR
 	return result, nil
 }
 
-type scriptedAccountProvider struct {
-	accounts []azureauth.Account
-	errs     []error
-	calls    int
+type scriptedTenantProvider struct {
+	replies [][]azureauth.Tenant
+	errs    []error
+	calls   int
 }
 
-func (p *scriptedAccountProvider) Account(context.Context) (azureauth.Account, error) {
+func (p *scriptedTenantProvider) Tenants(context.Context) ([]azureauth.Tenant, error) {
 	p.calls++
-	var err error
 	if len(p.errs) > 0 {
-		err = p.errs[0]
+		err := p.errs[0]
 		p.errs = p.errs[1:]
+		if err != nil {
+			return nil, err
+		}
 	}
-	if err != nil {
-		return azureauth.Account{}, err
+	if len(p.replies) == 0 {
+		return nil, nil
 	}
-	var account azureauth.Account
-	if len(p.accounts) > 0 {
-		account = p.accounts[0]
-		p.accounts = p.accounts[1:]
-	}
-	return account, err
+	tenants := p.replies[0]
+	p.replies = p.replies[1:]
+	return tenants, nil
 }
 
 func TestModelDiscoversSelectedSectionAndActivatesSelection(t *testing.T) {
@@ -617,7 +618,7 @@ func TestStepUpBlocksActivationWhenPrincipalChanges(t *testing.T) {
 			return exec.Command("true"), nil
 		},
 	})
-	model.account = azureauth.Account{TenantID: "tenant-1"}
+	model.selectedTenant = azureauth.Tenant{ID: "tenant-1"}
 	model.activeSection = SectionAzureResources
 	model.screen = ScreenConfirmation
 	model.assignmentList = newAssignmentList([]pim.EligibleAssignment{{
@@ -662,7 +663,7 @@ func TestAuthenticationContextStepUpPreservesPrincipalForGroupEligibility(t *tes
 			return exec.Command("true"), nil
 		},
 	})
-	model.account = azureauth.Account{TenantID: "tenant-1"}
+	model.selectedTenant = azureauth.Tenant{ID: "tenant-1"}
 	model.activeSection = SectionAzureResources
 	model.screen = ScreenConfirmation
 	model.assignmentList = newAssignmentList([]pim.EligibleAssignment{{
@@ -759,7 +760,7 @@ func TestConfirmationGatesMixedBatchOnMFA(t *testing.T) {
 			return exec.Command("true"), nil
 		},
 	})
-	model.account = azureauth.Account{TenantID: "tenant-1"}
+	model.selectedTenant = azureauth.Tenant{ID: "tenant-1"}
 	model.activeSection = SectionAzureResources
 	model.screen = ScreenConfirmation
 	model.assignmentList = newAssignmentList([]pim.EligibleAssignment{
@@ -796,7 +797,7 @@ func TestConfirmationUsesRequiredAuthenticationContext(t *testing.T) {
 			return exec.Command("true"), nil
 		},
 	})
-	model.account = azureauth.Account{TenantID: "tenant-1"}
+	model.selectedTenant = azureauth.Tenant{ID: "tenant-1"}
 	model.screen = ScreenConfirmation
 	model.assignmentList = newAssignmentList([]pim.EligibleAssignment{{
 		ID: "owner", ActivationPolicy: pim.ActivationPolicy{AuthenticationContext: "c1"},
@@ -1284,31 +1285,146 @@ func TestAssignmentsSearchModeFiltersAndSelection(t *testing.T) {
 	}
 }
 
-func TestHomeShowsLoginGuidanceAndRetriesAccountLookup(t *testing.T) {
-	account := &scriptedAccountProvider{
-		accounts: []azureauth.Account{{SubscriptionID: "sub-1", TenantID: "tenant-1", UserName: "user@example.com"}},
-		errs:     []error{azureauth.ErrNotLoggedIn, nil},
-	}
-	model := NewModel(Runtime{Account: account})
+func TestOneTenantSkipsTenantSelection(t *testing.T) {
+	provider := &scriptedTenantProvider{replies: [][]azureauth.Tenant{{{ID: "tenant-1", DefaultDomain: "contoso.com"}}}}
+	model := NewModel(Runtime{Tenants: provider})
 
-	cmd := model.Init()
-	if cmd == nil {
-		t.Fatal("expected Init command to check account")
+	model = runCommand(model, model.Init())
+	if model.screen != ScreenHome || model.selectedTenant.ID != "tenant-1" {
+		t.Fatalf("expected tenant-1 home, screen=%s tenant=%#v", model.screen, model.selectedTenant)
 	}
-	model = runCommand(model, cmd)
+}
+
+func TestTenantMenuOnlyRendersForMultipleTenants(t *testing.T) {
+	provider := &scriptedTenantProvider{replies: [][]azureauth.Tenant{{
+		{ID: "tenant-1", DisplayName: "Contoso", DefaultDomain: "contoso.com"},
+		{ID: "tenant-2", DefaultDomain: "fabrikam.com"},
+	}}}
+	model := NewModel(Runtime{Tenants: provider})
+	if strings.Contains(model.View(), "Choose Azure tenant") {
+		t.Fatalf("tenant choice menu must not render before multiple tenants are known: %q", model.View())
+	}
+
+	model = runCommand(model, model.Init())
 	view := model.View()
-	if !strings.Contains(view, "az login") || !strings.Contains(view, "check sign-in") {
-		t.Fatalf("expected login guidance and retry hint, got %q", view)
+	if !strings.Contains(view, "Choose Azure tenant") || !strings.Contains(view, "Contoso") || !strings.Contains(view, "tenant-2") {
+		t.Fatalf("expected tenant choices, got %q", view)
 	}
 
+	next, _ := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = next.(Model)
+	view = model.View()
+	if !strings.Contains(view, "CONNECTED") || !strings.Contains(view, "Contoso") || !strings.Contains(view, "tenant-1") {
+		t.Fatalf("expected selected tenant panel, got %q", view)
+	}
+	for _, label := range []string{"Account", "Type", "Select", "Request", "Review", "Result"} {
+		if !strings.Contains(view, label) {
+			t.Fatalf("expected progress label %q in %q", label, view)
+		}
+	}
+}
+
+func TestMultipleTenantsRequireSelectionAndSupportBack(t *testing.T) {
+	provider := &scriptedTenantProvider{replies: [][]azureauth.Tenant{{
+		{ID: "tenant-1", DefaultDomain: "contoso.com"},
+		{ID: "tenant-2", DefaultDomain: "fabrikam.com"},
+	}}}
+	model := NewModel(Runtime{Tenants: provider})
+	model = runCommand(model, model.Init())
+	if model.screen != ScreenTenants {
+		t.Fatalf("expected tenant screen, got %s", model.screen)
+	}
+	next, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	next, _ = next.(Model).Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = next.(Model)
+	if model.screen != ScreenHome || model.selectedTenant.ID != "tenant-2" {
+		t.Fatalf("expected tenant-2 home, screen=%s tenant=%#v", model.screen, model.selectedTenant)
+	}
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if next.(Model).screen != ScreenTenants {
+		t.Fatalf("expected Esc to reopen tenant selection, got %s", next.(Model).screen)
+	}
+}
+
+func TestSelectingDifferentTenantClearsWorkflowState(t *testing.T) {
+	model := NewModel(Runtime{})
+	model.tenants = []azureauth.Tenant{{ID: "tenant-1"}, {ID: "tenant-2"}}
+	model.selectedTenant = model.tenants[0]
+	model.tenantIndex = 1
+	model.screen = ScreenTenants
+	model.loading = true
+	model.assignmentList = newAssignmentList([]pim.EligibleAssignment{{ID: "reader"}})
+	model.assignmentList.toggle("reader")
+	model.form.justification = "old tenant request"
+	model.form.durations = map[string]string{"reader": "PT1H"}
+	model.summary = newSummary([]pim.ActivationResult{{Assignment: pim.EligibleAssignment{ID: "reader"}, Status: pim.ActivationStatusActivated}})
+
+	next, _ := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	got := next.(Model)
+	if got.selectedTenant.ID != "tenant-2" || got.loading || len(got.assignmentList.items) != 0 || got.form.justification != "" || len(got.form.durations) != 0 || len(got.summary.results) != 0 {
+		t.Fatalf("tenant switch retained workflow state: %#v", got)
+	}
+}
+
+func TestTenantLookupFailureCanRetry(t *testing.T) {
+	provider := &scriptedTenantProvider{
+		replies: [][]azureauth.Tenant{{{ID: "tenant-1"}}},
+		errs:    []error{azureauth.ErrNotLoggedIn, nil},
+	}
+	model := NewModel(Runtime{Tenants: provider})
+	model = runCommand(model, model.Init())
+	if model.tenantErr == nil {
+		t.Fatal("expected tenant lookup error")
+	}
 	next, cmd := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
 	model = runCommand(next.(Model), cmd)
-	view = model.View()
-	if !strings.Contains(view, "user@example.com") || !strings.Contains(view, "sub-1") {
-		t.Fatalf("expected account context in view after retry, got %q", view)
+	if model.screen != ScreenHome || model.selectedTenant.ID != "tenant-1" || provider.calls != 2 {
+		t.Fatalf("expected successful retry, tenant=%#v calls=%d", model.selectedTenant, provider.calls)
 	}
-	if account.calls != 2 {
-		t.Fatalf("expected two account calls, got %d", account.calls)
+}
+
+func TestDiscoveryAndAuthenticationUseSelectedTenant(t *testing.T) {
+	provider := &scriptedProvider{discoveries: [][]pim.EligibleAssignment{{{
+		ID: "reader", DisplayName: "Reader", ActivationPolicy: pim.ActivationPolicy{MaximumDurationISO: "PT1H"},
+	}}}}
+	var authenticationTenant string
+	model := NewModel(Runtime{
+		AzureResources: provider,
+		ARMAuthentication: func(ctx context.Context, _ bool, _ string) (azureauth.ARMAuthentication, error) {
+			authenticationTenant = azureauth.TenantFromContext(ctx)
+			return azureauth.ARMAuthentication{AccessToken: "token", PrincipalID: "principal-1", Satisfied: true}, nil
+		},
+	})
+	model.selectedTenant = azureauth.Tenant{ID: "tenant-1"}
+
+	next, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = runCommand(next.(Model), cmd)
+	if got := provider.discoveryTenants[0]; got != "tenant-1" {
+		t.Fatalf("expected tenant-scoped discovery, got %q", got)
+	}
+	model.assignmentList.toggle("reader")
+	model.screen = ScreenConfirmation
+	next, cmd = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	_ = runCommand(next.(Model), cmd)
+	if authenticationTenant != "tenant-1" {
+		t.Fatalf("expected tenant-scoped authentication, got %q", authenticationTenant)
+	}
+}
+
+func TestStaleDiscoveryFromPreviousTenantIsIgnored(t *testing.T) {
+	model := NewModel(Runtime{})
+	model.selectedTenant = azureauth.Tenant{ID: "tenant-2"}
+	model.discoveryCheck = 2
+	model.assignmentList = newAssignmentList([]pim.EligibleAssignment{{ID: "current"}})
+
+	next, _ := model.Update(assignmentsDiscoveredMsg{
+		assignments: []pim.EligibleAssignment{{ID: "stale"}},
+		tenantID:    "tenant-1",
+		checkID:     1,
+	})
+	got := next.(Model)
+	if len(got.assignmentList.items) != 1 || got.assignmentList.items[0].ID != "current" {
+		t.Fatalf("stale discovery changed assignments: %#v", got.assignmentList.items)
 	}
 }
 
