@@ -175,7 +175,6 @@ func TestMetadataLookupsFollowPagination(t *testing.T) {
 	}
 }
 
-
 func TestDiscoverPropagatesEligibilityLookupError(t *testing.T) {
 	eligibilityPath := "/providers/Microsoft.Authorization/roleEligibilityScheduleInstances?$filter=asTarget%28%29&api-version=2020-10-01"
 	arm := &providerFakeARM{errs: map[string]error{eligibilityPath: errors.New("authorization denied")}}
