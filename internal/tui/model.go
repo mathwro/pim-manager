@@ -90,6 +90,8 @@ type Model struct {
 	selectedTenant         azureauth.Tenant
 	tenantErr              error
 	discoveryCheck         int
+	discoveryCancel        context.CancelFunc
+	discoveryCancelKey     discoveryKey
 	discoveryCache         map[discoveryKey]discoveryEntry
 	policiesReady          bool
 	preparingPolicies      bool
@@ -233,6 +235,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if typed.checkID != m.discoveryCheck || typed.tenantID != m.selectedTenant.ID {
 			return m, nil
 		}
+		m.cancelDiscovery(false)
 		m.loading = false
 		m.err = typed.err
 		if typed.err != nil {
@@ -250,7 +253,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.policiesReady = false
 			m.preparingPolicies = true
 			m.discoveryCache[key] = entry
-			return m, tea.Batch(m.prepareAssignments(preparer, key, typed.checkID, typed.assignments), m.spinner.Tick)
+			ctx, cancel := context.WithCancel(azureauth.WithTenant(context.Background(), typed.tenantID))
+			m.discoveryCancel = cancel
+			m.discoveryCancelKey = key
+			return m, tea.Batch(m.prepareAssignments(ctx, preparer, key, typed.checkID, typed.assignments), m.spinner.Tick)
 		}
 		m.discoveryCache[key] = entry
 		return m, nil
@@ -259,6 +265,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !ok || entry.generation != typed.generation {
 			return m, nil
 		}
+		m.cancelDiscovery(false)
 		current := typed.key == (discoveryKey{tenantID: m.selectedTenant.ID, section: m.activeSection})
 		if typed.err != nil {
 			delete(m.discoveryCache, typed.key)
@@ -293,6 +300,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case activationCompletedMsg:
 		m.loading = false
+		m.cancelDiscovery(true)
 		delete(m.discoveryCache, discoveryKey{tenantID: m.selectedTenant.ID, section: m.activeSection})
 		m.summary = newSummary(typed.results)
 		m.screen = ScreenSummary
@@ -520,6 +528,9 @@ func (m Model) updateAssignments(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	if m.loading {
+		if key.String() == "r" {
+			return m.beginDiscovery(m.activeSection, true)
+		}
 		if key.Type == tea.KeyEsc {
 			m.screen = ScreenHome
 		}
@@ -757,14 +768,13 @@ func (m Model) updateSummary(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if key.Type == tea.KeyEsc {
 			m.checkingAuthentication = false
 			m.authenticationCheck++
-			m.screen = ScreenAssignments
+			return m.beginDiscovery(m.activeSection, true)
 		}
 		return m, nil
 	}
 	switch key.Type {
 	case tea.KeyEsc:
-		m.screen = ScreenAssignments
-		return m, nil
+		return m.beginDiscovery(m.activeSection, true)
 	case tea.KeyRunes:
 		switch string(key.Runes) {
 		case "h":
@@ -792,6 +802,9 @@ func (m Model) beginDiscovery(section Section, refresh bool) (tea.Model, tea.Cmd
 	m.screen = ScreenAssignments
 	key := discoveryKey{tenantID: m.selectedTenant.ID, section: section}
 	if refresh {
+		m.cancelDiscovery(true)
+	}
+	if refresh {
 		delete(m.discoveryCache, key)
 	}
 	if entry, ok := m.discoveryCache[key]; ok {
@@ -803,6 +816,7 @@ func (m Model) beginDiscovery(section Section, refresh bool) (tea.Model, tea.Cmd
 		m.waitingForPolicies = false
 		return m, nil
 	}
+	m.cancelDiscovery(true)
 	m.loading = true
 	m.policiesReady = false
 	m.preparingPolicies = false
@@ -813,7 +827,10 @@ func (m Model) beginDiscovery(section Section, refresh bool) (tea.Model, tea.Cmd
 	m.assignmentList = newAssignmentList(nil)
 	m.listCursor = 0
 	m.discoveryCheck++
-	return m, tea.Batch(m.discoverAssignments(m.discoveryCheck, m.selectedTenant.ID, section), m.spinner.Tick)
+	ctx, cancel := context.WithCancel(azureauth.WithTenant(context.Background(), m.selectedTenant.ID))
+	m.discoveryCancel = cancel
+	m.discoveryCancelKey = key
+	return m, tea.Batch(m.discoverAssignments(ctx, m.discoveryCheck, m.selectedTenant.ID, section), m.spinner.Tick)
 }
 
 func (m Model) openActivationForm() (tea.Model, tea.Cmd) {
@@ -903,6 +920,7 @@ func (m *Model) selectTenant(index int) {
 }
 
 func (m *Model) clearTenantWorkflow() {
+	m.cancelDiscovery(true)
 	m.discoveryCheck++
 	m.authenticationCheck++
 	m.checkingAuthentication = false
@@ -1029,22 +1047,31 @@ func (m Model) providerForSection(section Section) AssignmentProvider {
 	}
 }
 
-func (m Model) discoverAssignments(checkID int, tenantID string, section Section) tea.Cmd {
+func (m Model) discoverAssignments(ctx context.Context, checkID int, tenantID string, section Section) tea.Cmd {
 	provider := m.providerForSection(section)
 	if provider == nil {
 		return func() tea.Msg {
 			return assignmentsDiscoveredMsg{tenantID: tenantID, checkID: checkID, section: section, err: fmt.Errorf("provider for %s is unavailable", section)}
 		}
 	}
-	ctx := azureauth.WithTenant(context.Background(), tenantID)
 	return func() tea.Msg {
 		assignments, err := provider.Discover(ctx)
 		return assignmentsDiscoveredMsg{assignments: assignments, tenantID: tenantID, checkID: checkID, section: section, err: err}
 	}
 }
 
-func (m Model) prepareAssignments(preparer assignmentPreparer, key discoveryKey, generation int, assignments []pim.EligibleAssignment) tea.Cmd {
-	ctx := azureauth.WithTenant(context.Background(), key.tenantID)
+func (m *Model) cancelDiscovery(deletePending bool) {
+	if m.discoveryCancel != nil {
+		m.discoveryCancel()
+		m.discoveryCancel = nil
+	}
+	if deletePending {
+		delete(m.discoveryCache, m.discoveryCancelKey)
+	}
+	m.discoveryCancelKey = discoveryKey{}
+}
+
+func (m Model) prepareAssignments(ctx context.Context, preparer assignmentPreparer, key discoveryKey, generation int, assignments []pim.EligibleAssignment) tea.Cmd {
 	return func() tea.Msg {
 		prepared, err := preparer.Prepare(ctx, assignments)
 		return assignmentsPreparedMsg{assignments: prepared, key: key, generation: generation, err: err}

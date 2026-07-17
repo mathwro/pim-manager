@@ -276,16 +276,20 @@ func (m Model) viewDetails() string {
 		}
 		b.WriteString(fmt.Sprintf("%-22s %s\n", mutedStyle.Render(row[0]), row[1]))
 	}
+	detailHints := []keyHint{{"esc", "back to assignments"}, {"q", "quit"}}
 	if !m.policiesReady && !m.preparingPolicies {
-		if assignmentError := m.assignmentError(); assignmentError != "" {
+		if m.err != nil {
+			message := strings.Join(strings.Fields(m.err.Error()), " ")
+			const prefix = "Error: "
 			b.WriteString("\n")
-			b.WriteString(assignmentError)
+			b.WriteString(errorStyle.Render(prefix + truncateMiddle(message, m.contentWidth()-4-len(prefix))))
 		}
 		b.WriteString("\n")
 		b.WriteString(warningStyle.Render("Activation requirements are unavailable; press r to retry discovery."))
 		b.WriteString("\n")
+		detailHints = []keyHint{{"r", "retry discovery"}, {"esc", "back to assignments"}, {"q", "quit"}}
 	}
-	b.WriteString(m.footer([]keyHint{{"esc", "back to assignments"}, {"q", "quit"}}))
+	b.WriteString(m.footer(detailHints))
 	return b.String()
 }
 
@@ -680,6 +684,19 @@ func valueOrUnknown(value string) string {
 		return "unknown"
 	}
 	return value
+}
+
+func truncateMiddle(value string, width int) string {
+	runes := []rune(value)
+	if len(runes) <= width {
+		return value
+	}
+	if width <= 3 {
+		return string(runes[:width])
+	}
+	prefix := (width - 3) / 2
+	suffix := width - 3 - prefix
+	return string(runes[:prefix]) + "..." + string(runes[len(runes)-suffix:])
 }
 
 func truncateText(value string, width int) string {
