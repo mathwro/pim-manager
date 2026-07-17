@@ -15,6 +15,8 @@ import (
 
 var ErrNotLoggedIn = errors.New("azure cli is not logged in; run az login")
 
+const tenantMetadataQuery = "[].{tenantId:tenantId,displayName:tenantDisplayName,defaultDomain:tenantDefaultDomain}"
+
 type Runner func(context.Context, string, ...string) ([]byte, error)
 
 type CLI struct {
@@ -110,6 +112,48 @@ func (c CLI) Tenants(ctx context.Context) ([]Tenant, error) {
 	}
 	if len(tenants) == 0 {
 		return nil, fmt.Errorf("%w: Azure CLI returned no tenants", ErrNotLoggedIn)
+	}
+	needsMetadata := false
+	for _, tenant := range tenants {
+		if tenant.DisplayName == "" && tenant.DefaultDomain == "" {
+			needsMetadata = true
+			break
+		}
+	}
+	if !needsMetadata {
+		return tenants, nil
+	}
+
+	out, err = c.run(ctx, "az", "account", "list", "--all", "--query", tenantMetadataQuery, "--output", "json")
+	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return nil, err
+		}
+		return nil, fmt.Errorf("list Azure CLI accounts: %w", azureCLIError(out, err))
+	}
+	var accounts []struct {
+		TenantID      string `json:"tenantId"`
+		DisplayName   string `json:"displayName"`
+		DefaultDomain string `json:"defaultDomain"`
+	}
+	if err := json.Unmarshal(out, &accounts); err != nil {
+		return nil, fmt.Errorf("parse az account list output: %w", err)
+	}
+	indexes := make(map[string]int, len(tenants))
+	for index, tenant := range tenants {
+		indexes[strings.ToLower(tenant.ID)] = index
+	}
+	for _, account := range accounts {
+		index, ok := indexes[strings.ToLower(strings.TrimSpace(account.TenantID))]
+		if !ok {
+			continue
+		}
+		if tenants[index].DisplayName == "" {
+			tenants[index].DisplayName = strings.TrimSpace(account.DisplayName)
+		}
+		if tenants[index].DefaultDomain == "" {
+			tenants[index].DefaultDomain = strings.TrimSpace(account.DefaultDomain)
+		}
 	}
 	return tenants, nil
 }

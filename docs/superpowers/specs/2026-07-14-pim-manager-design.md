@@ -41,7 +41,7 @@ Do not use the deprecated `/beta/privilegedAccess` APIs or private `api.azrbac.m
 
 ## Product Flow
 
-Running `pim-manager` with no arguments starts the Bubble Tea TUI. Startup lists the tenants available to the current Azure CLI user. One tenant is selected automatically; multiple tenants open a keyboard-driven selection screen before the home screen. The home screen shows the selected tenant, the temporary Graph PIM pause explanation, and one selectable Azure Resources section. The complete product-area status is:
+Running `pim-manager` with no arguments starts the Bubble Tea TUI. Startup lists the tenants available to the current Azure CLI user. One tenant is selected automatically; multiple tenants open a keyboard-driven selection screen that shows each tenant's display name and ID before the home screen. The home screen shows the selected tenant, the temporary Graph PIM pause explanation, and one selectable Azure Resources section. The complete product-area status is:
 
 | Section | What it lists |
 | --- | --- |
@@ -81,7 +81,7 @@ The TUI depends on provider interfaces rather than concrete Azure clients. The c
 
 ## Authentication and Discovery
 
-At startup, `pim-manager` lists the tenants available through Azure CLI. If the user is not signed in, the TUI shows a clear message with the exact `az login` command to run, provides a retry action, and exits only if the user chooses to quit. One tenant is selected automatically. A tenant menu appears only when more than one tenant is available, and the choice does not run `az account set` or change Azure CLI configuration.
+At startup, `pim-manager` lists the tenants available through Azure CLI and enriches missing tenant names from the Azure CLI subscription cache. If the user is not signed in, the TUI shows a clear message with the exact `az login` command to run, provides a retry action, and exits only if the user chooses to quit. One tenant is selected automatically. A tenant menu appears only when more than one tenant is available, and the choice does not run `az account set` or change Azure CLI configuration.
 
 After tenant selection, only Azure Resources discovery is active:
 
@@ -162,7 +162,7 @@ Testing should focus on separable logic and avoid requiring live Azure access fo
 | Area | Test approach |
 | --- | --- |
 | Cobra command startup | Unit tests for default command behavior and error propagation. |
-| Azure auth wrapper | Unit tests around tenant-list parsing, tenant-scoped token commands, token claims, and exact MFA and authentication-context command construction without executing Azure CLI. |
+| Azure auth wrapper | Unit tests around tenant-list parsing, tenant-name enrichment, tenant-scoped token commands, token claims, and exact MFA and authentication-context command construction without executing Azure CLI. |
 | PIM domain normalization | Unit tests for active Azure Resource conversion and effective activation rules, including explicit MFA and enabled authentication contexts, plus retained Entra and Group conversion behavior needed for future reactivation. |
 | Batch activation | Unit tests for partial success, pending approval, failures, and retry eligibility. |
 | TUI models | Bubble Tea update/model tests for one/multiple tenant startup, tenant switching and stale-result rejection, navigation, assignment selection, form validation, step-up gating, context conflicts, failed-login blocking, wrapped errors, and summaries. |

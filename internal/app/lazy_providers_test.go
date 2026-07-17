@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"reflect"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -108,10 +109,14 @@ func TestRunInitListsTenantsWithoutSectionDiscovery(t *testing.T) {
 				command += " " + arg
 			}
 			commands = append(commands, command)
-			if command == "az account tenant list --output json" {
-				return []byte(`[{"tenantId":"tenant-1","defaultDomain":"contoso.com"}]`), nil
+			switch command {
+			case "az account tenant list --output json":
+				return []byte(`[{"tenantId":"tenant-1"}]`), nil
+			case "az account list --all --query [].{tenantId:tenantId,displayName:tenantDisplayName,defaultDomain:tenantDefaultDomain} --output json":
+				return []byte(`[{"tenantId":"tenant-1","displayName":"Contoso"}]`), nil
+			default:
+				return nil, errors.New("unexpected command: " + command)
 			}
-			return nil, errors.New("unexpected command: " + command)
 		})
 	}
 	runProgram = func(model tea.Model) error {
@@ -126,7 +131,11 @@ func TestRunInitListsTenantsWithoutSectionDiscovery(t *testing.T) {
 	if err := Run(); err != nil {
 		t.Fatalf("Run returned error: %v", err)
 	}
-	if len(commands) != 1 || commands[0] != "az account tenant list --output json" {
-		t.Fatalf("expected only tenant-list call, got %#v", commands)
+	want := []string{
+		"az account tenant list --output json",
+		"az account list --all --query [].{tenantId:tenantId,displayName:tenantDisplayName,defaultDomain:tenantDefaultDomain} --output json",
+	}
+	if !reflect.DeepEqual(commands, want) {
+		t.Fatalf("expected tenant discovery and name enrichment calls, got %#v", commands)
 	}
 }

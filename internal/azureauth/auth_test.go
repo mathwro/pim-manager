@@ -11,13 +11,19 @@ import (
 	"testing"
 )
 
-func TestTenantsReturnsDistinctAzureTenants(t *testing.T) {
+func TestTenantsEnrichesNamesFromAzureAccounts(t *testing.T) {
 	runner := fakeRunner{outputs: map[string][]byte{
 		"az account tenant list --output json": []byte(`[
+			{"tenantId":"tenant-1"},
+			{"tenantId":"tenant-2"},
+			{"tenantId":"tenant-3"},
+			{"tenantId":"tenant-1"},
+			{"tenantId":" "}
+		]`),
+		`az account list --all --query [].{tenantId:tenantId,displayName:tenantDisplayName,defaultDomain:tenantDefaultDomain} --output json`: []byte(`[
+			{"tenantId":"tenant-1"},
 			{"tenantId":"tenant-1","displayName":"Contoso","defaultDomain":"contoso.onmicrosoft.com"},
-			{"tenantId":"tenant-2","defaultDomain":"fabrikam.onmicrosoft.com"},
-			{"tenantId":"tenant-1","displayName":"duplicate"},
-			{"tenantId":"  "}
+			{"tenantId":"tenant-2","defaultDomain":"fabrikam.onmicrosoft.com"}
 		]`),
 	}}
 
@@ -28,9 +34,25 @@ func TestTenantsReturnsDistinctAzureTenants(t *testing.T) {
 	want := []Tenant{
 		{ID: "tenant-1", DisplayName: "Contoso", DefaultDomain: "contoso.onmicrosoft.com"},
 		{ID: "tenant-2", DefaultDomain: "fabrikam.onmicrosoft.com"},
+		{ID: "tenant-3"},
 	}
 	if !reflect.DeepEqual(tenants, want) {
 		t.Fatalf("expected %#v, got %#v", want, tenants)
+	}
+}
+
+func TestTenantsReturnsAccountEnrichmentErrors(t *testing.T) {
+	commandErr := errors.New("account cache unavailable")
+	client := NewCLI(func(_ context.Context, _ string, args ...string) ([]byte, error) {
+		if strings.Join(args, " ") == "account tenant list --output json" {
+			return []byte(`[{"tenantId":"tenant-1"}]`), nil
+		}
+		return nil, commandErr
+	})
+
+	_, err := client.Tenants(context.Background())
+	if !errors.Is(err, commandErr) || !strings.Contains(err.Error(), "list Azure CLI accounts") {
+		t.Fatalf("expected account enrichment error, got %v", err)
 	}
 }
 
