@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/mathwro/pim-manager/internal/activation"
@@ -1287,6 +1288,45 @@ func TestAssignmentsSearchModeFiltersAndSelection(t *testing.T) {
 	}
 }
 
+func TestTenantLabel(t *testing.T) {
+	tests := []struct {
+		name   string
+		tenant azureauth.Tenant
+		want   string
+	}{
+		{name: "name and domain", tenant: azureauth.Tenant{ID: "tenant-1", DisplayName: "Contoso", DefaultDomain: "contoso.onmicrosoft.com"}, want: "Contoso (contoso.onmicrosoft.com)"},
+		{name: "name only", tenant: azureauth.Tenant{ID: "tenant-1", DisplayName: "Contoso"}, want: "Contoso"},
+		{name: "domain only", tenant: azureauth.Tenant{ID: "tenant-1", DefaultDomain: "contoso.onmicrosoft.com"}, want: "contoso.onmicrosoft.com"},
+		{name: "ID only", tenant: azureauth.Tenant{ID: "tenant-1"}, want: "tenant-1"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := tenantLabel(test.tenant); got != test.want {
+				t.Fatalf("expected %q, got %q", test.want, got)
+			}
+		})
+	}
+}
+
+func TestInitStartsTenantLookupSpinner(t *testing.T) {
+	provider := &scriptedTenantProvider{replies: [][]azureauth.Tenant{{{ID: "tenant-1"}}}}
+	model := NewModel(Runtime{Tenants: provider})
+
+	batch, ok := model.Init()().(tea.BatchMsg)
+	if !ok {
+		t.Fatal("expected startup command batch")
+	}
+	var tickFound bool
+	for _, cmd := range batch {
+		if _, ok := cmd().(spinner.TickMsg); ok {
+			tickFound = true
+		}
+	}
+	if !tickFound {
+		t.Fatal("expected startup spinner tick command")
+	}
+}
+
 func TestOneTenantSkipsTenantSelection(t *testing.T) {
 	provider := &scriptedTenantProvider{replies: [][]azureauth.Tenant{{{ID: "tenant-1", DefaultDomain: "contoso.com"}}}}
 	model := NewModel(Runtime{Tenants: provider})
@@ -1332,7 +1372,7 @@ func TestTenantMenuFitsMinimumTerminalAndKeepsFocusVisible(t *testing.T) {
 	model.width = 80
 	model.height = 26
 	for index := range 20 {
-		model.tenants = append(model.tenants, azureauth.Tenant{ID: fmt.Sprintf("tenant-%02d", index)})
+		model.tenants = append(model.tenants, azureauth.Tenant{ID: fmt.Sprintf("tenant-%02d", index), DisplayName: "A Very Long Tenant Display Name", DefaultDomain: "a-very-long-tenant-domain.onmicrosoft.com"})
 	}
 	model.tenantIndex = len(model.tenants) - 1
 

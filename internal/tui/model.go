@@ -182,7 +182,7 @@ func (m Model) Init() tea.Cmd {
 	if m.runtime.Tenants == nil {
 		return nil
 	}
-	return m.checkTenants(m.tenantCheck)
+	return tea.Batch(m.checkTenants(m.tenantCheck), m.spinner.Tick)
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {

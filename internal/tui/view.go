@@ -48,7 +48,8 @@ func (m Model) viewTenants() string {
 			marker = "> "
 			style = activeCardStyle
 		}
-		body := fmt.Sprintf("%s%s\n  %s", marker, tenantLabel(tenant), mutedStyle.Render(tenant.ID))
+		label := truncateText(tenantLabel(tenant), m.contentWidth()-8)
+		body := fmt.Sprintf("%s%s\n  %s", marker, label, mutedStyle.Render(tenant.ID))
 		b.WriteString(style.Width(m.contentWidth() - 4).Render(body))
 		b.WriteString("\n")
 	}
@@ -60,6 +61,9 @@ func (m Model) viewTenants() string {
 }
 
 func tenantLabel(tenant azureauth.Tenant) string {
+	if tenant.DisplayName != "" && tenant.DefaultDomain != "" {
+		return fmt.Sprintf("%s (%s)", tenant.DisplayName, tenant.DefaultDomain)
+	}
 	if tenant.DisplayName != "" {
 		return tenant.DisplayName
 	}

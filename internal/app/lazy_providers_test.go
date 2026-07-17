@@ -124,7 +124,13 @@ func TestRunInitListsTenantsWithoutSectionDiscovery(t *testing.T) {
 		if cmd == nil {
 			t.Fatal("expected Init command")
 		}
-		_ = cmd()
+		batch, ok := cmd().(tea.BatchMsg)
+		if !ok {
+			t.Fatal("expected Init command batch")
+		}
+		for _, child := range batch {
+			_ = child()
+		}
 		return nil
 	}
 

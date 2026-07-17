@@ -41,7 +41,7 @@ Do not use the deprecated `/beta/privilegedAccess` APIs or private `api.azrbac.m
 
 ## Product Flow
 
-Running `pim-manager` with no arguments starts the Bubble Tea TUI. Startup lists the tenants available to the current Azure CLI user. One tenant is selected automatically; multiple tenants open a keyboard-driven selection screen that shows each tenant's display name and ID before the home screen. The home screen shows the selected tenant, the temporary Graph PIM pause explanation, and one selectable Azure Resources section. The complete product-area status is:
+Running `pim-manager` with no arguments starts the Bubble Tea TUI. Startup lists the tenants available to the current Azure CLI user. One tenant is selected automatically; multiple tenants open a keyboard-driven selection screen that shows `Display Name (default.domain)` and the tenant ID before the home screen. The home screen shows the selected tenant with the same label, the temporary Graph PIM pause explanation, and one selectable Azure Resources section. The complete product-area status is:
 
 | Section | What it lists |
 | --- | --- |
@@ -81,7 +81,7 @@ The TUI depends on provider interfaces rather than concrete Azure clients. The c
 
 ## Authentication and Discovery
 
-At startup, `pim-manager` lists the tenants available through Azure CLI and enriches missing tenant names from the Azure CLI subscription cache. If the user is not signed in, the TUI shows a clear message with the exact `az login` command to run, provides a retry action, and exits only if the user chooses to quit. One tenant is selected automatically. A tenant menu appears only when more than one tenant is available, and the choice does not run `az account set` or change Azure CLI configuration.
+At startup, `pim-manager` starts its loading spinner, lists the tenants available through Azure CLI, and enriches missing tenant names from the Azure CLI subscription cache. If the user is not signed in, the TUI shows a clear message with the exact `az login` command to run, provides a retry action, and exits only if the user chooses to quit. One tenant is selected automatically. A tenant menu appears only when more than one tenant is available, and the choice does not run `az account set` or change Azure CLI configuration.
 
 After tenant selection, only Azure Resources discovery is active:
 
