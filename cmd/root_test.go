@@ -4,8 +4,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"strings"
 	"io"
+	"strings"
 	"testing"
 )
 

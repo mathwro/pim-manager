@@ -47,12 +47,12 @@ func runCommand(model Model, cmd tea.Cmd) Model {
 	}
 	return model
 }
+
 type tenantProviderFunc func(context.Context) ([]azureauth.Tenant, error)
 
 func (f tenantProviderFunc) Tenants(ctx context.Context) ([]azureauth.Tenant, error) {
 	return f(ctx)
 }
-
 
 type fakeAssignmentProvider struct{}
 
