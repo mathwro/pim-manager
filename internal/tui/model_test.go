@@ -93,14 +93,15 @@ func TestHomeEnterOpensAzureResources(t *testing.T) {
 }
 
 type scriptedProvider struct {
-	discoveries      [][]pim.EligibleAssignment
-	discoverCalls    int
-	results          []pim.ActivationResult
-	activateErr      []error
-	discoverErr      error
-	activated        []pim.ActivationRequest
-	tokens           []string
-	discoveryTenants []string
+	discoveries       [][]pim.EligibleAssignment
+	discoverCalls     int
+	results           []pim.ActivationResult
+	activateErr       []error
+	discoverErr       error
+	activated         []pim.ActivationRequest
+	tokens            []string
+	discoveryTenants  []string
+	activationTenants []string
 }
 
 func (p *scriptedProvider) Discover(ctx context.Context) ([]pim.EligibleAssignment, error) {
@@ -119,6 +120,7 @@ func (p *scriptedProvider) Discover(ctx context.Context) ([]pim.EligibleAssignme
 
 func (p *scriptedProvider) Activate(ctx context.Context, request pim.ActivationRequest) (pim.ActivationResult, error) {
 	p.tokens = append(p.tokens, arm.PinnedAccessToken(ctx))
+	p.activationTenants = append(p.activationTenants, azureauth.TenantFromContext(ctx))
 	p.activated = append(p.activated, request)
 	if len(p.activateErr) > 0 {
 		err := p.activateErr[0]
@@ -1324,6 +1326,25 @@ func TestTenantMenuOnlyRendersForMultipleTenants(t *testing.T) {
 	}
 }
 
+func TestTenantMenuFitsMinimumTerminalAndKeepsFocusVisible(t *testing.T) {
+	model := NewModel(Runtime{})
+	model.screen = ScreenTenants
+	model.width = 80
+	model.height = 26
+	for index := range 20 {
+		model.tenants = append(model.tenants, azureauth.Tenant{ID: fmt.Sprintf("tenant-%02d", index)})
+	}
+	model.tenantIndex = len(model.tenants) - 1
+
+	view := model.View()
+	if height := lipgloss.Height(view); height > model.height {
+		t.Fatalf("expected tenant view height at most %d, got %d", model.height, height)
+	}
+	if !strings.Contains(view, "tenant-19") {
+		t.Fatalf("expected focused tenant to be visible, got %q", view)
+	}
+}
+
 func TestMultipleTenantsRequireSelectionAndSupportBack(t *testing.T) {
 	provider := &scriptedTenantProvider{replies: [][]azureauth.Tenant{{
 		{ID: "tenant-1", DefaultDomain: "contoso.com"},
@@ -1411,6 +1432,23 @@ func TestDiscoveryAndAuthenticationUseSelectedTenant(t *testing.T) {
 	}
 }
 
+func TestActivationUsesSelectedTenantContext(t *testing.T) {
+	provider := &scriptedProvider{results: []pim.ActivationResult{{Status: pim.ActivationStatusActivated}}}
+	model := NewModel(Runtime{AzureResources: provider})
+	model.selectedTenant = azureauth.Tenant{ID: "tenant-1"}
+	model.activeSection = SectionAzureResources
+	model.form.durations = map[string]string{"reader": "PT1H"}
+	assignment := pim.EligibleAssignment{ID: "reader"}
+
+	_ = model.activateSelected([]pim.EligibleAssignment{assignment}, azureauth.ARMAuthentication{AccessToken: "checked-token"})()
+	if len(provider.activationTenants) != 1 || provider.activationTenants[0] != "tenant-1" {
+		t.Fatalf("expected tenant-scoped activation, got %#v", provider.activationTenants)
+	}
+	if len(provider.tokens) != 1 || provider.tokens[0] != "checked-token" {
+		t.Fatalf("expected pinned checked token, got %#v", provider.tokens)
+	}
+}
+
 func TestStaleDiscoveryFromPreviousTenantIsIgnored(t *testing.T) {
 	model := NewModel(Runtime{})
 	model.selectedTenant = azureauth.Tenant{ID: "tenant-2"}
@@ -1425,6 +1463,19 @@ func TestStaleDiscoveryFromPreviousTenantIsIgnored(t *testing.T) {
 	got := next.(Model)
 	if len(got.assignmentList.items) != 1 || got.assignmentList.items[0].ID != "current" {
 		t.Fatalf("stale discovery changed assignments: %#v", got.assignmentList.items)
+	}
+}
+
+func TestStaleTenantLookupIsIgnored(t *testing.T) {
+	model := NewModel(Runtime{})
+	model.tenantCheck = 2
+	model.tenants = []azureauth.Tenant{{ID: "tenant-current"}}
+	model.selectedTenant = model.tenants[0]
+
+	next, _ := model.Update(tenantsCheckedMsg{tenants: []azureauth.Tenant{{ID: "tenant-stale"}}, checkID: 1})
+	got := next.(Model)
+	if len(got.tenants) != 1 || got.tenants[0].ID != "tenant-current" || got.selectedTenant.ID != "tenant-current" {
+		t.Fatalf("stale tenant lookup changed selection: tenants=%#v selected=%#v", got.tenants, got.selectedTenant)
 	}
 }
 

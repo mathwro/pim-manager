@@ -39,7 +39,9 @@ func (m Model) viewTenants() string {
 		b.WriteString(m.footer([]keyHint{{"r", "retry"}, {"?", "help"}, {"q", "quit"}}))
 		return b.String()
 	}
-	for index, tenant := range m.tenants {
+	start, end := m.tenantWindow(len(m.tenants))
+	for index := start; index < end; index++ {
+		tenant := m.tenants[index]
 		marker := "  "
 		style := cardStyle
 		if index == m.tenantIndex {
@@ -49,6 +51,9 @@ func (m Model) viewTenants() string {
 		body := fmt.Sprintf("%s%s\n  %s", marker, tenantLabel(tenant), mutedStyle.Render(tenant.ID))
 		b.WriteString(style.Width(m.contentWidth() - 4).Render(body))
 		b.WriteString("\n")
+	}
+	if start > 0 || end < len(m.tenants) {
+		b.WriteString(mutedStyle.Render(fmt.Sprintf("  Showing %d-%d of %d\n", start+1, end, len(m.tenants))))
 	}
 	b.WriteString(m.footer([]keyHint{{"up/down", "move"}, {"enter", "select"}, {"r", "refresh"}, {"?", "help"}, {"q", "quit"}}))
 	return b.String()
@@ -500,6 +505,18 @@ func (m Model) frameWidth() int {
 
 func (m Model) contentWidth() int {
 	return max(36, m.frameWidth()-4)
+}
+
+func (m Model) tenantWindow(total int) (int, int) {
+	visible := min(total, max(1, (m.height-13)/2))
+	start := m.tenantIndex - visible + 1
+	if start < 0 {
+		start = 0
+	}
+	if start+visible > total {
+		start = total - visible
+	}
+	return start, start + visible
 }
 
 func (m Model) assignmentVisibleRows() int {
