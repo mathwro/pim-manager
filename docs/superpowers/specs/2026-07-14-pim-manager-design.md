@@ -41,7 +41,7 @@ Do not use the deprecated `/beta/privilegedAccess` APIs or private `api.azrbac.m
 
 ## Product Flow
 
-Running `pim-manager` with no arguments starts the Bubble Tea TUI. The home screen shows Azure account context, the temporary Graph PIM pause explanation, and one selectable Azure Resources section. The complete product-area status is:
+Running `pim-manager` with no arguments starts the Bubble Tea TUI. Startup lists the tenants available to the current Azure CLI user. One tenant is selected automatically; multiple tenants open a keyboard-driven selection screen before the home screen. The home screen shows the selected tenant, the temporary Graph PIM pause explanation, and one selectable Azure Resources section. The complete product-area status is:
 
 | Section | What it lists |
 | --- | --- |
@@ -69,7 +69,7 @@ The application is split into focused packages with clear boundaries.
 | --- | --- |
 | `cmd` | Cobra commands, root command setup, flags, and process exit behavior. |
 | `internal/app` | Production wiring for Azure CLI auth, the ARM client, the active Azure Resources provider, and the TUI model. |
-| `internal/azureauth` | Azure CLI login validation and token retrieval; the current app uses Azure Resource Manager credentials, while Graph token support is retained for future reactivation. |
+| `internal/azureauth` | Azure CLI tenant listing, session-local tenant context, access token retrieval and claims inspection, and interactive authentication-context step-up command construction. |
 | `internal/pim` | Shared domain types for eligibility, assignment source, scope metadata, activation requests, and activation results. |
 | `internal/providers/entra` | Dormant Entra role discovery and activation implementation retained for reactivation after supported Graph authentication is available. |
 | `internal/providers/azureresources` | Active discovery and activation for eligible Azure Resource roles across management groups, subscriptions, and resource groups. |
@@ -81,11 +81,11 @@ The TUI depends on provider interfaces rather than concrete Azure clients. The c
 
 ## Authentication and Discovery
 
-At startup, `pim-manager` validates Azure CLI login state. If the user is not signed in, the TUI shows a clear message with the exact `az login` command to run, provides a retry action, and exits only if the user chooses to quit.
+At startup, `pim-manager` lists the tenants available through Azure CLI. If the user is not signed in, the TUI shows a clear message with the exact `az login` command to run, provides a retry action, and exits only if the user chooses to quit. One tenant is selected automatically. A tenant menu appears only when more than one tenant is available, and the choice does not run `az account set` or change Azure CLI configuration.
 
-After authentication, only Azure Resources discovery is active:
+After tenant selection, only Azure Resources discovery is active:
 
-1. The Azure Resources provider uses Azure CLI-derived Azure Resource Manager tokens to list eligible role assignments across management groups, subscriptions, and resource groups visible to the user.
+1. The Azure Resources provider uses an Azure Resource Manager token requested with the selected tenant ID to list eligible role assignments across management groups, subscriptions, and resource groups visible to the user.
 2. It returns normalized `pim.EligibleAssignment` records with source, display name, assignment type, scope name, scope type, principal details when available, eligibility identifiers, maximum duration, justification requirement, MFA requirement, authentication context, and activation capability.
 3. The dormant Entra and Groups providers are not constructed or invoked by production wiring. They may be reactivated only after the tracked Microsoft Graph PIM authentication limitation is resolved.
 
@@ -97,7 +97,8 @@ The Bubble Tea app uses a simple stack-like screen flow:
 
 | Screen | Purpose |
 | --- | --- |
-| Home | Choose Azure Resources; show auth and account context plus the Entra Roles and Groups pause explanation. |
+| Tenant selection | List Azure CLI tenants; auto-select one tenant or require a choice when multiple tenants are available. |
+| Home | Choose Azure Resources; show the selected tenant plus the Entra Roles and Groups pause explanation. |
 | Assignment list | Fetch and render eligible assignments for the selected section; support search, filter, inspect, and multi-select. |
 | Assignment details | Show source, scope, assignment identifiers, policy hints, and activation constraints for the focused item. |
 | Activation form | Enter shared justification and duration for all selected assignments. |
@@ -161,10 +162,10 @@ Testing should focus on separable logic and avoid requiring live Azure access fo
 | Area | Test approach |
 | --- | --- |
 | Cobra command startup | Unit tests for default command behavior and error propagation. |
-| Azure auth wrapper | Unit tests around command/token parsing and exact MFA and authentication-context command construction without executing Azure CLI. |
+| Azure auth wrapper | Unit tests around tenant-list parsing, tenant-scoped token commands, token claims, and exact MFA and authentication-context command construction without executing Azure CLI. |
 | PIM domain normalization | Unit tests for active Azure Resource conversion and effective activation rules, including explicit MFA and enabled authentication contexts, plus retained Entra and Group conversion behavior needed for future reactivation. |
 | Batch activation | Unit tests for partial success, pending approval, failures, and retry eligibility. |
-| TUI models | Bubble Tea update/model tests for navigation, selection, form validation, step-up gating, context conflicts, failed-login blocking, wrapped errors, and summaries. |
+| TUI models | Bubble Tea update/model tests for one/multiple tenant startup, tenant switching and stale-result rejection, navigation, assignment selection, form validation, step-up gating, context conflicts, failed-login blocking, wrapped errors, and summaries. |
 | Provider integration | Optional manual integration tests gated behind environment variables or explicit commands. |
 
 ## Open Extension Points
