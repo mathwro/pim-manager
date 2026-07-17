@@ -12,6 +12,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/mathwro/pim-manager/internal/activation"
+	"github.com/mathwro/pim-manager/internal/arm"
 	"github.com/mathwro/pim-manager/internal/azureauth"
 	"github.com/mathwro/pim-manager/internal/pim"
 	"github.com/muesli/termenv"
@@ -98,6 +99,7 @@ type scriptedProvider struct {
 	activateErr   []error
 	discoverErr   error
 	activated     []pim.ActivationRequest
+	tokens        []string
 }
 
 func (p *scriptedProvider) Discover(context.Context) ([]pim.EligibleAssignment, error) {
@@ -113,7 +115,8 @@ func (p *scriptedProvider) Discover(context.Context) ([]pim.EligibleAssignment, 
 	return out, nil
 }
 
-func (p *scriptedProvider) Activate(_ context.Context, request pim.ActivationRequest) (pim.ActivationResult, error) {
+func (p *scriptedProvider) Activate(ctx context.Context, request pim.ActivationRequest) (pim.ActivationResult, error) {
+	p.tokens = append(p.tokens, arm.PinnedAccessToken(ctx))
 	p.activated = append(p.activated, request)
 	if len(p.activateErr) > 0 {
 		err := p.activateErr[0]
@@ -441,6 +444,305 @@ func TestConfirmationSkipsMFAForOrdinaryBatch(t *testing.T) {
 	}
 }
 
+func TestOrdinaryAzureActivationUsesSignedInPrincipal(t *testing.T) {
+	provider := &scriptedProvider{results: []pim.ActivationResult{{Status: pim.ActivationStatusActivated}}}
+	model := NewModel(Runtime{
+		AzureResources: provider,
+		ARMAuthentication: func(context.Context, bool, string) (azureauth.ARMAuthentication, error) {
+			return azureauth.ARMAuthentication{AccessToken: "checked-token", PrincipalID: "user-1", Satisfied: true}, nil
+		},
+	})
+	model.activeSection = SectionAzureResources
+	model.screen = ScreenConfirmation
+	model.assignmentList = newAssignmentList([]pim.EligibleAssignment{{ID: "reader", PrincipalID: "group-1"}})
+	model.assignmentList.toggle("reader")
+	model.form.durations = map[string]string{"reader": "PT1H"}
+
+	next, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	msg := cmd()
+	next, cmd = next.(Model).Update(msg)
+	model = runCommand(next.(Model), cmd)
+
+	if len(provider.activated) != 1 || provider.activated[0].Assignment.PrincipalID != "user-1" || model.screen != ScreenSummary {
+		t.Fatalf("expected signed-in user to activate group-derived eligibility, requests=%#v screen=%s", provider.activated, model.screen)
+	}
+}
+
+func TestConfirmationReusesSatisfiedMFA(t *testing.T) {
+	provider := &scriptedProvider{results: []pim.ActivationResult{{Status: pim.ActivationStatusActivated}}}
+	stepUpCalls := 0
+	model := NewModel(Runtime{
+		AzureResources: provider,
+		ARMAuthentication: func(context.Context, bool, string) (azureauth.ARMAuthentication, error) {
+			return azureauth.ARMAuthentication{AccessToken: "checked-token", PrincipalID: "user-1", Satisfied: true}, nil
+		},
+		StepUpCommand: func(string, bool, string) (*exec.Cmd, error) {
+			stepUpCalls++
+			return exec.Command("true"), nil
+		},
+	})
+	model.activeSection = SectionAzureResources
+	model.screen = ScreenConfirmation
+	model.assignmentList = newAssignmentList([]pim.EligibleAssignment{{
+		ID: "owner", PrincipalID: "group-1", ActivationPolicy: pim.ActivationPolicy{MFARequired: true},
+	}})
+	model.assignmentList.toggle("owner")
+	model.form.durations = map[string]string{"owner": "PT1H"}
+
+	next, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	msg := cmd()
+	next, cmd = next.(Model).Update(msg)
+	model = runCommand(next.(Model), cmd)
+
+	if stepUpCalls != 0 || len(provider.activated) != 1 || provider.activated[0].Assignment.PrincipalID != "user-1" || provider.tokens[0] != "checked-token" || model.screen != ScreenSummary {
+		t.Fatalf("expected signed-in user and existing MFA token, step-up calls=%d tokens=%#v requests=%#v screen=%s", stepUpCalls, provider.tokens, provider.activated, model.screen)
+	}
+}
+
+func TestAzureBatchTargetsAuthenticatedUserWithoutMutatingEligibilities(t *testing.T) {
+	provider := &scriptedProvider{results: []pim.ActivationResult{
+		{Status: pim.ActivationStatusActivated},
+		{Status: pim.ActivationStatusActivated},
+	}}
+	model := NewModel(Runtime{
+		AzureResources: provider,
+		ARMAuthentication: func(context.Context, bool, string) (azureauth.ARMAuthentication, error) {
+			return azureauth.ARMAuthentication{AccessToken: "checked-token", PrincipalID: "user-1", Satisfied: true}, nil
+		},
+	})
+	model.activeSection = SectionAzureResources
+	model.screen = ScreenConfirmation
+	model.assignmentList = newAssignmentList([]pim.EligibleAssignment{
+		{ID: "direct", PrincipalID: "user-1"},
+		{ID: "group", PrincipalID: "group-1"},
+	})
+	model.assignmentList.toggle("direct")
+	model.assignmentList.toggle("group")
+	model.form.durations = map[string]string{"direct": "PT1H", "group": "PT1H"}
+
+	next, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	msg := cmd()
+	next, cmd = next.(Model).Update(msg)
+	model = runCommand(next.(Model), cmd)
+
+	if len(provider.activated) != 2 || len(provider.tokens) != 2 {
+		t.Fatalf("expected two activation requests, requests=%#v tokens=%#v", provider.activated, provider.tokens)
+	}
+	for index := range provider.activated {
+		if provider.activated[index].Assignment.PrincipalID != "user-1" || provider.tokens[index] != "checked-token" {
+			t.Fatalf("expected request %d to use authenticated user and token, request=%#v token=%q", index, provider.activated[index], provider.tokens[index])
+		}
+	}
+	selected := model.assignmentList.selected()
+	if selected[0].PrincipalID != "user-1" || selected[1].PrincipalID != "group-1" {
+		t.Fatalf("expected eligibility principals to remain unchanged, got %#v", selected)
+	}
+}
+
+func TestConfirmationIgnoresDuplicateAndCanceledAuthenticationChecks(t *testing.T) {
+	provider := &scriptedProvider{results: []pim.ActivationResult{{Status: pim.ActivationStatusActivated}}}
+	model := NewModel(Runtime{
+		AzureResources: provider,
+		ARMAuthentication: func(context.Context, bool, string) (azureauth.ARMAuthentication, error) {
+			return azureauth.ARMAuthentication{AccessToken: "checked-token", PrincipalID: "principal-1", Satisfied: true}, nil
+		},
+	})
+	model.activeSection = SectionAzureResources
+	model.screen = ScreenConfirmation
+	model.assignmentList = newAssignmentList([]pim.EligibleAssignment{{
+		ID: "owner", PrincipalID: "principal-1", ActivationPolicy: pim.ActivationPolicy{MFARequired: true},
+	}})
+	model.assignmentList.toggle("owner")
+	model.form.durations = map[string]string{"owner": "PT1H"}
+
+	next, authenticationCmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = next.(Model)
+	next, duplicateCmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = next.(Model)
+	if duplicateCmd != nil {
+		t.Fatal("expected duplicate Enter to be ignored while authentication is checked")
+	}
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	model = next.(Model)
+	next, activationCmd := model.Update(authenticationCmd())
+	model = next.(Model)
+	if activationCmd != nil || len(provider.activated) != 0 || model.screen != ScreenActivation {
+		t.Fatalf("expected canceled authentication result to be ignored, requests=%#v screen=%s", provider.activated, model.screen)
+	}
+}
+
+func TestSummaryRetryRechecksAuthentication(t *testing.T) {
+	assignment := pim.EligibleAssignment{
+		ID: "owner", PrincipalID: "group-1", ActivationPolicy: pim.ActivationPolicy{MFARequired: true},
+	}
+	provider := &scriptedProvider{results: []pim.ActivationResult{{Status: pim.ActivationStatusActivated}}}
+	model := NewModel(Runtime{
+		AzureResources: provider,
+		ARMAuthentication: func(context.Context, bool, string) (azureauth.ARMAuthentication, error) {
+			return azureauth.ARMAuthentication{AccessToken: "retry-token", PrincipalID: "user-1", Satisfied: true}, nil
+		},
+	})
+	model.activeSection = SectionAzureResources
+	model.screen = ScreenSummary
+	model.summary = newSummary([]pim.ActivationResult{{
+		Assignment: assignment, Status: pim.ActivationStatusFailed, Retryable: true,
+	}})
+
+	next, cmd := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
+	model = next.(Model)
+	msg := cmd()
+	if _, ok := msg.(authenticationCheckedMsg); !ok {
+		t.Fatalf("expected retry authentication check, got %T", msg)
+	}
+	next, cmd = model.Update(msg)
+	model = runCommand(next.(Model), cmd)
+	if len(provider.activated) != 1 || provider.activated[0].Assignment.PrincipalID != "user-1" || provider.tokens[0] != "retry-token" || model.screen != ScreenSummary {
+		t.Fatalf("expected retry to retarget the authenticated user with its checked token, tokens=%#v requests=%#v screen=%s", provider.tokens, provider.activated, model.screen)
+	}
+}
+
+func TestStepUpBlocksActivationWhenPrincipalChanges(t *testing.T) {
+	provider := &scriptedProvider{}
+	checks := 0
+	model := NewModel(Runtime{
+		AzureResources: provider,
+		ARMAuthentication: func(context.Context, bool, string) (azureauth.ARMAuthentication, error) {
+			checks++
+			if checks == 1 {
+				return azureauth.ARMAuthentication{AccessToken: "old-token", PrincipalID: "principal-1"}, nil
+			}
+			return azureauth.ARMAuthentication{AccessToken: "new-token", PrincipalID: "principal-2", Satisfied: true}, nil
+		},
+		StepUpCommand: func(string, bool, string) (*exec.Cmd, error) {
+			return exec.Command("true"), nil
+		},
+	})
+	model.account = azureauth.Account{TenantID: "tenant-1"}
+	model.activeSection = SectionAzureResources
+	model.screen = ScreenConfirmation
+	model.assignmentList = newAssignmentList([]pim.EligibleAssignment{{
+		ID: "owner", PrincipalID: "group-1", ActivationPolicy: pim.ActivationPolicy{AuthenticationContext: "c1"},
+	}})
+	model.assignmentList.toggle("owner")
+	model.form.durations = map[string]string{"owner": "PT1H"}
+
+	next, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	msg := cmd()
+	next, cmd = next.(Model).Update(msg)
+	model = next.(Model)
+	if cmd == nil {
+		t.Fatal("expected step-up command after missing authentication context")
+	}
+	next, cmd = model.Update(stepUpCompletedMsg{selected: model.assignmentList.selected(), principalID: "principal-1"})
+	msg = cmd()
+	next, cmd = next.(Model).Update(msg)
+	model = next.(Model)
+
+	if cmd != nil || len(provider.activated) != 0 || model.screen != ScreenConfirmation {
+		t.Fatalf("expected identity change to block activation, requests=%#v screen=%s", provider.activated, model.screen)
+	}
+	if model.err == nil || !strings.Contains(model.err.Error(), "principal changed") {
+		t.Fatalf("expected actionable identity-change error, got %v", model.err)
+	}
+}
+
+func TestAuthenticationContextStepUpPreservesPrincipalForGroupEligibility(t *testing.T) {
+	provider := &scriptedProvider{results: []pim.ActivationResult{{Status: pim.ActivationStatusActivated}}}
+	checks := 0
+	model := NewModel(Runtime{
+		AzureResources: provider,
+		ARMAuthentication: func(context.Context, bool, string) (azureauth.ARMAuthentication, error) {
+			checks++
+			if checks == 1 {
+				return azureauth.ARMAuthentication{AccessToken: "old-token", PrincipalID: "user-1"}, nil
+			}
+			return azureauth.ARMAuthentication{AccessToken: "step-up-token", PrincipalID: "user-1", Satisfied: true}, nil
+		},
+		StepUpCommand: func(string, bool, string) (*exec.Cmd, error) {
+			return exec.Command("true"), nil
+		},
+	})
+	model.account = azureauth.Account{TenantID: "tenant-1"}
+	model.activeSection = SectionAzureResources
+	model.screen = ScreenConfirmation
+	model.assignmentList = newAssignmentList([]pim.EligibleAssignment{{
+		ID: "owner", PrincipalID: "group-1", ActivationPolicy: pim.ActivationPolicy{AuthenticationContext: "c1"},
+	}})
+	model.assignmentList.toggle("owner")
+	model.form.durations = map[string]string{"owner": "PT1H"}
+
+	next, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next, cmd = next.(Model).Update(cmd())
+	model = next.(Model)
+	if cmd == nil {
+		t.Fatal("expected authentication-context step-up")
+	}
+	next, cmd = model.Update(stepUpCompletedMsg{selected: model.assignmentList.selected(), principalID: "user-1"})
+	next, cmd = next.(Model).Update(cmd())
+	model = runCommand(next.(Model), cmd)
+
+	if len(provider.activated) != 1 || provider.activated[0].Assignment.PrincipalID != "user-1" || provider.tokens[0] != "step-up-token" || model.screen != ScreenSummary {
+		t.Fatalf("expected stable user and step-up token, requests=%#v tokens=%#v screen=%s", provider.activated, provider.tokens, model.screen)
+	}
+}
+
+func TestAuthenticationErrorsSubmitNoActivation(t *testing.T) {
+	t.Run("token check failure", func(t *testing.T) {
+		provider := &scriptedProvider{}
+		stepUpCalls := 0
+		model := NewModel(Runtime{
+			AzureResources: provider,
+			ARMAuthentication: func(context.Context, bool, string) (azureauth.ARMAuthentication, error) {
+				return azureauth.ARMAuthentication{}, errors.New("token unavailable")
+			},
+			StepUpCommand: func(string, bool, string) (*exec.Cmd, error) {
+				stepUpCalls++
+				return exec.Command("true"), nil
+			},
+		})
+		model.activeSection = SectionAzureResources
+		model.screen = ScreenConfirmation
+		model.assignmentList = newAssignmentList([]pim.EligibleAssignment{{ID: "owner", PrincipalID: "group-1"}})
+		model.assignmentList.toggle("owner")
+
+		next, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+		next, cmd = next.(Model).Update(cmd())
+		model = next.(Model)
+		if cmd != nil || stepUpCalls != 0 || len(provider.activated) != 0 || model.err == nil || !strings.Contains(model.err.Error(), "token unavailable") {
+			t.Fatalf("expected token error to block activation, step-ups=%d requests=%#v error=%v", stepUpCalls, provider.activated, model.err)
+		}
+	})
+
+	t.Run("step-up claims remain unsatisfied", func(t *testing.T) {
+		provider := &scriptedProvider{}
+		model := NewModel(Runtime{
+			AzureResources: provider,
+			ARMAuthentication: func(context.Context, bool, string) (azureauth.ARMAuthentication, error) {
+				return azureauth.ARMAuthentication{AccessToken: "token", PrincipalID: "user-1"}, nil
+			},
+			StepUpCommand: func(string, bool, string) (*exec.Cmd, error) {
+				return exec.Command("true"), nil
+			},
+		})
+		model.activeSection = SectionAzureResources
+		model.screen = ScreenConfirmation
+		model.assignmentList = newAssignmentList([]pim.EligibleAssignment{{
+			ID: "owner", PrincipalID: "group-1", ActivationPolicy: pim.ActivationPolicy{AuthenticationContext: "c1"},
+		}})
+		model.assignmentList.toggle("owner")
+
+		next, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+		next, cmd = next.(Model).Update(cmd())
+		model = next.(Model)
+		next, cmd = model.Update(stepUpCompletedMsg{selected: model.assignmentList.selected(), principalID: "user-1"})
+		next, cmd = next.(Model).Update(cmd())
+		model = next.(Model)
+		if cmd != nil || len(provider.activated) != 0 || model.err == nil || !strings.Contains(model.err.Error(), "does not satisfy") {
+			t.Fatalf("expected unsatisfied step-up claims to block activation, requests=%#v error=%v", provider.activated, model.err)
+		}
+	})
+}
+
 func TestConfirmationGatesMixedBatchOnMFA(t *testing.T) {
 	provider := &scriptedProvider{results: []pim.ActivationResult{
 		{Status: pim.ActivationStatusActivated},
@@ -583,8 +885,9 @@ func TestConfirmationShowsMFARequirement(t *testing.T) {
 	}})
 	model.assignmentList.toggle("owner")
 	model.form.durations = map[string]string{"owner": "PT1H"}
-	if view := model.View(); !strings.Contains(view, "MFA is required before activation") {
-		t.Fatalf("expected MFA confirmation warning, got %q", view)
+	view := model.View()
+	if !strings.Contains(view, "Azure PIM will validate the current Azure CLI session") || strings.Contains(view, "will prompt") {
+		t.Fatalf("expected server-validated MFA warning without a login prompt, got %q", view)
 	}
 }
 

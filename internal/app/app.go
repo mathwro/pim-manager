@@ -21,9 +21,10 @@ func Run() error {
 	auth := newCLI(nil)
 	armClient := arm.NewClient(http.DefaultClient, auth)
 	runtime := tui.Runtime{
-		AzureResources: azureresources.NewProvider(armClient),
-		Account:        auth,
-		StepUpCommand:  azureauth.StepUpLoginCommand,
+		AzureResources:    azureresources.NewProvider(armClient),
+		Account:           auth,
+		StepUpCommand:     azureauth.StepUpLoginCommand,
+		ARMAuthentication: auth.ARMAuthentication,
 	}
 	return runProgram(tui.NewModel(runtime))
 }

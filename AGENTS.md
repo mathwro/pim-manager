@@ -45,7 +45,7 @@ Keep packages small and purpose-specific:
 | --- | --- |
 | `cmd` | Cobra commands, root command setup, flags, and process exit behavior. |
 | `internal/app` | Application wiring for auth, providers, activation services, and the TUI model. |
-| `internal/azureauth` | Azure CLI login validation, access token retrieval, and interactive MFA/authentication-context step-up command construction. |
+| `internal/azureauth` | Azure CLI login validation, access token retrieval and claims inspection, and interactive authentication-context step-up command construction. |
 | `internal/pim` | Shared domain types for eligibility, activation policy requirements, scope metadata, activation requests, and activation results. |
 | `internal/providers/entra` | Discovery and activation for eligible Microsoft Entra directory roles. |
 | `internal/providers/azureresources` | Discovery, effective-policy normalization, and activation for eligible Azure Resource roles. |
@@ -59,15 +59,20 @@ The TUI should depend on interfaces rather than concrete Azure clients. Provider
 
 - Azure CLI login state is validated on startup.
 - If the user is not signed in, show the exact `az login` command and provide a retry path.
-- Step-up authentication runs only when a selected assignment explicitly requires standard MFA or an enabled Conditional Access authentication context.
+- Standard MFA-only Azure Resource activations reuse the exact checked ARM token from the current Azure CLI session; ARM/PIM remains authoritative for MFA enforcement.
+- Interactive step-up runs only when an enabled Conditional Access authentication context is required and the current ARM token does not contain it.
 - A batch may contain at most one authentication context; conflicting contexts must be activated separately.
 - Failed or canceled step-up authentication submits no activation requests.
+- If authentication-context step-up changes the signed-in principal, submit no activation requests.
+- Pin the checked ARM token to every activation request in the batch; do not fetch a different token between validation and submission.
+- For group-derived Azure role eligibilities, preserve the linked group eligibility schedule but use the authenticated user's principal ID as the `SelfActivate` target.
 - Disable Azure CLI's subscription selector only for the child step-up process; do not mutate the user's global CLI configuration.
 - Discovery failures are isolated to the relevant top-level section.
 - Activation failures are isolated to the relevant assignment.
 - Batch activation continues after individual failures.
 - Final summaries distinguish `activated`, `pending_approval`, and `failed`.
 - Manual retry is allowed only for retryable failures; do not auto-retry activations.
+- Manual retries must repeat token, claims, and principal validation before submitting activation requests.
 - Preserve actionable Azure/PIM error details where possible.
 
 ## TUI Requirements
@@ -92,10 +97,10 @@ Prefer unit tests around isolated logic. Normal test runs should not require liv
 Cover:
 
 - Cobra startup behavior and error propagation.
-- Azure CLI command/token parsing, MFA and `acrs` claims construction, and child-process environment with no live login.
+- Azure CLI command/token parsing, ARM token claims inspection, MFA-only token reuse, `acrs` claims construction, and child-process environment with no live login.
 - Provider response and effective activation-policy normalization into shared PIM domain records.
 - Batch activation partial success, pending approval, failures, and retry eligibility.
-- Bubble Tea model updates for navigation, selection, form validation, step-up gating, context conflicts, wrapped Azure errors, and summaries.
+- Bubble Tea model updates for navigation, selection, form validation, token pinning, direct and group-derived principal targeting, step-up principal drift, canceled or failed authentication, retry gating, context conflicts, wrapped Azure errors, and summaries.
 
 Live Azure integration checks should be optional and gated behind explicit environment variables or commands.
 

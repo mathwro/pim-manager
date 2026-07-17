@@ -13,6 +13,7 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/mathwro/pim-manager/internal/activation"
+	"github.com/mathwro/pim-manager/internal/arm"
 	"github.com/mathwro/pim-manager/internal/azureauth"
 	"github.com/mathwro/pim-manager/internal/pim"
 )
@@ -38,11 +39,12 @@ const (
 )
 
 type Runtime struct {
-	Entra          AssignmentProvider
-	AzureResources AssignmentProvider
-	Groups         AssignmentProvider
-	Account        AccountProvider
-	StepUpCommand  func(string, bool, string) (*exec.Cmd, error)
+	Entra             AssignmentProvider
+	AzureResources    AssignmentProvider
+	Groups            AssignmentProvider
+	Account           AccountProvider
+	StepUpCommand     func(string, bool, string) (*exec.Cmd, error)
+	ARMAuthentication func(context.Context, bool, string) (azureauth.ARMAuthentication, error)
 }
 
 type AssignmentProvider interface {
@@ -55,33 +57,35 @@ type AccountProvider interface {
 }
 
 type Model struct {
-	runtime         Runtime
-	screen          Screen
-	selectedSection Section
-	activeSection   Section
-	sections        []Section
-	sectionIndex    int
-	query           string
-	searchMode      bool
-	listCursor      int
-	assignmentList  assignmentList
-	form            activationForm
-	formField       activationFormField
-	justification   textarea.Model
-	duration        textinput.Model
-	durationIndex   int
-	spinner         spinner.Model
-	summaryViewport viewport.Model
-	summary         summary
-	loading         bool
-	checkingAccount bool
-	accountChecked  bool
-	account         azureauth.Account
-	accountErr      error
-	err             error
-	helpVisible     bool
-	width           int
-	height          int
+	runtime                Runtime
+	screen                 Screen
+	selectedSection        Section
+	activeSection          Section
+	sections               []Section
+	sectionIndex           int
+	query                  string
+	searchMode             bool
+	listCursor             int
+	assignmentList         assignmentList
+	form                   activationForm
+	formField              activationFormField
+	justification          textarea.Model
+	duration               textinput.Model
+	durationIndex          int
+	spinner                spinner.Model
+	summaryViewport        viewport.Model
+	summary                summary
+	loading                bool
+	checkingAuthentication bool
+	authenticationCheck    int
+	checkingAccount        bool
+	accountChecked         bool
+	account                azureauth.Account
+	accountErr             error
+	err                    error
+	helpVisible            bool
+	width                  int
+	height                 int
 }
 
 type activationFormField int
@@ -101,8 +105,22 @@ type activationCompletedMsg struct {
 }
 
 type stepUpCompletedMsg struct {
-	selected []pim.EligibleAssignment
-	err      error
+	selected    []pim.EligibleAssignment
+	origin      Screen
+	principalID string
+	err         error
+}
+
+type authenticationCheckedMsg struct {
+	selected              []pim.EligibleAssignment
+	authentication        azureauth.ARMAuthentication
+	mfaRequired           bool
+	authenticationContext string
+	afterStepUp           bool
+	expectedPrincipalID   string
+	checkID               int
+	origin                Screen
+	err                   error
 }
 
 type accountCheckedMsg struct {
@@ -187,12 +205,46 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.refreshSummaryViewport()
 		return m, nil
 	case stepUpCompletedMsg:
+		origin := typed.origin
+		if origin == "" {
+			origin = ScreenConfirmation
+		}
+		m.screen = origin
 		if typed.err != nil {
-			m.screen = ScreenConfirmation
 			m.err = fmt.Errorf("step-up authentication failed: %w", typed.err)
 			return m, nil
 		}
-		return m.startActivation(typed.selected)
+		authenticationContext, mfaRequired, err := authenticationRequirement(typed.selected)
+		if err != nil {
+			m.err = err
+			return m, nil
+		}
+		if m.runtime.ARMAuthentication == nil {
+			return m.startActivation(typed.selected, azureauth.ARMAuthentication{})
+		}
+		return m.startAuthenticationCheck(typed.selected, mfaRequired, authenticationContext, true, origin, typed.principalID)
+	case authenticationCheckedMsg:
+		if !m.checkingAuthentication || typed.checkID != m.authenticationCheck {
+			return m, nil
+		}
+		m.checkingAuthentication = false
+		m.screen = typed.origin
+		if typed.err != nil {
+			m.err = fmt.Errorf("check Azure CLI ARM authentication: %w", typed.err)
+			return m, nil
+		}
+		if typed.expectedPrincipalID != "" && !strings.EqualFold(typed.expectedPrincipalID, typed.authentication.PrincipalID) {
+			m.err = fmt.Errorf("Azure CLI principal changed from %s to %s during authentication; sign in as the original account and retry", typed.expectedPrincipalID, typed.authentication.PrincipalID)
+			return m, nil
+		}
+		if typed.authentication.Satisfied {
+			return m.startActivation(typed.selected, typed.authentication)
+		}
+		if typed.afterStepUp {
+			m.err = errors.New("step-up authentication completed but the ARM token does not satisfy the required claims")
+			return m, nil
+		}
+		return m.startStepUp(typed.selected, typed.mfaRequired, typed.authenticationContext, typed.origin, typed.authentication.PrincipalID)
 	case accountCheckedMsg:
 		m.checkingAccount = false
 		m.accountChecked = true
@@ -419,6 +471,15 @@ func (m Model) updateActivation(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) updateConfirmation(key tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.checkingAuthentication {
+		if key.Type != tea.KeyEsc {
+			return m, nil
+		}
+		m.checkingAuthentication = false
+		m.authenticationCheck++
+		m.screen = ScreenActivation
+		return m.focusDuration(m.durationIndex)
+	}
 	switch key.Type {
 	case tea.KeyEsc:
 		m.screen = ScreenActivation
@@ -434,27 +495,7 @@ func (m Model) updateConfirmation(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.err = fmt.Errorf("select at least one assignment to continue")
 			return m, nil
 		}
-		authenticationContext, mfaRequired, err := authenticationRequirement(selected)
-		if err != nil {
-			m.err = err
-			return m, nil
-		}
-		if !mfaRequired && authenticationContext == "" {
-			return m.startActivation(selected)
-		}
-		if m.runtime.StepUpCommand == nil {
-			m.err = errors.New("step-up authentication is unavailable")
-			return m, nil
-		}
-		command, err := m.runtime.StepUpCommand(m.account.TenantID, mfaRequired, authenticationContext)
-		if err != nil {
-			m.err = err
-			return m, nil
-		}
-		m.err = nil
-		return m, tea.ExecProcess(command, func(err error) tea.Msg {
-			return stepUpCompletedMsg{selected: selected, err: err}
-		})
+		return m.beginAuthentication(selected)
 	case tea.KeyRunes:
 		switch string(key.Runes) {
 		case "k":
@@ -467,6 +508,59 @@ func (m Model) updateConfirmation(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	return m, nil
+}
+
+func (m Model) beginAuthentication(selected []pim.EligibleAssignment) (tea.Model, tea.Cmd) {
+	authenticationContext, mfaRequired, err := authenticationRequirement(selected)
+	if err != nil {
+		m.err = err
+		return m, nil
+	}
+	if m.runtime.ARMAuthentication != nil && m.activeSection == SectionAzureResources {
+		return m.startAuthenticationCheck(selected, mfaRequired, authenticationContext, false, m.screen, "")
+	}
+	if !mfaRequired && authenticationContext == "" {
+		return m.startActivation(selected, azureauth.ARMAuthentication{})
+	}
+	if m.runtime.ARMAuthentication != nil {
+		return m.startAuthenticationCheck(selected, mfaRequired, authenticationContext, false, m.screen, "")
+	}
+	return m.startStepUp(selected, mfaRequired, authenticationContext, m.screen, "")
+}
+
+func (m Model) startStepUp(selected []pim.EligibleAssignment, mfaRequired bool, authenticationContext string, origin Screen, principalID string) (tea.Model, tea.Cmd) {
+	if m.runtime.StepUpCommand == nil {
+		m.err = errors.New("step-up authentication is unavailable")
+		return m, nil
+	}
+	command, err := m.runtime.StepUpCommand(m.account.TenantID, mfaRequired, authenticationContext)
+	if err != nil {
+		m.err = err
+		return m, nil
+	}
+	m.err = nil
+	return m, tea.ExecProcess(command, func(err error) tea.Msg {
+		return stepUpCompletedMsg{selected: selected, origin: origin, principalID: principalID, err: err}
+	})
+}
+
+func (m Model) startAuthenticationCheck(selected []pim.EligibleAssignment, mfaRequired bool, authenticationContext string, afterStepUp bool, origin Screen, expectedPrincipalID string) (tea.Model, tea.Cmd) {
+	m.authenticationCheck++
+	m.checkingAuthentication = true
+	m.err = nil
+	return m, m.checkAuthentication(selected, mfaRequired, authenticationContext, afterStepUp, m.authenticationCheck, origin, expectedPrincipalID)
+}
+
+func (m Model) checkAuthentication(selected []pim.EligibleAssignment, mfaRequired bool, authenticationContext string, afterStepUp bool, checkID int, origin Screen, expectedPrincipalID string) tea.Cmd {
+	return func() tea.Msg {
+		authentication, err := m.runtime.ARMAuthentication(context.Background(), mfaRequired, authenticationContext)
+		return authenticationCheckedMsg{
+			selected: selected, authentication: authentication,
+			mfaRequired: mfaRequired, authenticationContext: authenticationContext,
+			afterStepUp: afterStepUp, checkID: checkID, origin: origin,
+			expectedPrincipalID: expectedPrincipalID, err: err,
+		}
+	}
 }
 
 func authenticationRequirement(assignments []pim.EligibleAssignment) (string, bool, error) {
@@ -487,14 +581,22 @@ func authenticationRequirement(assignments []pim.EligibleAssignment) (string, bo
 	return authenticationContext, mfaRequired, nil
 }
 
-func (m Model) startActivation(selected []pim.EligibleAssignment) (tea.Model, tea.Cmd) {
+func (m Model) startActivation(selected []pim.EligibleAssignment, authentication azureauth.ARMAuthentication) (tea.Model, tea.Cmd) {
 	m.screen = ScreenProgress
 	m.loading = true
 	m.err = nil
-	return m, tea.Batch(m.activateSelected(selected), m.spinner.Tick)
+	return m, tea.Batch(m.activateSelected(selected, authentication), m.spinner.Tick)
 }
 
 func (m Model) updateSummary(key tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.checkingAuthentication {
+		if key.Type == tea.KeyEsc {
+			m.checkingAuthentication = false
+			m.authenticationCheck++
+			m.screen = ScreenAssignments
+		}
+		return m, nil
+	}
 	switch key.Type {
 	case tea.KeyEsc:
 		m.screen = ScreenAssignments
@@ -513,9 +615,7 @@ func (m Model) updateSummary(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 			for _, result := range retryable {
 				assignments = append(assignments, result.Assignment)
 			}
-			m.screen = ScreenProgress
-			m.loading = true
-			return m, tea.Batch(m.activateSelected(assignments), m.spinner.Tick)
+			return m.beginAuthentication(assignments)
 		}
 	}
 	var cmd tea.Cmd
@@ -701,9 +801,10 @@ func (m Model) discoverAssignments() tea.Cmd {
 	}
 }
 
-func (m Model) activateSelected(selected []pim.EligibleAssignment) tea.Cmd {
+func (m Model) activateSelected(selected []pim.EligibleAssignment, authentication azureauth.ARMAuthentication) tea.Cmd {
 	provider := m.providerForSection(m.activeSection)
 	justification := strings.TrimSpace(m.form.justification)
+	ctx := arm.WithAccessToken(context.Background(), authentication.AccessToken)
 	return func() tea.Msg {
 		results := make([]pim.ActivationResult, 0, len(selected))
 		if provider == nil {
@@ -717,12 +818,16 @@ func (m Model) activateSelected(selected []pim.EligibleAssignment) tea.Cmd {
 			return activationCompletedMsg{results: results}
 		}
 		for _, assignment := range selected {
+			requestAssignment := assignment
+			if m.activeSection == SectionAzureResources && authentication.PrincipalID != "" {
+				requestAssignment.PrincipalID = authentication.PrincipalID
+			}
 			request := pim.ActivationRequest{
-				Assignment:    assignment,
+				Assignment:    requestAssignment,
 				Justification: justification,
 				DurationISO:   strings.TrimSpace(m.form.durations[assignment.ID]),
 			}
-			result, err := provider.Activate(context.Background(), request)
+			result, err := provider.Activate(ctx, request)
 			if err != nil {
 				results = append(results, pim.ActivationResult{
 					Assignment: assignment,

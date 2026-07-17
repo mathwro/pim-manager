@@ -9,6 +9,8 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+
+	"github.com/mathwro/pim-manager/internal/arm"
 )
 
 var ErrNotLoggedIn = errors.New("azure cli is not logged in; run az login")
@@ -69,6 +71,54 @@ func (c CLI) AccessToken(ctx context.Context, resource string) (string, error) {
 		return "", fmt.Errorf("Azure CLI returned empty access token for %s", resource)
 	}
 	return payload.AccessToken, nil
+}
+
+type ARMAuthentication struct {
+	AccessToken string
+	PrincipalID string
+	Satisfied   bool
+}
+
+func (c CLI) ARMAuthentication(ctx context.Context, mfaRequired bool, authenticationContext string) (ARMAuthentication, error) {
+	token, err := c.AccessToken(ctx, arm.Resource)
+	if err != nil {
+		return ARMAuthentication{}, err
+	}
+	parts := strings.Split(token, ".")
+	if len(parts) < 2 {
+		return ARMAuthentication{}, errors.New("parse Azure CLI ARM token: invalid JWT")
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return ARMAuthentication{}, fmt.Errorf("parse Azure CLI ARM token claims: %w", err)
+	}
+	var claims struct {
+		PrincipalID            string   `json:"oid"`
+		AuthenticationMethods  []string `json:"amr"`
+		AuthenticationContexts []string `json:"acrs"`
+	}
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return ARMAuthentication{}, fmt.Errorf("parse Azure CLI ARM token claims: %w", err)
+	}
+	if claims.PrincipalID == "" {
+		return ARMAuthentication{}, errors.New("Azure CLI ARM token has no principal ID")
+	}
+	// ARM/PIM remains the authority for standard MFA; only authentication contexts require preflight step-up.
+	satisfied := true
+	authenticationContext = strings.TrimSpace(authenticationContext)
+	if authenticationContext != "" {
+		satisfied = satisfied && contains(claims.AuthenticationContexts, authenticationContext)
+	}
+	return ARMAuthentication{AccessToken: token, PrincipalID: claims.PrincipalID, Satisfied: satisfied}, nil
+}
+
+func contains(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
 
 func (c CLI) PrincipalID(ctx context.Context) (string, error) {

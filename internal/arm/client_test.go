@@ -60,6 +60,32 @@ func TestClientRequestsMFAChallengeARMResource(t *testing.T) {
 	}
 }
 
+func TestClientUsesPinnedContextToken(t *testing.T) {
+	tokenSource := &recordingTokenSource{}
+	client := NewClient(
+		&http.Client{Transport: armRoundTrip(func(req *http.Request) (*http.Response, error) {
+			if got := req.Header.Get("Authorization"); got != "Bearer checked-token" {
+				t.Fatalf("expected checked token, got %q", got)
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Status:     "200 OK",
+				Body:       io.NopCloser(strings.NewReader(`{}`)),
+				Header:     make(http.Header),
+			}, nil
+		})},
+		tokenSource,
+	)
+
+	ctx := WithAccessToken(context.Background(), "checked-token")
+	if err := client.Put(ctx, "/subscriptions/sub-1", map[string]string{"requestType": "SelfActivate"}, nil); err != nil {
+		t.Fatalf("Put returned error: %v", err)
+	}
+	if tokenSource.resource != "" {
+		t.Fatalf("expected pinned token to bypass token source, got resource %q", tokenSource.resource)
+	}
+}
+
 type armRoundTrip func(*http.Request) (*http.Response, error)
 
 func (f armRoundTrip) RoundTrip(req *http.Request) (*http.Response, error) {

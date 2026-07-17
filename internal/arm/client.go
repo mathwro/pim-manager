@@ -14,6 +14,17 @@ const BaseURL = "https://management.azure.com"
 const Resource = "https://management.core.windows.net/"
 const AuthorizationAPIVersion = "2020-10-01"
 
+type accessTokenKey struct{}
+
+func WithAccessToken(ctx context.Context, token string) context.Context {
+	return context.WithValue(ctx, accessTokenKey{}, token)
+}
+
+func PinnedAccessToken(ctx context.Context) string {
+	token, _ := ctx.Value(accessTokenKey{}).(string)
+	return token
+}
+
 type TokenSource interface {
 	AccessToken(context.Context, string) (string, error)
 }
@@ -52,9 +63,13 @@ func (c Client) Put(ctx context.Context, path string, body any, out any) error {
 }
 
 func (c Client) do(ctx context.Context, method string, path string, body any, out any) error {
-	token, err := c.tokenSource.AccessToken(ctx, Resource)
-	if err != nil {
-		return err
+	token := PinnedAccessToken(ctx)
+	if token == "" {
+		var err error
+		token, err = c.tokenSource.AccessToken(ctx, Resource)
+		if err != nil {
+			return err
+		}
 	}
 	u := c.baseURL + path
 	if strings.HasPrefix(path, "https://") {

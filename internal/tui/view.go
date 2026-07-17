@@ -295,7 +295,7 @@ func (m Model) viewConfirmation() string {
 		b.WriteString(warningStyle.Render("Authentication context " + authenticationContext + " is required before activation. Azure CLI will prompt after confirmation."))
 		b.WriteString("\n")
 	case mfaRequired:
-		b.WriteString(warningStyle.Render("MFA is required before activation. Azure CLI will prompt after confirmation."))
+		b.WriteString(warningStyle.Render("MFA is required. Azure PIM will validate the current Azure CLI session during activation."))
 		b.WriteString("\n")
 	}
 	b.WriteString(warningStyle.Render("Activation requests are submitted immediately and are never retried automatically."))

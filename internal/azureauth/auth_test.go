@@ -133,6 +133,36 @@ func TestStepUpLoginCommandRejectsMissingTenant(t *testing.T) {
 	}
 }
 
+func TestARMAuthenticationUsesExistingTokenClaims(t *testing.T) {
+	payload := base64.RawURLEncoding.EncodeToString([]byte(`{"oid":"principal-1","amr":["pwd","mfa"],"acrs":["c1"]}`))
+	runner := fakeRunner{outputs: map[string][]byte{
+		"az account get-access-token --resource https://management.core.windows.net/ --output json": []byte(`{"accessToken":"e30.` + payload + `.signature"}`),
+	}}
+	client := NewCLI(runner.Run)
+
+	authentication, err := client.ARMAuthentication(context.Background(), true, "c1")
+	if err != nil {
+		t.Fatalf("ARMAuthentication returned error: %v", err)
+	}
+	if authentication.PrincipalID != "principal-1" || !authentication.Satisfied || authentication.AccessToken == "" {
+		t.Fatalf("expected checked token for principal-1 with satisfied MFA and c1, got %#v", authentication)
+	}
+
+	authentication, err = client.ARMAuthentication(context.Background(), true, "c2")
+	if err != nil || authentication.Satisfied {
+		t.Fatalf("expected missing c2 to require step-up, authentication=%#v error=%v", authentication, err)
+	}
+
+	missingMFAPayload := base64.RawURLEncoding.EncodeToString([]byte(`{"oid":"principal-1","amr":["pwd"]}`))
+	client = NewCLI(fakeRunner{outputs: map[string][]byte{
+		"az account get-access-token --resource https://management.core.windows.net/ --output json": []byte(`{"accessToken":"e30.` + missingMFAPayload + `.signature"}`),
+	}}.Run)
+	authentication, err = client.ARMAuthentication(context.Background(), true, "")
+	if err != nil || !authentication.Satisfied {
+		t.Fatalf("expected MFA-only activation to reuse the current token, authentication=%#v error=%v", authentication, err)
+	}
+}
+
 func TestPrincipalIDUsesSignedInUser(t *testing.T) {
 	runner := fakeRunner{outputs: map[string][]byte{
 		"az ad signed-in-user show --query id --output tsv": []byte("principal-1\n"),
