@@ -6,15 +6,15 @@ Guidance for AI coding agents working on `pim-manager`.
 
 `pim-manager` is a Go CLI for discovering and activating Microsoft PIM eligibilities through an interactive terminal UI. It uses Cobra for CLI structure, Bubble Tea for the TUI runtime, and Bubbles for reusable TUI components.
 
-The product uses the user's existing Azure CLI authentication. Policy-required step-up authentication must run through interactive Azure CLI login; do not add a custom login flow unless the design explicitly changes.
+The product uses the user's existing Azure CLI authentication. If Azure CLI exposes multiple tenants, the user selects one for the `pim-manager` session before choosing a PIM area; a single tenant is selected automatically. Policy-required step-up authentication must run through interactive Azure CLI login; do not add a custom login flow unless the design explicitly changes.
 
 ## Current Design Source
 
-Use `docs/superpowers/specs/2026-07-14-pim-manager-design.md` as the current product/design source of truth.
+Use `docs/superpowers/specs/2026-07-14-pim-manager-design.md` as the current product source of truth and `docs/superpowers/specs/2026-07-17-tenant-selection-design.md` for tenant-selection behavior.
 
 ## MVP Scope
 
-Running `pim-manager` with no arguments should open the interactive TUI.
+Running `pim-manager` with no arguments should validate the Azure CLI session, select an Azure tenant when multiple tenants are available, and open the interactive TUI.
 
 The MVP supports three top-level PIM areas, matching the Azure portal model:
 
@@ -45,13 +45,13 @@ Keep packages small and purpose-specific:
 | --- | --- |
 | `cmd` | Cobra commands, root command setup, flags, and process exit behavior. |
 | `internal/app` | Application wiring for auth, providers, activation services, and the TUI model. |
-| `internal/azureauth` | Azure CLI login validation, access token retrieval and claims inspection, and interactive authentication-context step-up command construction. |
+| `internal/azureauth` | Azure CLI tenant discovery and display-name enrichment, session-local tenant context, access token retrieval and claims inspection, and interactive authentication-context step-up command construction. |
 | `internal/pim` | Shared domain types for eligibility, activation policy requirements, scope metadata, activation requests, and activation results. |
 | `internal/providers/entra` | Discovery and activation for eligible Microsoft Entra directory roles. |
 | `internal/providers/azureresources` | Discovery, effective-policy normalization, and activation for eligible Azure Resource roles. |
 | `internal/providers/groups` | Discovery and activation for eligible Privileged Access Group member and owner assignments. |
 | `internal/activation` | Batch activation orchestration, partial success handling, and retry classification. |
-| `internal/tui` | Bubble Tea screens, navigation, selection state, forms, policy-driven step-up gating, progress, and summaries. |
+| `internal/tui` | Bubble Tea tenant and PIM-area selection, screens, navigation, selection state, forms, policy-driven step-up gating, progress, and summaries. |
 
 The TUI should depend on interfaces rather than concrete Azure clients. Provider packages should translate Azure API responses into shared `pim.EligibleAssignment` values.
 
@@ -59,6 +59,11 @@ The TUI should depend on interfaces rather than concrete Azure clients. Provider
 
 - Azure CLI login state is validated on startup.
 - If the user is not signed in, show the exact `az login` command and provide a retry path.
+- List tenants from the existing Azure CLI session on startup; auto-select one tenant and show a selection menu only when multiple tenants are available.
+- Tenant rows show `Display Name (default.domain)` when both values exist and retain the tenant ID for disambiguation; preserve name-only, domain-only, and ID-only fallbacks.
+- Tenant selection is session-local. Scope token acquisition, discovery, authentication checks, and activation to the selected tenant without running `az account set` or changing Azure CLI configuration.
+- Changing tenants clears tenant-specific workflow state, and stale tenant/discovery results must not cross tenant boundaries.
+- Animate the loading spinner during initial tenant discovery and refresh.
 - Standard MFA-only Azure Resource activations reuse the exact checked ARM token from the current Azure CLI session; ARM/PIM remains authoritative for MFA enforcement.
 - Interactive step-up runs only when an enabled Conditional Access authentication context is required and the current ARM token does not contain it.
 - A batch may contain at most one authentication context; conflicting contexts must be activated separately.
@@ -97,10 +102,10 @@ Prefer unit tests around isolated logic. Normal test runs should not require liv
 Cover:
 
 - Cobra startup behavior and error propagation.
-- Azure CLI command/token parsing, ARM token claims inspection, MFA-only token reuse, `acrs` claims construction, and child-process environment with no live login.
+- Azure CLI tenant/account parsing and display-name enrichment, tenant-scoped token commands, ARM token claims inspection, MFA-only token reuse, `acrs` claims construction, child-process environment, and actionable command errors with no live login.
 - Provider response and effective activation-policy normalization into shared PIM domain records.
 - Batch activation partial success, pending approval, failures, and retry eligibility.
-- Bubble Tea model updates for navigation, selection, form validation, token pinning, direct and group-derived principal targeting, step-up principal drift, canceled or failed authentication, retry gating, context conflicts, wrapped Azure errors, and summaries.
+- Bubble Tea model updates for one/multiple tenant startup, tenant label fallbacks, startup spinner ticks, tenant switching and stale-result rejection, navigation, selection, form validation, token pinning, direct and group-derived principal targeting, step-up principal drift, canceled or failed authentication, retry gating, context conflicts, wrapped Azure errors, and summaries.
 
 Live Azure integration checks should be optional and gated behind explicit environment variables or commands.
 
