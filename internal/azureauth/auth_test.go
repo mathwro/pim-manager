@@ -14,7 +14,7 @@ import (
 
 func TestTenantsEnrichesNamesFromAzureAccounts(t *testing.T) {
 	runner := fakeRunner{outputs: map[string][]byte{
-		"az account tenant list --output json": []byte(`[
+		"az rest --method get --url https://management.azure.com/tenants?api-version=2022-12-01 --query value[].{tenantId:tenantId,displayName:displayName,defaultDomain:defaultDomain} --output json": []byte(`[
 			{"tenantId":"tenant-1"},
 			{"tenantId":"tenant-2"},
 			{"tenantId":"tenant-3"},
@@ -42,6 +42,48 @@ func TestTenantsEnrichesNamesFromAzureAccounts(t *testing.T) {
 	}
 }
 
+func TestTenantsUsesResourceManagerMetadataWithoutSubscriptions(t *testing.T) {
+	runner := fakeRunner{outputs: map[string][]byte{
+		"az rest --method get --url https://management.azure.com/tenants?api-version=2022-12-01 --query value[].{tenantId:tenantId,displayName:displayName,defaultDomain:defaultDomain} --output json": []byte(`[
+			{"tenantId":"tenant-1","displayName":"Contoso","defaultDomain":"contoso.onmicrosoft.com"},
+			{"tenantId":"tenant-2","displayName":"Fabrikam","defaultDomain":"fabrikam.onmicrosoft.com"}
+		]`),
+		"az account list --all --query [].{tenantId:tenantId,displayName:tenantDisplayName,defaultDomain:tenantDefaultDomain} --output json": []byte(`[]`),
+	}}
+
+	tenants, err := NewCLI(runner.Run).Tenants(context.Background())
+	if err != nil {
+		t.Fatalf("Tenants returned error: %v", err)
+	}
+	want := []Tenant{
+		{ID: "tenant-1", DisplayName: "Contoso", DefaultDomain: "contoso.onmicrosoft.com"},
+		{ID: "tenant-2", DisplayName: "Fabrikam", DefaultDomain: "fabrikam.onmicrosoft.com"},
+	}
+	if !reflect.DeepEqual(tenants, want) {
+		t.Fatalf("expected %#v, got %#v", want, tenants)
+	}
+}
+
+func TestTenantsEnrichesPartialResourceManagerMetadata(t *testing.T) {
+	runner := fakeRunner{outputs: map[string][]byte{
+		"az rest --method get --url https://management.azure.com/tenants?api-version=2022-12-01 --query value[].{tenantId:tenantId,displayName:displayName,defaultDomain:defaultDomain} --output json": []byte(`[
+			{"tenantId":"tenant-1","displayName":"Contoso"}
+		]`),
+		"az account list --all --query [].{tenantId:tenantId,displayName:tenantDisplayName,defaultDomain:tenantDefaultDomain} --output json": []byte(`[
+			{"tenantId":"tenant-1","defaultDomain":"contoso.onmicrosoft.com"}
+		]`),
+	}}
+
+	tenants, err := NewCLI(runner.Run).Tenants(context.Background())
+	if err != nil {
+		t.Fatalf("Tenants returned error: %v", err)
+	}
+	want := []Tenant{{ID: "tenant-1", DisplayName: "Contoso", DefaultDomain: "contoso.onmicrosoft.com"}}
+	if !reflect.DeepEqual(tenants, want) {
+		t.Fatalf("expected %#v, got %#v", want, tenants)
+	}
+}
+
 func TestTenantsRunsTenantAndMetadataLookupsConcurrently(t *testing.T) {
 	started := make(chan string, 2)
 	release := make(chan struct{})
@@ -50,7 +92,7 @@ func TestTenantsRunsTenantAndMetadataLookupsConcurrently(t *testing.T) {
 		started <- command
 		<-release
 		switch command {
-		case "az account tenant list --output json":
+		case "az rest --method get --url https://management.azure.com/tenants?api-version=2022-12-01 --query value[].{tenantId:tenantId,displayName:displayName,defaultDomain:defaultDomain} --output json":
 			return []byte(`[{"tenantId":"tenant-1"}]`), nil
 		case "az account list --all --query [].{tenantId:tenantId,displayName:tenantDisplayName,defaultDomain:tenantDefaultDomain} --output json":
 			return []byte(`[{"tenantId":"tenant-1","displayName":"Contoso"}]`), nil
@@ -73,7 +115,7 @@ func TestTenantsRunsTenantAndMetadataLookupsConcurrently(t *testing.T) {
 	slices.Sort(commands)
 	want := []string{
 		"az account list --all --query [].{tenantId:tenantId,displayName:tenantDisplayName,defaultDomain:tenantDefaultDomain} --output json",
-		"az account tenant list --output json",
+		"az rest --method get --url https://management.azure.com/tenants?api-version=2022-12-01 --query value[].{tenantId:tenantId,displayName:displayName,defaultDomain:defaultDomain} --output json",
 	}
 	if !reflect.DeepEqual(commands, want) {
 		t.Fatalf("expected both lookups, got %#v", commands)
@@ -83,7 +125,7 @@ func TestTenantsRunsTenantAndMetadataLookupsConcurrently(t *testing.T) {
 func TestTenantsReturnsAccountEnrichmentErrors(t *testing.T) {
 	commandErr := errors.New("account cache unavailable")
 	client := NewCLI(func(_ context.Context, _ string, args ...string) ([]byte, error) {
-		if strings.Join(args, " ") == "account tenant list --output json" {
+		if strings.Join(args, " ") == "rest --method get --url https://management.azure.com/tenants?api-version=2022-12-01 --query value[].{tenantId:tenantId,displayName:displayName,defaultDomain:defaultDomain} --output json" {
 			return []byte(`[{"tenantId":"tenant-1"}]`), nil
 		}
 		return nil, commandErr
@@ -97,7 +139,7 @@ func TestTenantsReturnsAccountEnrichmentErrors(t *testing.T) {
 
 func TestTenantsReturnsLoginHintWhenNoneAreUsable(t *testing.T) {
 	client := NewCLI(fakeRunner{outputs: map[string][]byte{
-		"az account tenant list --output json": []byte(`[{"tenantId":" "}]`),
+		"az rest --method get --url https://management.azure.com/tenants?api-version=2022-12-01 --query value[].{tenantId:tenantId,displayName:displayName,defaultDomain:defaultDomain} --output json": []byte(`[{"tenantId":" "}]`),
 	}}.Run)
 
 	_, err := client.Tenants(context.Background())
@@ -146,9 +188,9 @@ func TestTenantsPreservesNonLoginAzureCLIError(t *testing.T) {
 
 func TestTenantsRejectsInvalidJSON(t *testing.T) {
 	client := NewCLI(fakeRunner{outputs: map[string][]byte{
-		"az account tenant list --output json": []byte(`not-json`),
+		"az rest --method get --url https://management.azure.com/tenants?api-version=2022-12-01 --query value[].{tenantId:tenantId,displayName:displayName,defaultDomain:defaultDomain} --output json": []byte(`not-json`),
 	}}.Run)
-	if _, err := client.Tenants(context.Background()); err == nil || !strings.Contains(err.Error(), "parse az account tenant list output") {
+	if _, err := client.Tenants(context.Background()); err == nil || !strings.Contains(err.Error(), "parse Azure tenant list output") {
 		t.Fatalf("expected parse error, got %v", err)
 	}
 }

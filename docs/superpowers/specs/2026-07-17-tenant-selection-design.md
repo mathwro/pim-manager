@@ -31,13 +31,13 @@ The flow becomes:
 
 ## Azure CLI Behavior
 
-Tenant identity discovery uses:
+Tenant identity and display metadata discovery uses the Azure Resource Manager tenants endpoint through Azure CLI:
 
 ```text
-az account tenant list --output json
+az rest --method get --url "https://management.azure.com/tenants?api-version=2022-12-01" --query "value[].{tenantId:tenantId,displayName:displayName,defaultDomain:defaultDomain}" --output json
 ```
 
-Each usable record must have a non-empty `tenantId`, and duplicate tenant IDs are collapsed. Because some Azure CLI versions return only IDs from this experimental command, `pim-manager` enriches missing display metadata with one filtered subscription-cache query:
+Each usable record must have a non-empty `tenantId`, and duplicate tenant IDs are collapsed. If Resource Manager omits display metadata, `pim-manager` enriches it with one filtered subscription-cache query:
 
 ```text
 az account list --all --query "[].{tenantId:tenantId,displayName:tenantDisplayName,defaultDomain:tenantDefaultDomain}" --output json
@@ -139,7 +139,7 @@ Normal tests use fake Azure CLI runners and providers; they require no live Azur
 ### Azure Authentication Tests
 
 - Parse and deduplicate one or multiple tenant records.
-- Enrich missing tenant names/domains from duplicate subscription records, including records where metadata appears after an empty record.
+- Read tenant names and default domains from Resource Manager even when the subscription cache has no matching records; enrich any remaining gaps from duplicate subscription records, including records where metadata appears after an empty record.
 - Prefer display name, then default domain, then tenant-ID fallback without dropping tenants absent from the subscription cache.
 - Reject an empty or unusable tenant response with login guidance.
 - Preserve context cancellation and command details.

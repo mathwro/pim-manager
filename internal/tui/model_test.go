@@ -1824,14 +1824,16 @@ func TestTenantMenuOnlyRendersForMultipleTenants(t *testing.T) {
 
 	model = runCommand(model, model.Init())
 	view := model.View()
-	if !strings.Contains(view, "Choose Azure tenant") || !strings.Contains(view, "Contoso") || !strings.Contains(view, "tenant-2") {
-		t.Fatalf("expected tenant choices, got %q", view)
+	for _, text := range []string{"Choose Azure tenant", "Contoso (contoso.com)", "tenant-1", "fabrikam.com", "tenant-2"} {
+		if !strings.Contains(view, text) {
+			t.Fatalf("expected tenant menu to contain %q, got %q", text, view)
+		}
 	}
 
 	next, _ := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	model = next.(Model)
 	view = model.View()
-	if !strings.Contains(view, "CONNECTED") || !strings.Contains(view, "Contoso") || !strings.Contains(view, "tenant-1") {
+	if !strings.Contains(view, "CONNECTED") || !strings.Contains(view, "Contoso (contoso.com)") || !strings.Contains(view, "tenant-1") {
 		t.Fatalf("expected selected tenant panel, got %q", view)
 	}
 	for _, label := range []string{"Account", "Type", "Select", "Request", "Review", "Result"} {

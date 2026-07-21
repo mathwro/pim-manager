@@ -117,7 +117,7 @@ func TestRunInitListsTenantsWithoutSectionDiscovery(t *testing.T) {
 			commands = append(commands, command)
 			commandMu.Unlock()
 			switch command {
-			case "az account tenant list --output json":
+			case "az rest --method get --url https://management.azure.com/tenants?api-version=2022-12-01 --query value[].{tenantId:tenantId,displayName:displayName,defaultDomain:defaultDomain} --output json":
 				return []byte(`[{"tenantId":"tenant-1"}]`), nil
 			case "az account list --all --query [].{tenantId:tenantId,displayName:tenantDisplayName,defaultDomain:tenantDefaultDomain} --output json":
 				return []byte(`[{"tenantId":"tenant-1","displayName":"Contoso"}]`), nil
@@ -153,7 +153,7 @@ func TestRunInitListsTenantsWithoutSectionDiscovery(t *testing.T) {
 	got := slices.Clone(commands)
 	commandMu.Unlock()
 	want := []string{
-		"az account tenant list --output json",
+		"az rest --method get --url https://management.azure.com/tenants?api-version=2022-12-01 --query value[].{tenantId:tenantId,displayName:displayName,defaultDomain:defaultDomain} --output json",
 		"az account list --all --query [].{tenantId:tenantId,displayName:tenantDisplayName,defaultDomain:tenantDefaultDomain} --output json",
 	}
 	slices.Sort(got)

@@ -15,7 +15,11 @@ import (
 
 var ErrNotLoggedIn = errors.New("azure cli is not logged in; run az login")
 
-const tenantMetadataQuery = "[].{tenantId:tenantId,displayName:tenantDisplayName,defaultDomain:tenantDefaultDomain}"
+const (
+	tenantListURL       = "https://management.azure.com/tenants?api-version=2022-12-01"
+	tenantListQuery     = "value[].{tenantId:tenantId,displayName:displayName,defaultDomain:defaultDomain}"
+	tenantMetadataQuery = "[].{tenantId:tenantId,displayName:tenantDisplayName,defaultDomain:tenantDefaultDomain}"
+)
 
 type Runner func(context.Context, string, ...string) ([]byte, error)
 
@@ -82,7 +86,7 @@ func (c CLI) Tenants(ctx context.Context) ([]Tenant, error) {
 	tenantResults := make(chan commandResult, 1)
 	accountResults := make(chan commandResult, 1)
 	go func() {
-		out, err := c.run(ctx, "az", "account", "tenant", "list", "--output", "json")
+		out, err := c.run(ctx, "az", "rest", "--method", "get", "--url", tenantListURL, "--query", tenantListQuery, "--output", "json")
 		tenantResults <- commandResult{out: out, err: err}
 	}()
 	go func() {
@@ -109,7 +113,7 @@ func (c CLI) Tenants(ctx context.Context) ([]Tenant, error) {
 		DefaultDomain string `json:"defaultDomain"`
 	}
 	if err := json.Unmarshal(out, &payload); err != nil {
-		return nil, fmt.Errorf("parse az account tenant list output: %w", err)
+		return nil, fmt.Errorf("parse Azure tenant list output: %w", err)
 	}
 
 	tenants := make([]Tenant, 0, len(payload))
@@ -135,7 +139,7 @@ func (c CLI) Tenants(ctx context.Context) ([]Tenant, error) {
 	}
 	needsMetadata := false
 	for _, tenant := range tenants {
-		if tenant.DisplayName == "" && tenant.DefaultDomain == "" {
+		if tenant.DisplayName == "" || tenant.DefaultDomain == "" {
 			needsMetadata = true
 			break
 		}

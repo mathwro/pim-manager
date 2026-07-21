@@ -47,8 +47,8 @@ Scope-specific active discovery returned the same two linked active eligibility 
 
 `azureauth.CLI.Tenants` runs these commands concurrently:
 
-1. `az account tenant list --output json`, which remains authoritative for accessible tenant IDs.
-2. `az account list --all --query <metadata-query> --output json`, which reads subscription-cache metadata used only to enrich tenant display names and default domains.
+1. `az rest --method get --url "https://management.azure.com/tenants?api-version=2022-12-01" --query <tenant-metadata-query> --output json`, which is authoritative for accessible tenant IDs and their display metadata.
+2. `az account list --all --query <metadata-query> --output json`, which reads subscription-cache metadata only as a fallback when Resource Manager omits a name or default domain.
 
 The results retain existing parsing, deduplication, login detection, and metadata error behavior. The current Bubble Tea model already retains successful tenant results for the process lifetime. Returning to the tenant screen uses that state immediately; pressing `r` performs a new concurrent lookup.
 
