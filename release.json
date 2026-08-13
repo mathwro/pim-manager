@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "package": "pim-manager",
+  "binary": "pim-manager",
+  "adapter": "go",
+  "macos_sign": "adhoc",
+  "go": {
+    "ldflags": {
+      "version": "github.com/mathwro/pim-manager/internal/version.semanticVersion",
+      "commit": "github.com/mathwro/pim-manager/internal/version.commit",
+      "date": "github.com/mathwro/pim-manager/internal/version.buildDate"
+    }
+  }
+}

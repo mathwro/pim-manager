@@ -60,7 +60,13 @@ go run .
 
 ## Releases
 
-Release metadata is defined once in `release/metadata.json`. A maintainer release uses an annotated or signed stable SemVer tag from `main`:
+`release.json` contains only the typed Go adapter settings: package and binary identity, ad-hoc macOS signing, and the linker symbols used for version provenance. The shared `mathwro/homebrew-tools/.github/workflows/release-tool.yml@main` workflow owns the release implementation.
+
+Before the first release, merge the shared workflow into `mathwro/homebrew-tools`, require the `CI` and `Workflow Lint` checks in `main` branch protection, create the protected `release` environment with required reviewers, and configure the `DISTRIBUTION_DISPATCH_TOKEN` repository secret. The token must be limited to sending repository dispatches to `mathwro/homebrew-tools`.
+
+Push an annotated prerelease tag such as `v0.1.0-rc.1` for a complete automatic dry run, or dispatch the **Release** workflow with `dry_run: true` for an existing tag. The central workflow validates tag ancestry, runs the Go tests, builds on all six native runners, injects reproducible version metadata, ad-hoc signs macOS binaries, executes version/help smoke tests, creates deterministic root-only archives, and verifies the complete checksum set. A dry run creates workflow artifacts but no GitHub Release or package update.
+
+Publish a stable release from protected `main`:
 
 ```bash
 git switch main
@@ -70,24 +76,6 @@ git tag -a vX.Y.Z -m "pim-manager vX.Y.Z"
 git push origin vX.Y.Z
 ```
 
-The tag workflow rejects lightweight tags, non-stable tag names, commits outside `main`, an existing published release, test failures, missing targets, unsafe archive layouts, and checksum mismatches. It builds all six targets on macOS, ad-hoc signs the macOS binaries, executes every artifact natively on clean GitHub-hosted x86-64 and ARM64 runners, then creates a draft GitHub Release.
+The tag run repeats the dry-run checks and waits at the protected `release` environment before creating and publishing the immutable GitHub Release. Stable publication then calls the central notifier, which verifies the exact release and sends the canonical package update event.
 
-Review the draft and its seven assets. Publish it through the **Publish Release** workflow with the exact tag. The protected `release` environment is the signing/review gate. Publication re-downloads and independently verifies the draft, publishes it, then the protected `distribution` environment sends one `cli-release-published` repository dispatch to `mathwro/homebrew-tools`. Configure `DISTRIBUTION_DISPATCH_TOKEN` in that environment with access limited to dispatching that repository. A dispatch failure leaves the valid upstream release unchanged and fails visibly for manual workflow retry.
-
-Before the first release, require the `CI` and `Workflow Lint` checks in `main` branch protection. Also create the `release` and `distribution` environments with required reviewers. Stable release automation must remain disabled until those controls and `mathwro/homebrew-tools` exist.
-
-Dry-run the complete local build without creating a tag or GitHub Release:
-
-```bash
-go run ./release build \
-  -tag v0.0.1 \
-  -commit "$(git rev-parse HEAD)" \
-  -source-date-epoch "$(git show -s --format=%ct HEAD)" \
-  -output dist
-go run ./release verify -version 0.0.1 -dir dist
-go run ./release smoke -version 0.0.1 -dir dist
-```
-
-`v0.0.1` here is snapshot metadata only; this path never invokes GitHub publication. On macOS, add `-sign-darwin` to exercise ad-hoc signing.
-
-Tags and published assets are immutable. If the tag workflow fails before publication, fix the source and create a new tag; an unpublished draft may be safely replaced by rerunning its tag workflow. If an artifact defect is found after publication, preserve the release and issue a new patch version. Never delete and recreate a consumed tag or overwrite a published asset. If package dispatch alone fails, rerun **Publish Release** for the same tag: it re-verifies the immutable published release, skips the already-completed publication edit, and retries notification.
+Tags and published assets are immutable. If a run fails before publication, fix the source and create a new tag. If an artifact defect is found after publication, preserve the release and issue a new patch version. A notification failure does not invalidate the release; distribution reconciliation discovers it without republishing.

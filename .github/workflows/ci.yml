@@ -24,7 +24,7 @@ jobs:
           go-version-file: go.mod
           cache: true
       - name: Check formatting
-        run: test -z "$(gofmt -l cmd internal/selfupdate internal/version release)"
+        run: test -z "$(gofmt -l cmd internal/selfupdate internal/version)"
       - name: Run static analysis
         run: go vet ./...
       - name: Run tests
@@ -38,14 +38,3 @@ jobs:
           test "$(./pim-manager --version | wc -l)" -eq 1
           ./pim-manager --version | sed -n '/^pim-manager /q 0; q 1'
           ./pim-manager --help >/dev/null
-      - name: Exercise release snapshot
-        shell: bash
-        run: |
-          set -euo pipefail
-          go run ./release build \
-            -tag v0.0.1 \
-            -commit "${GITHUB_SHA}" \
-            -source-date-epoch "$(git show -s --format=%ct HEAD)" \
-            -output dist
-          go run ./release verify -version 0.0.1 -dir dist
-          go run ./release smoke -version 0.0.1 -dir dist
