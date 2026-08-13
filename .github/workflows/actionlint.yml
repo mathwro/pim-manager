@@ -1,0 +1,36 @@
+name: Workflow Lint
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: workflow-lint-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  actionlint:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - name: Validate workflow syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=1.7.7
+          archive="actionlint_${version}_linux_x86_64.tar.gz"
+          curl --fail --silent --show-error --location \
+            "https://github.com/rhysd/actionlint/releases/download/v${version}/${archive}" \
+            --output "/tmp/${archive}"
+          echo "023070a287cd8cccd71515fedc843f1985bf96c436b7effaecce67290e7e0757  /tmp/${archive}" | sha256sum --check --strict
+          tar -xzf "/tmp/${archive}" -C /tmp actionlint
+          /tmp/actionlint

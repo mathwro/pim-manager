@@ -1,0 +1,11 @@
+{
+  "owner": "mathwro",
+  "repository": "pim-manager",
+  "package": "pim-manager",
+  "binary": "pim-manager",
+  "description": "TUI for activating Microsoft PIM assignments",
+  "homepage": "https://github.com/mathwro/pim-manager",
+  "license": "MIT",
+  "distributionRepository": "mathwro/bucket",
+  "distributionEvent": "cli-release-published"
+}

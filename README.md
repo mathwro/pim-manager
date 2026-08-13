@@ -28,6 +28,8 @@ pim-manager update
 
 The command requires the Go toolchain and follows Go's `@latest` module version. Tagged builds also check once in the background and show the external update command on the home screen when a newer tag is available.
 
+Prebuilt release archives are also published for Windows, macOS, and Linux on x86-64 and ARM64. They contain only the root `pim-manager` executable (`pim-manager.exe` on Windows) and require no Go runtime. macOS archives are ad-hoc signed; they are not Developer ID signed or notarized. Linux archives use static pure-Go binaries with `CGO_ENABLED=0`, so they have no libc dependency.
+
 ## Authentication
 
 The app uses your existing Azure CLI session. Sign in before running:
@@ -55,3 +57,37 @@ Run the CLI:
 ```bash
 go run .
 ```
+
+## Releases
+
+Release metadata is defined once in `release/metadata.json`. A maintainer release uses an annotated or signed stable SemVer tag from `main`:
+
+```bash
+git switch main
+git pull --ff-only
+go test ./...
+git tag -a vX.Y.Z -m "pim-manager vX.Y.Z"
+git push origin vX.Y.Z
+```
+
+The tag workflow rejects lightweight tags, non-stable tag names, commits outside `main`, an existing published release, test failures, missing targets, unsafe archive layouts, and checksum mismatches. It builds all six targets on macOS, ad-hoc signs the macOS binaries, executes every artifact natively on clean GitHub-hosted x86-64 and ARM64 runners, then creates a draft GitHub Release.
+
+Review the draft and its seven assets. Publish it through the **Publish Release** workflow with the exact tag. The protected `release` environment is the signing/review gate. Publication re-downloads and independently verifies the draft, publishes it, then the protected `distribution` environment sends one `cli-release-published` repository dispatch to `mathwro/bucket`. Configure `DISTRIBUTION_DISPATCH_TOKEN` in that environment with access limited to dispatching that repository. A dispatch failure leaves the valid upstream release unchanged and fails visibly for manual workflow retry.
+
+Before the first release, require the `CI` and `Workflow Lint` checks in `main` branch protection. Also create the `release` and `distribution` environments with required reviewers. Stable release automation must remain disabled until those controls and `mathwro/bucket` exist.
+
+Dry-run the complete local build without creating a tag or GitHub Release:
+
+```bash
+go run ./release build \
+  -tag v0.0.1 \
+  -commit "$(git rev-parse HEAD)" \
+  -source-date-epoch "$(git show -s --format=%ct HEAD)" \
+  -output dist
+go run ./release verify -version 0.0.1 -dir dist
+go run ./release smoke -version 0.0.1 -dir dist
+```
+
+`v0.0.1` here is snapshot metadata only; this path never invokes GitHub publication. On macOS, add `-sign-darwin` to exercise ad-hoc signing.
+
+Tags and published assets are immutable. If the tag workflow fails before publication, fix the source and create a new tag; an unpublished draft may be safely replaced by rerunning its tag workflow. If an artifact defect is found after publication, preserve the release and issue a new patch version. Never delete and recreate a consumed tag or overwrite a published asset. If package dispatch alone fails, rerun **Publish Release** for the same tag: it re-verifies the immutable published release, skips the already-completed publication edit, and retries notification.

@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Check formatting
+        run: test -z "$(gofmt -l cmd internal/selfupdate internal/version release)"
+      - name: Run static analysis
+        run: go vet ./...
+      - name: Run tests
+        run: go test ./... -count=1
+      - name: Build host binary
+        run: go build -mod=readonly -trimpath -o ./pim-manager .
+      - name: Smoke version and help
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(./pim-manager --version | wc -l)" -eq 1
+          ./pim-manager --version | sed -n '/^pim-manager /q 0; q 1'
+          ./pim-manager --help >/dev/null
+      - name: Exercise release snapshot
+        shell: bash
+        run: |
+          set -euo pipefail
+          go run ./release build \
+            -tag v0.0.1 \
+            -commit "${GITHUB_SHA}" \
+            -source-date-epoch "$(git show -s --format=%ct HEAD)" \
+            -output dist
+          go run ./release verify -version 0.0.1 -dir dist
+          go run ./release smoke -version 0.0.1 -dir dist

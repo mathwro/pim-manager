@@ -4,9 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/mathwro/pim-manager/internal/version"
 	"io"
 	"os/exec"
-	"runtime/debug"
 	"strings"
 )
 
@@ -16,11 +16,7 @@ const latestModule = module + "@latest"
 type outputRunner func(context.Context, string, ...string) ([]byte, error)
 
 func currentVersion() string {
-	info, ok := debug.ReadBuildInfo()
-	if !ok {
-		return ""
-	}
-	return strings.TrimSpace(info.Main.Version)
+	return version.Tag()
 }
 
 func stableTag(version string) bool {

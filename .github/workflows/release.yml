@@ -1,0 +1,154 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+      epoch: ${{ steps.release.outputs.epoch }}
+    steps:
+      - name: Check out exact tag
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          fetch-depth: 0
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Validate tag source and version
+        id: release
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag='${{ github.ref_name }}'
+          [[ "$tag" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          test "$(git cat-file -t "refs/tags/$tag")" = tag
+          test "$(git rev-list -n 1 "$tag")" = "$GITHUB_SHA"
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+          version="${tag#v}"
+          epoch="$(git show -s --format=%ct "$GITHUB_SHA")"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "epoch=$epoch" >> "$GITHUB_OUTPUT"
+          if release_json="$(gh release view "$tag" --repo '${{ github.repository }}' --json isDraft 2>/dev/null)"; then
+            test "$(jq -r .isDraft <<<"$release_json")" = true || {
+              echo "A published release already exists for immutable tag $tag" >&2
+              exit 1
+            }
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - name: Run tests
+        run: go test ./... -count=1
+
+  build:
+    needs: validate
+    runs-on: macos-15
+    steps:
+      - name: Check out exact tag
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          fetch-depth: 0
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build deterministic signed archives
+        run: >-
+          go run ./release build
+          -tag '${{ github.ref_name }}'
+          -commit '${{ github.sha }}'
+          -source-date-epoch '${{ needs.validate.outputs.epoch }}'
+          -sign-darwin
+          -output dist
+      - name: Verify staged archive contract
+        run: go run ./release verify -version '${{ needs.validate.outputs.version }}' -dir dist
+      - name: Upload staged release
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: release-${{ github.ref_name }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+
+  native-smoke:
+    needs: [validate, build]
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - runner: windows-2025
+          - runner: windows-11-arm # actionlint:ignore
+          - runner: macos-15-intel # actionlint:ignore
+          - runner: macos-15
+          - runner: ubuntu-24.04
+          - runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Check out exact tag
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Download staged release
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: release-${{ github.ref_name }}
+          path: dist
+      - name: Run native version and help smoke tests
+        run: go run ./release smoke -version '${{ needs.validate.outputs.version }}' -dir dist
+
+  publish-draft:
+    needs: [validate, native-smoke]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Check out exact tag
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Download staged release
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: release-${{ github.ref_name }}
+          path: dist
+      - name: Independently verify before upload
+        run: go run ./release verify -version '${{ needs.validate.outputs.version }}' -dir dist
+      - name: Create draft and upload complete asset set
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag='${{ github.ref_name }}'
+          if gh release view "$tag" --repo '${{ github.repository }}' --json isDraft >/dev/null 2>&1; then
+            gh release delete "$tag" --repo '${{ github.repository }}' --yes
+          fi
+          title="pim-manager $tag"
+          gh release create "$tag" dist/* \
+            --repo '${{ github.repository }}' \
+            --target '${{ github.sha }}' \
+            --title "$title" \
+            --generate-notes \
+            --draft
+          expected="$(find dist -maxdepth 1 -type f -printf '%f %s\n' | sort)"
+          remote="$(gh release view "$tag" --repo '${{ github.repository }}' --json assets --jq '.assets | sort_by(.name)[] | "\(.name) \(.size)"')"
+          test "$remote" = "$expected"
+        env:
+          GH_TOKEN: ${{ github.token }}

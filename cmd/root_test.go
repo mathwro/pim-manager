@@ -60,6 +60,24 @@ func TestRootCommandHelpIncludesPIMDescription(t *testing.T) {
 	}
 }
 
+func TestRootCommandVersionDoesNotRunApp(t *testing.T) {
+	cmd := newRootCmd(func() error {
+		t.Fatal("version should not run the app")
+		return nil
+	}, noUpdate)
+	out := &bytes.Buffer{}
+	cmd.SetOut(out)
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"--version"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	if got := out.String(); !strings.HasPrefix(got, "pim-manager ") || strings.Count(got, "\n") != 1 {
+		t.Fatalf("expected one concise version line, got %q", got)
+	}
+}
+
 func TestUpdateRunsUpdaterWithoutStartingApp(t *testing.T) {
 	var appRan, updateRan bool
 	cmd := newRootCmd(func() error {
