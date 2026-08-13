@@ -6,6 +6,6 @@
   "description": "TUI for activating Microsoft PIM assignments",
   "homepage": "https://github.com/mathwro/pim-manager",
   "license": "MIT",
-  "distributionRepository": "mathwro/bucket",
+  "distributionRepository": "mathwro/homebrew-tools",
   "distributionEvent": "cli-release-published"
 }

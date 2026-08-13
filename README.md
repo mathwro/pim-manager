@@ -72,9 +72,9 @@ git push origin vX.Y.Z
 
 The tag workflow rejects lightweight tags, non-stable tag names, commits outside `main`, an existing published release, test failures, missing targets, unsafe archive layouts, and checksum mismatches. It builds all six targets on macOS, ad-hoc signs the macOS binaries, executes every artifact natively on clean GitHub-hosted x86-64 and ARM64 runners, then creates a draft GitHub Release.
 
-Review the draft and its seven assets. Publish it through the **Publish Release** workflow with the exact tag. The protected `release` environment is the signing/review gate. Publication re-downloads and independently verifies the draft, publishes it, then the protected `distribution` environment sends one `cli-release-published` repository dispatch to `mathwro/bucket`. Configure `DISTRIBUTION_DISPATCH_TOKEN` in that environment with access limited to dispatching that repository. A dispatch failure leaves the valid upstream release unchanged and fails visibly for manual workflow retry.
+Review the draft and its seven assets. Publish it through the **Publish Release** workflow with the exact tag. The protected `release` environment is the signing/review gate. Publication re-downloads and independently verifies the draft, publishes it, then the protected `distribution` environment sends one `cli-release-published` repository dispatch to `mathwro/homebrew-tools`. Configure `DISTRIBUTION_DISPATCH_TOKEN` in that environment with access limited to dispatching that repository. A dispatch failure leaves the valid upstream release unchanged and fails visibly for manual workflow retry.
 
-Before the first release, require the `CI` and `Workflow Lint` checks in `main` branch protection. Also create the `release` and `distribution` environments with required reviewers. Stable release automation must remain disabled until those controls and `mathwro/bucket` exist.
+Before the first release, require the `CI` and `Workflow Lint` checks in `main` branch protection. Also create the `release` and `distribution` environments with required reviewers. Stable release automation must remain disabled until those controls and `mathwro/homebrew-tools` exist.
 
 Dry-run the complete local build without creating a tag or GitHub Release:
 
