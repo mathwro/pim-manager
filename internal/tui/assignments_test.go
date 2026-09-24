@@ -18,6 +18,30 @@ func TestAssignmentListFiltersByRoleAndScope(t *testing.T) {
 	}
 }
 
+func TestAssignmentListFiltersBySubscriptionAndManagementGroupIdentity(t *testing.T) {
+	list := newAssignmentList([]pim.EligibleAssignment{
+		{ID: "one", DisplayName: "Reader", Scope: pim.Scope{Type: pim.ScopeTypeSubscription, DisplayName: "Production", ID: "/subscriptions/12345678-abcd-4321-9876-abcdef012345"}},
+		{ID: "two", DisplayName: "Reader", Scope: pim.Scope{Type: pim.ScopeTypeManagementGroup, DisplayName: "Platform", ID: "/providers/Microsoft.Management/managementGroups/mg-platform-core"}},
+	})
+
+	for _, test := range []struct {
+		query string
+		want  string
+	}{
+		{query: "production", want: "one"},
+		{query: "ABCDEF012345", want: "one"},
+		{query: "platform", want: "two"},
+		{query: "MG-PLATFORM-CORE", want: "two"},
+	} {
+		t.Run(test.query, func(t *testing.T) {
+			filtered := list.filtered(test.query)
+			if len(filtered) != 1 || filtered[0].ID != test.want {
+				t.Fatalf("filtered(%q) = %#v, want assignment %q", test.query, filtered, test.want)
+			}
+		})
+	}
+}
+
 func TestAssignmentListTogglesSelection(t *testing.T) {
 	list := newAssignmentList([]pim.EligibleAssignment{{ID: "one", DisplayName: "Contributor"}})
 	list.toggle("one")
