@@ -6,6 +6,8 @@
 
 Running `pim-manager` opens an interactive Bubble Tea TUI. It validates the existing Azure CLI session and, when multiple tenants are available, asks which tenant to use before showing the PIM areas. Azure Resources is active for eligible Azure RBAC assignments across management groups, subscriptions, and resource groups. Entra Roles and Groups are shown as paused until Azure CLI can obtain their required Microsoft Graph PIM permissions.
 
+In the Azure Resources assignment list, press `/` to search by role, subscription or management group name or ID, or resource group scope. Search is case-insensitive and accepts part of a name or ID.
+
 ## Installation
 
 Install the latest version directly from the Go module repository:
