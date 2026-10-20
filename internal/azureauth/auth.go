@@ -191,7 +191,11 @@ func (c CLI) AccessToken(ctx context.Context, resource string) (string, error) {
 	args = append(args, "--output", "json")
 	out, err := c.run(ctx, "az", args...)
 	if err != nil {
-		return "", fmt.Errorf("get Azure CLI access token for %s: %w", resource, err)
+		commandErr := azureCLIError(out, err)
+		if ctx.Err() == nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) && accountSignInUnavailable(commandErr.Error()) {
+			commandErr = fmt.Errorf("%w: %w", ErrAccountUnavailable, commandErr)
+		}
+		return "", fmt.Errorf("get Azure CLI access token for %s: %w", resource, commandErr)
 	}
 	var payload struct {
 		AccessToken string `json:"accessToken"`

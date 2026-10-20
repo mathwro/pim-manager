@@ -115,7 +115,7 @@ func (m Model) viewHome() string {
 		b.WriteString("\n")
 	}
 
-	hints := []keyHint{{"up/down", "move"}, {"enter", "open"}, {"?", "help"}, {"q", "quit"}}
+	hints := []keyHint{{"up/down", "move"}, {"enter", "open"}, {"r", "refresh"}, {"?", "help"}, {"q", "quit"}}
 	if len(m.tenants) > 1 {
 		hints = append([]keyHint{{"esc", "change account"}}, hints...)
 	}
@@ -129,6 +129,10 @@ func (m Model) viewAssignments() string {
 	b.WriteString("\n")
 	b.WriteString(m.stepLine(2))
 	b.WriteString("\n\n")
+	if accountLine := m.assignmentAccountLine(); accountLine != "" {
+		b.WriteString(accountLine)
+		b.WriteString("\n\n")
+	}
 
 	if m.loading {
 		b.WriteString(panelStyle.Width(m.contentWidth() - 6).Render(
@@ -140,6 +144,10 @@ func (m Model) viewAssignments() string {
 	if assignmentError := m.assignmentError(); assignmentError != "" {
 		b.WriteString(assignmentError)
 		b.WriteString("\n")
+	}
+	if m.accountUnavailable() || (m.err != nil && len(m.assignmentList.items) == 0) {
+		b.WriteString(m.footer([]keyHint{{"r", "refresh"}, {"esc", "back"}, {"q", "quit"}}))
+		return b.String()
 	}
 	if m.preparingPolicies {
 		loading := m.policyLoadingBanner()
@@ -180,11 +188,11 @@ func (m Model) viewAssignments() string {
 
 	filtered := m.assignmentList.filtered(m.query)
 	if len(filtered) == 0 {
-		message := "No eligible assignments were returned."
+		message := m.emptyAssignmentsMessage()
 		if m.query != "" {
-			message = fmt.Sprintf("No assignments match %q.", m.query)
+			message = fmt.Sprintf("No assignments match %q.\nClear the search to see your assignments.", m.query)
 		}
-		b.WriteString(panelStyle.Width(m.contentWidth() - 6).Render(message + "\n" + mutedStyle.Render("Clear the search or retry discovery.")))
+		b.WriteString(panelStyle.Width(m.contentWidth() - 6).Render(message))
 	} else {
 		start, end := m.assignmentWindow(len(filtered))
 		b.WriteString(mutedStyle.Render(fmt.Sprintf("  %-9s%-*s  %s", "STATE", m.roleColumnWidth(), "ROLE", "SCOPE")))
@@ -437,7 +445,9 @@ func (m Model) viewSummary() string {
 	b.WriteString("\n\n")
 	b.WriteString(m.summaryViewport.View())
 	hints := []keyHint{{"up/down", "scroll"}, {"esc", "assignments"}, {"h", "home"}, {"q", "quit"}}
-	if len(m.summary.retryableFailures()) > 0 {
+	if m.accountUnavailable() {
+		hints = append([]keyHint{{"r", "refresh account"}}, hints...)
+	} else if len(m.summary.retryableFailures()) > 0 {
 		hints = append([]keyHint{{"r", "retry failures"}}, hints...)
 	}
 	b.WriteString(m.footer(hints))
@@ -494,9 +504,67 @@ func (m Model) tenantPanel() string {
 	if m.selectedTenant.ID == "" {
 		return panelStyle.Width(m.contentWidth() - 6).Render(mutedStyle.Render("No Azure tenant selected."))
 	}
-	identity := successStyle.Render("CONNECTED") + "  " + tenantLabel(m.selectedTenant)
+	identity := m.accountStatus() + "  " + tenantLabel(m.selectedTenant)
 	id := mutedStyle.Render(fmt.Sprintf("%-13s %s", "Tenant", m.selectedTenant.ID))
+	if account := m.accountLabel(); account != "" {
+		identity += "\n" + account
+	}
 	return panelStyle.Width(m.contentWidth() - 6).Render(identity + "\n" + id)
+}
+
+func (m Model) accountStatus() string {
+	switch {
+	case m.accountUnavailable():
+		return "Account unavailable"
+	case m.checkingAccount:
+		return m.spinner.View() + " Checking account..."
+	case m.accountErr != nil:
+		return "Account unverified: " + m.accountErr.Error()
+	case m.accountHealth.PrincipalID == "" || !m.accountFresh():
+		return "Account unverified"
+	default:
+		return "Account found"
+	}
+}
+
+func (m Model) accountLabel() string {
+	health := m.accountHealth
+	if health.DisplayName != "" && health.UserPrincipalName != "" {
+		return health.DisplayName + " (" + health.UserPrincipalName + ")"
+	}
+	if health.UserPrincipalName != "" {
+		return health.UserPrincipalName
+	}
+	if health.DisplayName != "" {
+		return health.DisplayName
+	}
+	return health.PrincipalID
+}
+
+func (m Model) assignmentAccountLine() string {
+	if m.runtime.CheckAccount == nil || (!m.loading && len(m.assignmentList.items) == 0) {
+		return ""
+	}
+	line := m.accountStatus()
+	if account := m.accountLabel(); account != "" {
+		line += " · " + account
+	}
+	if m.selectedTenant.ID != "" {
+		line += " · " + tenantLabel(m.selectedTenant)
+	}
+	return mutedStyle.Width(m.contentWidth() - 4).Render(line)
+}
+
+func (m Model) emptyAssignmentsMessage() string {
+	lines := []string{"No eligible assignments were returned.", m.accountStatus()}
+	if account := m.accountLabel(); account != "" {
+		lines = append(lines, account)
+	}
+	if m.selectedTenant.ID != "" {
+		lines = append(lines, "Tenant: "+tenantLabel(m.selectedTenant)+" ("+m.selectedTenant.ID+")")
+	}
+	lines = append(lines, "Press r to refresh discovery and account status.")
+	return strings.Join(lines, "\n")
 }
 
 func (m *Model) resizeComponents() {
@@ -576,6 +644,9 @@ func (m Model) assignmentVisibleRows() int {
 		errorRows = lipgloss.Height(assignmentError)
 	}
 	visibleRows := max(4, m.height-19-footerExtraRows-errorRows)
+	if accountLine := m.assignmentAccountLine(); accountLine != "" {
+		visibleRows = max(1, visibleRows-lipgloss.Height(accountLine)-1)
+	}
 	if m.preparingPolicies || m.waitingForPolicies {
 		visibleRows = max(1, visibleRows-lipgloss.Height(m.policyLoadingBanner()))
 	}
@@ -622,7 +693,7 @@ func (m Model) assignmentFooter() string {
 	if m.searchMode {
 		return m.footer([]keyHint{{"type", "filter"}, {"enter", "apply"}, {"esc", "close search"}})
 	}
-	return m.footer([]keyHint{{"space", "select"}, {"a", "select all"}, {"/", "search"}, {"i", "details"}, {"enter", "continue"}, {"esc", "back"}})
+	return m.footer([]keyHint{{"space", "select"}, {"a", "select all"}, {"/", "search"}, {"i", "details"}, {"enter", "continue"}, {"r", "refresh"}, {"esc", "back"}})
 }
 
 func (m Model) assignmentError() string {

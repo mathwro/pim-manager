@@ -25,6 +25,7 @@ func Run() error {
 	runtime := tui.Runtime{
 		AzureResources:    azureresources.NewProvider(armClient),
 		Tenants:           auth,
+		CheckAccount:      auth.CheckAccount,
 		StepUpCommand:     azureauth.StepUpLoginCommand,
 		ARMAuthentication: auth.ARMAuthentication,
 		CheckUpdate:       checkLatest,
