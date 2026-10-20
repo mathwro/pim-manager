@@ -8,6 +8,12 @@ Running `pim-manager` opens an interactive Bubble Tea TUI. It validates the exis
 
 In the Azure Resources assignment list, press `/` to search by role, subscription or management group name or ID, or resource group scope. Search is case-insensitive and accepts part of a name or ID.
 
+Press `i` to inspect an assignment. Details scroll with arrow keys or `j`/`k`, keeping long identifiers and policy diagnostics accessible above the activity dock; press Esc to return.
+
+The bottom activity dock retains recent timestamped events while you navigate. Running tenant, account, discovery, policy, and activation-authentication checks show their stage and elapsed time; no estimated completion percentage is shown. During activation, the TUI displays the current assignment, completed-request count, and activated, pending-approval, and failed totals as results arrive. Manual retries show progress for the retryable subset only.
+
+Activity is bounded and kept only in memory for the current session, not written as an audit log. Tenant or principal workflow resets clear it. Activity messages omit credentials, claims, justification text, and raw Azure error payloads; actionable diagnostics remain in the existing error and result views. Short terminals collapse the dock to one status row, keeping contextual keyboard controls below it.
+
 ## Installation
 
 Install the latest version directly from the Go module repository:

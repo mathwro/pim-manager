@@ -29,6 +29,7 @@ func (m *Model) cancelAccountCheck() {
 	}
 	m.accountCheck++
 	m.checkingAccount = false
+	m.endOperation("account")
 }
 
 func (m Model) accountFresh() bool {
@@ -47,6 +48,8 @@ func (m *Model) startAccountCheck(force bool) tea.Cmd {
 	}
 	m.accountCheck++
 	m.checkingAccount = true
+	m.beginOperation("account")
+	m.recordActivity("Checking account", false)
 	ctx, cancel := context.WithCancel(m.tenantContext())
 	m.accountCancel = cancel
 	check := m.runtime.CheckAccount
@@ -69,19 +72,23 @@ func (m Model) accountChecked(msg accountCheckedMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if msg.err != nil {
+		m.recordActivity("Account check failed", true)
 		return m, nil
 	}
 	if !strings.EqualFold(msg.health.TenantID, m.selectedTenant.ID) || strings.TrimSpace(msg.health.PrincipalID) == "" {
 		m.accountErr = errors.New("account identity could not be verified for the selected tenant")
+		m.recordActivity("Account identity could not be verified", true)
 		return m, nil
 	}
 	if m.accountPrincipalID != "" && !strings.EqualFold(m.accountPrincipalID, msg.health.PrincipalID) {
 		previous := m.accountPrincipalID
 		m.clearAccountWorkflow()
 		m.err = principalChangedError(previous, msg.health.PrincipalID)
+		m.recordActivity("Account identity changed; assignments cleared", true)
 	}
 	m.accountPrincipalID = msg.health.PrincipalID
 	m.accountHealth = msg.health
+	m.recordActivity("Account check completed", false)
 	return m, nil
 }
 
@@ -117,6 +124,7 @@ func (m *Model) markAccountUnavailable(err error) {
 	m.accountCheckedAt = time.Now()
 	m.accountPrincipalID = ""
 	m.clearAccountWorkflow()
+	m.recordActivity("Account unavailable; sign in to continue", true)
 }
 
 func (m *Model) clearAccountWorkflow() {
@@ -142,6 +150,7 @@ func principalChangedError(previous, current string) error {
 
 func (m Model) refreshAccountAndWorkflow() (tea.Model, tea.Cmd) {
 	var commands []tea.Cmd
+	m.recordActivity("Refreshing account and assignments", false)
 	if cmd := m.startAccountCheck(true); cmd != nil {
 		commands = append(commands, cmd)
 	}
@@ -150,6 +159,9 @@ func (m Model) refreshAccountAndWorkflow() (tea.Model, tea.Cmd) {
 		m.checkingTenants = true
 		m.refreshingTenants = true
 		m.tenantErr = nil
+		m.endOperation("tenants")
+		m.beginOperation("tenants")
+		m.recordActivity("Refreshing tenants", false)
 		commands = append(commands, m.checkTenants(m.tenantCheck), m.spinner.Tick)
 	}
 	section := m.activeSection
