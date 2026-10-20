@@ -1833,7 +1833,7 @@ func TestTenantMenuOnlyRendersForMultipleTenants(t *testing.T) {
 	next, _ := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	model = next.(Model)
 	view = model.View()
-	if !strings.Contains(view, "CONNECTED") || !strings.Contains(view, "Contoso (contoso.com)") || !strings.Contains(view, "tenant-1") {
+	if !strings.Contains(view, "Contoso (contoso.com)") || !strings.Contains(view, "tenant-1") {
 		t.Fatalf("expected selected tenant panel, got %q", view)
 	}
 	for _, label := range []string{"Account", "Type", "Select", "Request", "Review", "Result"} {

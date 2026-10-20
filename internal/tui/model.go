@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textarea"
@@ -47,6 +48,7 @@ type Runtime struct {
 	StepUpCommand     func(string, bool, string) (*exec.Cmd, error)
 	ARMAuthentication func(context.Context, bool, string) (azureauth.ARMAuthentication, error)
 	CheckUpdate       func(context.Context) (string, error)
+	CheckAccount      func(context.Context) (azureauth.AccountHealth, error)
 }
 
 type AssignmentProvider interface {
@@ -90,6 +92,15 @@ type Model struct {
 	tenantIndex            int
 	selectedTenant         azureauth.Tenant
 	tenantErr              error
+	accountCheckedAt       time.Time
+	accountHealth          azureauth.AccountHealth
+	accountErr             error
+	accountPrincipalID     string
+	checkingAccount        bool
+	accountCheck           int
+	accountCancel          context.CancelFunc
+	accountRecoverySection Section
+	refreshingTenants      bool
 	availableUpdate        string
 	discoveryCheck         int
 	discoveryCancel        context.CancelFunc
@@ -138,7 +149,8 @@ type assignmentsPreparedMsg struct {
 }
 
 type activationCompletedMsg struct {
-	results []pim.ActivationResult
+	results    []pim.ActivationResult
+	accountErr error
 }
 
 type stepUpCompletedMsg struct {
@@ -238,7 +250,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.resizeComponents()
 		return m, nil
 	case spinner.TickMsg:
-		if !m.loading && !m.checkingTenants && !m.preparingPolicies && !m.waitingForPolicies {
+		if !m.loading && !m.checkingTenants && !m.checkingAccount && !m.preparingPolicies && !m.waitingForPolicies {
 			return m, nil
 		}
 		var cmd tea.Cmd
@@ -249,6 +261,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.availableUpdate = strings.TrimSpace(typed.version)
 		}
 		return m, nil
+	case accountCheckedMsg:
+		return m.accountChecked(typed)
 	case assignmentsDiscoveredMsg:
 		key := discoveryKey{tenantID: typed.tenantID, section: typed.section}
 		if typed.checkID != m.discoveryCheck || typed.tenantID != m.selectedTenant.ID {
@@ -260,6 +274,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if typed.err != nil {
 			delete(m.discoveryCache, key)
 			m.assignmentList = newAssignmentList(nil)
+			if accountUnavailableError(typed.err) {
+				m.markAccountUnavailable(typed.err)
+			}
 			return m, nil
 		}
 		entry := discoveryEntry{assignments: typed.assignments, policiesReady: true, generation: typed.checkID}
@@ -275,9 +292,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			ctx, cancel := context.WithCancel(azureauth.WithTenant(context.Background(), typed.tenantID))
 			m.discoveryCancel = cancel
 			m.discoveryCancelKey = key
-			return m, tea.Batch(m.prepareAssignments(ctx, preparer, key, typed.checkID, typed.assignments), m.spinner.Tick)
+			var accountCheck tea.Cmd
+			if len(typed.assignments) == 0 {
+				accountCheck = m.startAccountCheck(false)
+			}
+			return m, tea.Batch(m.prepareAssignments(ctx, preparer, key, typed.checkID, typed.assignments), accountCheck, m.spinner.Tick)
 		}
 		m.discoveryCache[key] = entry
+		if len(typed.assignments) == 0 {
+			cmd := m.startAccountCheck(false)
+			return m, cmd
+		}
 		return m, nil
 	case assignmentsPreparedMsg:
 		entry, ok := m.discoveryCache[typed.key]
@@ -287,6 +312,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.cancelDiscovery(false)
 		current := typed.key == (discoveryKey{tenantID: m.selectedTenant.ID, section: m.activeSection})
 		if typed.err != nil {
+			if accountUnavailableError(typed.err) {
+				m.markAccountUnavailable(typed.err)
+				return m, nil
+			}
 			delete(m.discoveryCache, typed.key)
 			if current {
 				m.preparingPolicies = false
@@ -318,6 +347,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case activationCompletedMsg:
+		if typed.accountErr != nil {
+			m.markAccountUnavailable(typed.accountErr)
+		}
 		m.loading = false
 		m.cancelDiscovery(true)
 		delete(m.discoveryCache, discoveryKey{tenantID: m.selectedTenant.ID, section: m.activeSection})
@@ -332,6 +364,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.screen = origin
 		if typed.err != nil {
+			if accountUnavailableError(typed.err) {
+				m.markAccountUnavailable(typed.err)
+				return m, nil
+			}
 			m.err = fmt.Errorf("step-up authentication failed: %w", typed.err)
 			return m, nil
 		}
@@ -351,12 +387,33 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.checkingAuthentication = false
 		m.screen = typed.origin
 		if typed.err != nil {
+			if accountUnavailableError(typed.err) {
+				m.markAccountUnavailable(typed.err)
+				return m, nil
+			}
 			m.err = fmt.Errorf("check Azure CLI ARM authentication: %w", typed.err)
 			return m, nil
 		}
 		if typed.expectedPrincipalID != "" && !strings.EqualFold(typed.expectedPrincipalID, typed.authentication.PrincipalID) {
+			m.cancelAccountCheck()
+			m.clearAccountWorkflow()
+			m.screen = typed.origin
 			m.err = fmt.Errorf("Azure CLI principal changed from %s to %s during authentication; sign in as the original account and retry", typed.expectedPrincipalID, typed.authentication.PrincipalID)
 			return m, nil
+		}
+		if m.accountPrincipalID != "" && !strings.EqualFold(m.accountPrincipalID, typed.authentication.PrincipalID) {
+			previous := m.accountPrincipalID
+			m.cancelAccountCheck()
+			m.clearAccountWorkflow()
+			m.accountHealth = azureauth.AccountHealth{}
+			m.accountCheckedAt = time.Time{}
+			m.accountPrincipalID = typed.authentication.PrincipalID
+			m.err = principalChangedError(previous, typed.authentication.PrincipalID)
+			return m, nil
+		}
+		if m.accountPrincipalID == "" && typed.authentication.PrincipalID != "" {
+			m.cancelAccountCheck()
+			m.accountPrincipalID = typed.authentication.PrincipalID
 		}
 		if typed.authentication.Satisfied {
 			return m.startActivation(typed.selected, typed.authentication)
@@ -373,19 +430,34 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.checkingTenants = false
 		m.tenantErr = typed.err
 		if typed.err != nil {
+			m.refreshingTenants = false
 			m.screen = ScreenTenants
 			return m, nil
 		}
 		m.tenants = typed.tenants
 		m.clampTenantCursor()
+		if m.refreshingTenants {
+			m.refreshingTenants = false
+			if index := m.indexOfTenant(m.selectedTenant.ID); index >= 0 {
+				m.selectedTenant = m.tenants[index]
+				m.tenantIndex = index
+				return m, nil
+			}
+		}
 		if len(m.tenants) == 1 {
 			m.selectTenant(0)
-			return m, nil
+			cmd := m.startAccountCheck(false)
+			return m, cmd
 		}
 		m.screen = ScreenTenants
 		if m.selectedTenant.ID != "" {
 			index := m.indexOfTenant(m.selectedTenant.ID)
 			if index < 0 {
+				m.cancelAccountCheck()
+				m.accountHealth = azureauth.AccountHealth{}
+				m.accountErr = nil
+				m.accountPrincipalID = ""
+				m.accountCheckedAt = time.Time{}
 				m.clearTenantWorkflow()
 				m.selectedTenant = azureauth.Tenant{}
 			} else {
@@ -417,6 +489,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.helpVisible = true
 			return m, nil
 		}
+	}
+	if key.String() == "r" && !m.acceptingText() && !m.checkingAuthentication && m.screen != ScreenTenants && m.screen != ScreenSummary && m.screen != ScreenProgress {
+		return m.refreshAccountAndWorkflow()
 	}
 
 	switch m.screen {
@@ -466,6 +541,9 @@ func (m Model) View() string {
 	if m.helpVisible {
 		content = m.viewHelp()
 	}
+	if m.accountUnavailable() {
+		content = warningStyle.Width(m.contentWidth()-4).Render(fmt.Sprintf("Account unavailable\nRun az login --tenant %s, then press r to reload.\n%s", m.selectedTenant.ID, m.accountErr)) + "\n\n" + content
+	}
 	return appFrameStyle.Width(m.frameWidth()).Render(content)
 }
 
@@ -481,6 +559,8 @@ func (m Model) updateTenants(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case tea.KeyEnter:
 		if m.tenantErr == nil && len(m.tenants) > 0 {
 			m.selectTenant(m.tenantIndex)
+			cmd := m.startAccountCheck(false)
+			return m, cmd
 		}
 	case tea.KeyRunes:
 		switch string(key.Runes) {
@@ -489,6 +569,8 @@ func (m Model) updateTenants(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "k":
 			m.moveTenant(-1)
 		case "r":
+			m.cancelAccountCheck()
+			m.accountCheckedAt = time.Time{}
 			m.tenantCheck++
 			m.checkingTenants = true
 			m.tenantErr = nil
@@ -547,9 +629,6 @@ func (m Model) updateAssignments(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	if m.loading {
-		if key.String() == "r" {
-			return m.beginDiscovery(m.activeSection, true)
-		}
 		if key.Type == tea.KeyEsc {
 			m.screen = ScreenHome
 		}
@@ -599,17 +678,12 @@ func (m Model) updateAssignments(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		case "a":
 			m.toggleAllFiltered()
-		case "r":
-			return m.beginDiscovery(m.activeSection, true)
 		}
 	}
 	return m, nil
 }
 
 func (m Model) updateDetails(key tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if key.String() == "r" && !m.policiesReady && !m.preparingPolicies {
-		return m.beginDiscovery(m.activeSection, true)
-	}
 	if key.Type == tea.KeyEsc || key.Type == tea.KeyEnter || key.String() == "b" {
 		m.screen = ScreenAssignments
 	}
@@ -704,6 +778,9 @@ func (m Model) updateConfirmation(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) beginAuthentication(selected []pim.EligibleAssignment) (tea.Model, tea.Cmd) {
+	if m.accountUnavailable() {
+		return m, nil
+	}
 	authenticationContext, mfaRequired, err := authenticationRequirement(selected)
 	if err != nil {
 		m.err = err
@@ -776,6 +853,10 @@ func authenticationRequirement(assignments []pim.EligibleAssignment) (string, bo
 }
 
 func (m Model) startActivation(selected []pim.EligibleAssignment, authentication azureauth.ARMAuthentication) (tea.Model, tea.Cmd) {
+	if m.accountUnavailable() {
+		return m, nil
+	}
+	m.cancelAccountCheck()
 	m.screen = ScreenProgress
 	m.loading = true
 	m.err = nil
@@ -800,6 +881,9 @@ func (m Model) updateSummary(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.screen = ScreenHome
 			return m, nil
 		case "r":
+			if m.accountUnavailable() {
+				return m.refreshAccountAndWorkflow()
+			}
 			retryable := m.summary.retryableFailures()
 			if len(retryable) == 0 {
 				return m, nil
@@ -819,6 +903,7 @@ func (m Model) updateSummary(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m Model) beginDiscovery(section Section, refresh bool) (tea.Model, tea.Cmd) {
 	m.activeSection = section
 	m.screen = ScreenAssignments
+	accountCheck := m.startAccountCheck(false)
 	key := discoveryKey{tenantID: m.selectedTenant.ID, section: section}
 	if refresh {
 		m.cancelDiscovery(true)
@@ -833,7 +918,7 @@ func (m Model) beginDiscovery(section Section, refresh bool) (tea.Model, tea.Cmd
 		m.policiesReady = entry.policiesReady
 		m.preparingPolicies = !entry.policiesReady
 		m.waitingForPolicies = false
-		return m, nil
+		return m, accountCheck
 	}
 	m.cancelDiscovery(true)
 	m.loading = true
@@ -849,7 +934,7 @@ func (m Model) beginDiscovery(section Section, refresh bool) (tea.Model, tea.Cmd
 	ctx, cancel := context.WithCancel(azureauth.WithTenant(context.Background(), m.selectedTenant.ID))
 	m.discoveryCancel = cancel
 	m.discoveryCancelKey = key
-	return m, tea.Batch(m.discoverAssignments(ctx, m.discoveryCheck, m.selectedTenant.ID, section), m.spinner.Tick)
+	return m, tea.Batch(m.discoverAssignments(ctx, m.discoveryCheck, m.selectedTenant.ID, section), accountCheck, m.spinner.Tick)
 }
 
 func (m Model) openActivationForm() (tea.Model, tea.Cmd) {
@@ -930,6 +1015,17 @@ func (m *Model) selectTenant(index int) {
 	}
 	next := m.tenants[index]
 	if m.selectedTenant.ID != next.ID {
+		m.cancelAccountCheck()
+		for key := range m.discoveryCache {
+			if key.tenantID == m.selectedTenant.ID {
+				delete(m.discoveryCache, key)
+			}
+		}
+		m.accountHealth = azureauth.AccountHealth{}
+		m.accountErr = nil
+		m.accountPrincipalID = ""
+		m.accountCheckedAt = time.Time{}
+		m.accountRecoverySection = ""
 		m.clearTenantWorkflow()
 	}
 	m.selectedTenant = next
@@ -1113,6 +1209,7 @@ func (m Model) activateSelected(selected []pim.EligibleAssignment, authenticatio
 			}
 			return activationCompletedMsg{results: results}
 		}
+		var accountErr error
 		for _, assignment := range selected {
 			requestAssignment := assignment
 			if m.activeSection == SectionAzureResources && authentication.PrincipalID != "" {
@@ -1125,6 +1222,9 @@ func (m Model) activateSelected(selected []pim.EligibleAssignment, authenticatio
 			}
 			result, err := provider.Activate(ctx, request)
 			if err != nil {
+				if accountUnavailableError(err) {
+					accountErr = err
+				}
 				results = append(results, pim.ActivationResult{
 					Assignment: assignment,
 					Status:     pim.ActivationStatusFailed,
@@ -1138,7 +1238,7 @@ func (m Model) activateSelected(selected []pim.EligibleAssignment, authenticatio
 			}
 			results = append(results, result)
 		}
-		return activationCompletedMsg{results: results}
+		return activationCompletedMsg{results: results, accountErr: accountErr}
 	}
 }
 
