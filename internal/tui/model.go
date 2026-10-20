@@ -82,7 +82,15 @@ type Model struct {
 	durationIndex          int
 	spinner                spinner.Model
 	summaryViewport        viewport.Model
+	detailsViewport        viewport.Model
 	summary                summary
+	activityEntries        []activityEntry
+	operationStarted       map[string]time.Time
+	activationTotal        int
+	activationDone         int
+	activationCurrent      string
+	activationGeneration   int
+	activationAccountErr   error
 	loading                bool
 	checkingAuthentication bool
 	authenticationCheck    int
@@ -151,12 +159,33 @@ type assignmentsPreparedMsg struct {
 type activationCompletedMsg struct {
 	results    []pim.ActivationResult
 	accountErr error
+	tenantID   string
+	generation int
+}
+
+type activationItemStartedMsg struct {
+	assignment pim.EligibleAssignment
+	tenantID   string
+	generation int
+	index      int
+	activate   tea.Cmd
+}
+
+type activationItemResultMsg struct {
+	result     pim.ActivationResult
+	accountErr error
+	tenantID   string
+	generation int
+	index      int
+	next       tea.Cmd
 }
 
 type stepUpCompletedMsg struct {
 	selected    []pim.EligibleAssignment
 	origin      Screen
 	principalID string
+	tenantID    string
+	checkID     int
 	err         error
 }
 
@@ -216,6 +245,7 @@ func NewModel(runtime Runtime) Model {
 		duration:        duration,
 		spinner:         activity,
 		summaryViewport: viewport.New(0, 0),
+		detailsViewport: viewport.New(0, 0),
 		width:           96,
 		height:          30,
 	}
@@ -223,6 +253,8 @@ func NewModel(runtime Runtime) Model {
 		model.screen = ScreenTenants
 		model.checkingTenants = true
 		model.tenantCheck = 1
+		model.beginOperation("tenants")
+		model.recordActivity("Loading tenants", false)
 	}
 	model.resizeComponents()
 	return model
@@ -250,11 +282,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.resizeComponents()
 		return m, nil
 	case spinner.TickMsg:
-		if !m.loading && !m.checkingTenants && !m.checkingAccount && !m.preparingPolicies && !m.waitingForPolicies {
+		if !m.loading && !m.checkingAuthentication && !m.checkingTenants && !m.checkingAccount && !m.preparingPolicies && !m.waitingForPolicies {
 			return m, nil
 		}
 		var cmd tea.Cmd
 		m.spinner, cmd = m.spinner.Update(typed)
+		m.syncSummaryViewportSize()
 		return m, cmd
 	case updateCheckedMsg:
 		if typed.err == nil {
@@ -269,9 +302,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.cancelDiscovery(false)
+		m.endOperation("discovery")
 		m.loading = false
 		m.err = typed.err
 		if typed.err != nil {
+			m.recordActivity("Assignment discovery failed", true)
 			delete(m.discoveryCache, key)
 			m.assignmentList = newAssignmentList(nil)
 			if accountUnavailableError(typed.err) {
@@ -279,6 +314,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
+		m.recordActivity(fmt.Sprintf("Assignments ready: %d", len(typed.assignments)), false)
 		entry := discoveryEntry{assignments: typed.assignments, policiesReady: true, generation: typed.checkID}
 		m.assignmentList = newAssignmentList(typed.assignments)
 		m.listCursor = 0
@@ -288,6 +324,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			entry.policiesReady = false
 			m.policiesReady = false
 			m.preparingPolicies = true
+			m.beginOperation("policies")
+			m.recordActivity("Loading activation requirements", false)
 			m.discoveryCache[key] = entry
 			ctx, cancel := context.WithCancel(azureauth.WithTenant(context.Background(), typed.tenantID))
 			m.discoveryCancel = cancel
@@ -306,12 +344,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case assignmentsPreparedMsg:
 		entry, ok := m.discoveryCache[typed.key]
-		if !ok || entry.generation != typed.generation {
+		if !ok || entry.generation != typed.generation || typed.key.tenantID != m.selectedTenant.ID {
 			return m, nil
 		}
 		m.cancelDiscovery(false)
 		current := typed.key == (discoveryKey{tenantID: m.selectedTenant.ID, section: m.activeSection})
+		m.endOperation("policies")
 		if typed.err != nil {
+			m.recordActivity("Activation requirements failed", true)
 			if accountUnavailableError(typed.err) {
 				m.markAccountUnavailable(typed.err)
 				return m, nil
@@ -324,6 +364,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
+		m.recordActivity("Activation requirements ready", false)
 		entry.assignments = typed.assignments
 		entry.policiesReady = true
 		m.discoveryCache[typed.key] = entry
@@ -346,24 +387,85 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.openActivationForm()
 		}
 		return m, nil
+	case activationItemStartedMsg:
+		if m.screen != ScreenProgress || !m.loading || typed.generation != m.activationGeneration || typed.tenantID != m.selectedTenant.ID || typed.index != m.activationDone || m.activationCurrent != "" {
+			return m, nil
+		}
+		m.activationCurrent = sanitizeActivityLabel(typed.assignment.DisplayName)
+		if m.activationCurrent == "" {
+			m.activationCurrent = "Assignment"
+		}
+		m.recordActivity("Activating "+m.activationCurrent, false)
+		return m, typed.activate
+	case activationItemResultMsg:
+		if m.screen != ScreenProgress || !m.loading || typed.generation != m.activationGeneration || typed.tenantID != m.selectedTenant.ID || typed.index != m.activationDone || m.activationCurrent == "" {
+			return m, nil
+		}
+		outcome := "Activation completed: "
+		if typed.result.PendingApproval() {
+			outcome = "Approval pending: "
+		} else if typed.result.Failure() {
+			outcome = "Activation failed: "
+		}
+		m.recordActivity(outcome+m.activationCurrent, typed.result.Failure())
+		m.activationCurrent = ""
+		m.activationDone++
+		m.summary.results = append(m.summary.results, typed.result)
+		switch {
+		case typed.result.Success():
+			m.summary.activated = append(m.summary.activated, typed.result)
+		case typed.result.PendingApproval():
+			m.summary.pendingApproval = append(m.summary.pendingApproval, typed.result)
+		case typed.result.Failure():
+			m.summary.failed = append(m.summary.failed, typed.result)
+		}
+		if typed.accountErr != nil {
+			m.activationAccountErr = typed.accountErr
+		}
+		if typed.next != nil {
+			return m, typed.next
+		}
+		completed := activationCompletedMsg{results: m.summary.results, accountErr: m.activationAccountErr, tenantID: m.selectedTenant.ID, generation: m.activationGeneration}
+		return m, func() tea.Msg { return completed }
 	case activationCompletedMsg:
+		if m.screen != ScreenProgress || !m.loading || typed.generation != m.activationGeneration || typed.tenantID != m.selectedTenant.ID || m.activationDone != m.activationTotal {
+			return m, nil
+		}
+		done, total := m.activationDone, m.activationTotal
+		failed := len(m.summary.failed) > 0
 		if typed.accountErr != nil {
 			m.markAccountUnavailable(typed.accountErr)
+		}
+		m.activationDone, m.activationTotal = done, total
+		m.activationCurrent = ""
+		m.activationAccountErr = nil
+		m.endOperation("activation")
+		if failed {
+			m.recordActivity("Activation batch completed with failures", true)
+		} else {
+			m.recordActivity("Activation batch completed", false)
 		}
 		m.loading = false
 		m.cancelDiscovery(true)
 		delete(m.discoveryCache, discoveryKey{tenantID: m.selectedTenant.ID, section: m.activeSection})
 		m.summary = newSummary(typed.results)
 		m.screen = ScreenSummary
+		m.syncSummaryViewportSize()
 		m.refreshSummaryViewport()
 		return m, nil
 	case stepUpCompletedMsg:
+		if typed.tenantID != m.selectedTenant.ID || typed.checkID != m.authenticationCheck {
+			return m, nil
+		}
+		m.authenticationCheck++
 		origin := typed.origin
 		if origin == "" {
 			origin = ScreenConfirmation
 		}
 		m.screen = origin
+		m.endOperation("authentication")
 		if typed.err != nil {
+			m.recordActivity("Step-up authentication failed", true)
 			if accountUnavailableError(typed.err) {
 				m.markAccountUnavailable(typed.err)
 				return m, nil
@@ -371,6 +473,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.err = fmt.Errorf("step-up authentication failed: %w", typed.err)
 			return m, nil
 		}
+		m.recordActivity("Step-up authentication completed", false)
 		authenticationContext, mfaRequired, err := authenticationRequirement(typed.selected)
 		if err != nil {
 			m.err = err
@@ -385,8 +488,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.checkingAuthentication = false
+		m.endOperation("authentication")
 		m.screen = typed.origin
 		if typed.err != nil {
+			m.recordActivity("Authentication preflight failed", true)
 			if accountUnavailableError(typed.err) {
 				m.markAccountUnavailable(typed.err)
 				return m, nil
@@ -399,6 +504,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.clearAccountWorkflow()
 			m.screen = typed.origin
 			m.err = fmt.Errorf("Azure CLI principal changed from %s to %s during authentication; sign in as the original account and retry", typed.expectedPrincipalID, typed.authentication.PrincipalID)
+			m.recordActivity("Account identity changed during authentication", true)
 			return m, nil
 		}
 		if m.accountPrincipalID != "" && !strings.EqualFold(m.accountPrincipalID, typed.authentication.PrincipalID) {
@@ -409,6 +515,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.accountCheckedAt = time.Time{}
 			m.accountPrincipalID = typed.authentication.PrincipalID
 			m.err = principalChangedError(previous, typed.authentication.PrincipalID)
+			m.recordActivity("Account identity changed; assignments cleared", true)
 			return m, nil
 		}
 		if m.accountPrincipalID == "" && typed.authentication.PrincipalID != "" {
@@ -416,24 +523,30 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.accountPrincipalID = typed.authentication.PrincipalID
 		}
 		if typed.authentication.Satisfied {
+			m.recordActivity("Authentication preflight completed", false)
 			return m.startActivation(typed.selected, typed.authentication)
 		}
 		if typed.afterStepUp {
+			m.recordActivity("Authentication requirements not satisfied", true)
 			m.err = errors.New("step-up authentication completed but the ARM token does not satisfy the required claims")
 			return m, nil
 		}
+		m.recordActivity("Step-up authentication required", false)
 		return m.startStepUp(typed.selected, typed.mfaRequired, typed.authenticationContext, typed.origin, typed.authentication.PrincipalID)
 	case tenantsCheckedMsg:
 		if typed.checkID != m.tenantCheck {
 			return m, nil
 		}
 		m.checkingTenants = false
+		m.endOperation("tenants")
 		m.tenantErr = typed.err
 		if typed.err != nil {
+			m.recordActivity("Tenant loading failed", true)
 			m.refreshingTenants = false
 			m.screen = ScreenTenants
 			return m, nil
 		}
+		m.recordActivity("Tenants ready", false)
 		m.tenants = typed.tenants
 		m.clampTenantCursor()
 		if m.refreshingTenants {
@@ -544,7 +657,7 @@ func (m Model) View() string {
 	if m.accountUnavailable() {
 		content = warningStyle.Width(m.contentWidth()-4).Render(fmt.Sprintf("Account unavailable\nRun az login --tenant %s, then press r to reload.\n%s", m.selectedTenant.ID, m.accountErr)) + "\n\n" + content
 	}
-	return appFrameStyle.Width(m.frameWidth()).Render(content)
+	return appFrameStyle.Width(m.frameWidth()).Render(m.withActivity(content))
 }
 
 func (m Model) updateTenants(key tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -574,6 +687,8 @@ func (m Model) updateTenants(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.tenantCheck++
 			m.checkingTenants = true
 			m.tenantErr = nil
+			m.beginOperation("tenants")
+			m.recordActivity("Retrying tenant loading", false)
 			return m, tea.Batch(m.checkTenants(m.tenantCheck), m.spinner.Tick)
 		}
 	}
@@ -675,6 +790,7 @@ func (m Model) updateAssignments(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "i":
 			if len(m.assignmentList.filtered(m.query)) > 0 {
 				m.screen = ScreenDetails
+				m.detailsViewport.GotoTop()
 			}
 		case "a":
 			m.toggleAllFiltered()
@@ -686,8 +802,12 @@ func (m Model) updateAssignments(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m Model) updateDetails(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if key.Type == tea.KeyEsc || key.Type == tea.KeyEnter || key.String() == "b" {
 		m.screen = ScreenAssignments
+		return m, nil
 	}
-	return m, nil
+	m.syncDetailsViewport()
+	var cmd tea.Cmd
+	m.detailsViewport, cmd = m.detailsViewport.Update(key)
+	return m, cmd
 }
 
 func (m Model) updateActivation(key tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -744,6 +864,8 @@ func (m Model) updateConfirmation(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.checkingAuthentication = false
 		m.authenticationCheck++
+		m.endOperation("authentication")
+		m.recordActivity("Authentication check canceled", false)
 		m.screen = ScreenActivation
 		return m.focusDuration(m.durationIndex)
 	}
@@ -784,6 +906,7 @@ func (m Model) beginAuthentication(selected []pim.EligibleAssignment) (tea.Model
 	authenticationContext, mfaRequired, err := authenticationRequirement(selected)
 	if err != nil {
 		m.err = err
+		m.recordActivity("Authentication requirements could not be combined", true)
 		return m, nil
 	}
 	if m.runtime.ARMAuthentication != nil && m.activeSection == SectionAzureResources {
@@ -801,16 +924,22 @@ func (m Model) beginAuthentication(selected []pim.EligibleAssignment) (tea.Model
 func (m Model) startStepUp(selected []pim.EligibleAssignment, mfaRequired bool, authenticationContext string, origin Screen, principalID string) (tea.Model, tea.Cmd) {
 	if m.runtime.StepUpCommand == nil {
 		m.err = errors.New("step-up authentication is unavailable")
+		m.recordActivity("Step-up authentication unavailable", true)
 		return m, nil
 	}
 	command, err := m.runtime.StepUpCommand(m.selectedTenant.ID, mfaRequired, authenticationContext)
 	if err != nil {
 		m.err = err
+		m.recordActivity("Step-up authentication could not start", true)
 		return m, nil
 	}
 	m.err = nil
+	m.authenticationCheck++
+	tenantID, checkID := m.selectedTenant.ID, m.authenticationCheck
+	m.beginOperation("authentication")
+	m.recordActivity("Starting step-up authentication", false)
 	return m, tea.ExecProcess(command, func(err error) tea.Msg {
-		return stepUpCompletedMsg{selected: selected, origin: origin, principalID: principalID, err: err}
+		return stepUpCompletedMsg{selected: selected, origin: origin, principalID: principalID, tenantID: tenantID, checkID: checkID, err: err}
 	})
 }
 
@@ -818,7 +947,9 @@ func (m Model) startAuthenticationCheck(selected []pim.EligibleAssignment, mfaRe
 	m.authenticationCheck++
 	m.checkingAuthentication = true
 	m.err = nil
-	return m, m.checkAuthentication(selected, mfaRequired, authenticationContext, afterStepUp, m.authenticationCheck, origin, expectedPrincipalID)
+	m.beginOperation("authentication")
+	m.recordActivity("Checking authentication requirements", false)
+	return m, tea.Batch(m.checkAuthentication(selected, mfaRequired, authenticationContext, afterStepUp, m.authenticationCheck, origin, expectedPrincipalID), m.spinner.Tick)
 }
 
 func (m Model) checkAuthentication(selected []pim.EligibleAssignment, mfaRequired bool, authenticationContext string, afterStepUp bool, checkID int, origin Screen, expectedPrincipalID string) tea.Cmd {
@@ -860,6 +991,14 @@ func (m Model) startActivation(selected []pim.EligibleAssignment, authentication
 	m.screen = ScreenProgress
 	m.loading = true
 	m.err = nil
+	m.activationGeneration++
+	m.activationTotal = len(selected)
+	m.activationDone = 0
+	m.activationCurrent = ""
+	m.activationAccountErr = nil
+	m.summary = newSummary(nil)
+	m.beginOperation("activation")
+	m.recordActivity(fmt.Sprintf("Starting activation batch: %d", len(selected)), false)
 	return m, tea.Batch(m.activateSelected(selected, authentication), m.spinner.Tick)
 }
 
@@ -868,6 +1007,8 @@ func (m Model) updateSummary(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if key.Type == tea.KeyEsc {
 			m.checkingAuthentication = false
 			m.authenticationCheck++
+			m.endOperation("authentication")
+			m.recordActivity("Authentication check canceled", false)
 			return m.beginDiscovery(m.activeSection, true)
 		}
 		return m, nil
@@ -892,6 +1033,7 @@ func (m Model) updateSummary(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 			for _, result := range retryable {
 				assignments = append(assignments, result.Assignment)
 			}
+			m.recordActivity(fmt.Sprintf("Retrying failed activations: %d", len(assignments)), false)
 			return m.beginAuthentication(assignments)
 		}
 	}
@@ -918,6 +1060,7 @@ func (m Model) beginDiscovery(section Section, refresh bool) (tea.Model, tea.Cmd
 		m.policiesReady = entry.policiesReady
 		m.preparingPolicies = !entry.policiesReady
 		m.waitingForPolicies = false
+		m.recordActivity(fmt.Sprintf("Cached assignments ready: %d", len(entry.assignments)), false)
 		return m, accountCheck
 	}
 	m.cancelDiscovery(true)
@@ -931,6 +1074,8 @@ func (m Model) beginDiscovery(section Section, refresh bool) (tea.Model, tea.Cmd
 	m.assignmentList = newAssignmentList(nil)
 	m.listCursor = 0
 	m.discoveryCheck++
+	m.beginOperation("discovery")
+	m.recordActivity("Discovering assignments", false)
 	ctx, cancel := context.WithCancel(azureauth.WithTenant(context.Background(), m.selectedTenant.ID))
 	m.discoveryCancel = cancel
 	m.discoveryCancelKey = key
@@ -1038,6 +1183,13 @@ func (m *Model) clearTenantWorkflow() {
 	m.cancelDiscovery(true)
 	m.discoveryCheck++
 	m.authenticationCheck++
+	m.activationGeneration++
+	m.activationTotal = 0
+	m.activationDone = 0
+	m.activationCurrent = ""
+	m.activationAccountErr = nil
+	m.activityEntries = nil
+	m.operationStarted = nil
 	m.checkingAuthentication = false
 	m.loading = false
 	m.policiesReady = false
@@ -1047,6 +1199,8 @@ func (m *Model) clearTenantWorkflow() {
 	m.query = ""
 	m.searchMode = false
 	m.assignmentList = newAssignmentList(nil)
+	m.detailsViewport.SetContent("")
+	m.detailsViewport.GotoTop()
 	m.form = activationForm{durations: map[string]string{}}
 	m.justification.SetValue("")
 	m.duration.SetValue("")
@@ -1183,6 +1337,8 @@ func (m *Model) cancelDiscovery(deletePending bool) {
 	if deletePending {
 		delete(m.discoveryCache, m.discoveryCancelKey)
 	}
+	m.endOperation("discovery")
+	m.endOperation("policies")
 	m.discoveryCancelKey = discoveryKey{}
 }
 
@@ -1197,49 +1353,50 @@ func (m Model) activateSelected(selected []pim.EligibleAssignment, authenticatio
 	provider := m.providerForSection(m.activeSection)
 	justification := strings.TrimSpace(m.form.justification)
 	ctx := arm.WithAccessToken(m.tenantContext(), authentication.AccessToken)
-	return func() tea.Msg {
-		results := make([]pim.ActivationResult, 0, len(selected))
-		if provider == nil {
-			for _, assignment := range selected {
-				results = append(results, pim.ActivationResult{
-					Assignment: assignment,
-					Status:     pim.ActivationStatusFailed,
-					Message:    fmt.Sprintf("provider for %s is unavailable", m.activeSection),
-				})
-			}
-			return activationCompletedMsg{results: results}
-		}
-		var accountErr error
-		for _, assignment := range selected {
-			requestAssignment := assignment
-			if m.activeSection == SectionAzureResources && authentication.PrincipalID != "" {
-				requestAssignment.PrincipalID = authentication.PrincipalID
-			}
-			request := pim.ActivationRequest{
-				Assignment:    requestAssignment,
-				Justification: justification,
-				DurationISO:   strings.TrimSpace(m.form.durations[assignment.ID]),
-			}
-			result, err := provider.Activate(ctx, request)
-			if err != nil {
-				if accountUnavailableError(err) {
-					accountErr = err
-				}
-				results = append(results, pim.ActivationResult{
-					Assignment: assignment,
-					Status:     pim.ActivationStatusFailed,
-					Message:    err.Error(),
-					Retryable:  activation.IsRetryable(err),
-				})
-				continue
-			}
-			if result.Assignment.ID == "" {
-				result.Assignment = assignment
-			}
-			results = append(results, result)
-		}
-		return activationCompletedMsg{results: results, accountErr: accountErr}
+	tenantID, generation := m.selectedTenant.ID, m.activationGeneration
+	if len(selected) == 0 {
+		return func() tea.Msg { return activationCompletedMsg{tenantID: tenantID, generation: generation} }
 	}
+	var start func(int) tea.Cmd
+	start = func(index int) tea.Cmd {
+		assignment := selected[index]
+		return func() tea.Msg {
+			return activationItemStartedMsg{
+				assignment: assignment, tenantID: tenantID, generation: generation, index: index,
+				activate: func() tea.Msg {
+					requestAssignment := assignment
+					if m.activeSection == SectionAzureResources && authentication.PrincipalID != "" {
+						requestAssignment.PrincipalID = authentication.PrincipalID
+					}
+					var result pim.ActivationResult
+					var err error
+					if provider == nil {
+						err = fmt.Errorf("provider for %s is unavailable", m.activeSection)
+					} else {
+						result, err = provider.Activate(ctx, pim.ActivationRequest{
+							Assignment: requestAssignment, Justification: justification,
+							DurationISO: strings.TrimSpace(m.form.durations[assignment.ID]),
+						})
+					}
+					msg := activationItemResultMsg{tenantID: tenantID, generation: generation, index: index}
+					if err != nil {
+						result = pim.ActivationResult{Assignment: assignment, Status: pim.ActivationStatusFailed, Message: err.Error(), Retryable: activation.IsRetryable(err)}
+						if accountUnavailableError(err) {
+							msg.accountErr = err
+						}
+					} else if result.Assignment.ID == "" {
+						result.Assignment = assignment
+					}
+					msg.result = result
+					if index+1 < len(selected) {
+						msg.next = start(index + 1)
+					}
+					return msg
+				},
+			}
+		}
+	}
+	return start(0)
 }
 
 func (m Model) checkTenants(checkID int) tea.Cmd {

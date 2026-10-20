@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/mathwro/pim-manager/internal/azureauth"
 	"github.com/mathwro/pim-manager/internal/pim"
 )
@@ -27,7 +28,6 @@ func (m Model) viewTenants() string {
 	b.WriteString("\n\n")
 	if m.checkingTenants {
 		b.WriteString(panelStyle.Width(m.contentWidth() - 6).Render(fmt.Sprintf("%s  Checking Azure CLI tenants...", m.spinner.View())))
-		b.WriteString(m.footer([]keyHint{{"q", "quit"}}))
 		return b.String()
 	}
 	if m.tenantErr != nil {
@@ -36,7 +36,6 @@ func (m Model) viewTenants() string {
 			guidance = "Run az login, then press r to retry."
 		}
 		b.WriteString(errorStyle.Width(m.contentWidth() - 4).Render("Azure sign-in required\n" + guidance + "\n" + mutedStyle.Render(m.tenantErr.Error())))
-		b.WriteString(m.footer([]keyHint{{"r", "retry"}, {"?", "help"}, {"q", "quit"}}))
 		return b.String()
 	}
 	start, end := m.tenantWindow(len(m.tenants))
@@ -56,7 +55,6 @@ func (m Model) viewTenants() string {
 	if start > 0 || end < len(m.tenants) {
 		b.WriteString(mutedStyle.Render(fmt.Sprintf("  Showing %d-%d of %d\n", start+1, end, len(m.tenants))))
 	}
-	b.WriteString(m.footer([]keyHint{{"up/down", "move"}, {"enter", "select"}, {"r", "refresh"}, {"?", "help"}, {"q", "quit"}}))
 	return b.String()
 }
 
@@ -80,24 +78,15 @@ func (m Model) viewHome() string {
 	b.WriteString(m.stepLine(1))
 	b.WriteString("\n\n")
 	b.WriteString(m.tenantPanel())
-	if m.availableUpdate != "" {
-		b.WriteString("\n")
-		b.WriteString(warningStyle.Render(fmt.Sprintf("Update %s available — exit and run: pim-manager update", m.availableUpdate)))
-		b.WriteString("\n")
-	} else {
-		b.WriteString("\n\n")
-	}
-	b.WriteString(violetStyle.Render("Choose where to request privileged access"))
 	b.WriteString("\n")
-	b.WriteString(mutedStyle.Render("Assignments stay inside one Azure PIM area per activation batch."))
 	if m.availableUpdate != "" {
+		b.WriteString(warningStyle.Width(m.contentWidth()).Render(fmt.Sprintf("Update %s available — exit and run: pim-manager update", m.availableUpdate)))
 		b.WriteString("\n")
-	} else {
-		b.WriteString("\n\n")
 	}
-	b.WriteString(mutedStyle.Render("Entra Roles and Groups are paused until Azure CLI can request the required\nMicrosoft Graph PIM permissions."))
-	b.WriteString("\n\n")
-
+	b.WriteString(violetStyle.Render(truncateText("Choose where to request privileged access", m.contentWidth())))
+	b.WriteString("\n")
+	b.WriteString(mutedStyle.Width(m.contentWidth()).Render("Entra Roles and Groups are paused: Microsoft Graph PIM permissions are required."))
+	b.WriteString("\n")
 	descriptions := map[Section]string{
 		SectionEntra:          "Directory roles across your Microsoft Entra tenant",
 		SectionAzureResources: "RBAC roles for subscriptions, groups, and resources",
@@ -110,16 +99,13 @@ func (m Model) viewHome() string {
 			marker = "> "
 			style = activeCardStyle
 		}
-		body := fmt.Sprintf("%s%s\n  %s", marker, section, mutedStyle.Render(descriptions[section]))
+		body := marker + string(section)
+		if m.height >= 28 {
+			body += "\n  " + mutedStyle.Render(truncateText(descriptions[section], m.contentWidth()-9))
+		}
 		b.WriteString(style.Width(m.contentWidth() - 4).Render(body))
 		b.WriteString("\n")
 	}
-
-	hints := []keyHint{{"up/down", "move"}, {"enter", "open"}, {"r", "refresh"}, {"?", "help"}, {"q", "quit"}}
-	if len(m.tenants) > 1 {
-		hints = append([]keyHint{{"esc", "change account"}}, hints...)
-	}
-	b.WriteString(m.footer(hints))
 	return b.String()
 }
 
@@ -138,7 +124,6 @@ func (m Model) viewAssignments() string {
 		b.WriteString(panelStyle.Width(m.contentWidth() - 6).Render(
 			fmt.Sprintf("%s  Discovering %s...\n%s", m.spinner.View(), m.activeSection, mutedStyle.Render("Azure may take a moment to return every eligible assignment.")),
 		))
-		b.WriteString(m.footer([]keyHint{{"esc", "back"}, {"q", "quit"}}))
 		return b.String()
 	}
 	if assignmentError := m.assignmentError(); assignmentError != "" {
@@ -146,7 +131,6 @@ func (m Model) viewAssignments() string {
 		b.WriteString("\n")
 	}
 	if m.accountUnavailable() || (m.err != nil && len(m.assignmentList.items) == 0) {
-		b.WriteString(m.footer([]keyHint{{"r", "refresh"}, {"esc", "back"}, {"q", "quit"}}))
 		return b.String()
 	}
 	if m.preparingPolicies {
@@ -164,6 +148,11 @@ func (m Model) viewAssignments() string {
 	}
 	if m.searchMode {
 		searchLabel += "_"
+	}
+	if m.searchMode {
+		searchLabel = ansi.TruncateLeft(searchLabel, max(0, lipgloss.Width(searchLabel)-(m.contentWidth()-8)), "...")
+	} else {
+		searchLabel = truncateText(searchLabel, m.contentWidth()-8)
 	}
 	b.WriteString(fieldStyle.Width(m.contentWidth() - 4).Render(searchLabel))
 	b.WriteString("\n")
@@ -226,24 +215,50 @@ func (m Model) viewAssignments() string {
 		}
 	}
 
-	b.WriteString(m.assignmentFooter())
 	return b.String()
 }
 
 func (m Model) viewDetails() string {
+	m.syncDetailsViewport()
+	content := m.header("Assignment details", string(m.activeSection)) + "\n\n" + m.detailsViewport.View()
+	if notice := m.detailsNotice(); notice != "" {
+		content += "\n" + notice
+	}
+	return content
+}
+
+func (m Model) detailsNotice() string {
+	if !m.policiesReady && !m.preparingPolicies {
+		return warningStyle.Width(m.contentWidth()).Render("Activation requirements are unavailable; press r to retry discovery.")
+	}
+	return ""
+}
+
+func (m *Model) syncDetailsViewport() {
+	m.detailsViewport.Width = m.contentWidth()
+	height := m.bodyHeight() - lipgloss.Height(m.header("Assignment details", string(m.activeSection))) - 1
+	if notice := m.detailsNotice(); notice != "" {
+		height -= lipgloss.Height(notice)
+	}
+	m.detailsViewport.Height = max(1, height)
+	m.detailsViewport.SetContent(lipgloss.NewStyle().Width(m.detailsViewport.Width).Render(m.detailsContent()))
+}
+
+func (m Model) detailsContent() string {
 	var b strings.Builder
-	b.WriteString(m.header("Assignment details", string(m.activeSection)))
-	b.WriteString("\n\n")
 	assignment, ok := m.focusedAssignment()
 	if !ok {
 		b.WriteString(errorStyle.Render("The focused assignment is no longer available."))
-		b.WriteString(m.footer([]keyHint{{"esc", "back"}}))
 		return b.String()
 	}
 	b.WriteString(accentStyle.Render(displayName(assignment)))
 	b.WriteString("\n")
 	b.WriteString(mutedStyle.Render(displayScope(assignment)))
 	b.WriteString("\n\n")
+	if !m.policiesReady && !m.preparingPolicies && m.err != nil {
+		b.WriteString(errorStyle.Width(m.contentWidth() - 2).Render("Error: " + m.err.Error()))
+		b.WriteString("\n\n")
+	}
 	status := "Available"
 	activeUntil := ""
 	if assignment.Active {
@@ -294,20 +309,6 @@ func (m Model) viewDetails() string {
 		}
 		b.WriteString(fmt.Sprintf("%-22s %s\n", mutedStyle.Render(row[0]), row[1]))
 	}
-	detailHints := []keyHint{{"esc", "back to assignments"}, {"q", "quit"}}
-	if !m.policiesReady && !m.preparingPolicies {
-		if m.err != nil {
-			message := strings.Join(strings.Fields(m.err.Error()), " ")
-			const prefix = "Error: "
-			b.WriteString("\n")
-			b.WriteString(errorStyle.Render(prefix + truncateMiddle(message, m.contentWidth()-4-len(prefix))))
-		}
-		b.WriteString("\n")
-		b.WriteString(warningStyle.Render("Activation requirements are unavailable; press r to retry discovery."))
-		b.WriteString("\n")
-		detailHints = []keyHint{{"r", "retry discovery"}, {"esc", "back to assignments"}, {"q", "quit"}}
-	}
-	b.WriteString(m.footer(detailHints))
 	return b.String()
 }
 
@@ -318,7 +319,8 @@ func (m Model) viewActivation() string {
 	b.WriteString(m.stepLine(3))
 	b.WriteString("\n\n")
 	selected := m.assignmentList.selected()
-	b.WriteString(fmt.Sprintf("One request will be applied to %s.\n\n", accentStyle.Render(fmt.Sprintf("%d selected assignments", len(selected)))))
+	b.WriteString(accentStyle.Render(fmt.Sprintf("%d selected assignments", len(selected))))
+	b.WriteString("\n\n")
 
 	required := m.form.requiredJustifications(selected)
 	justificationLabel := "Justification — optional"
@@ -360,7 +362,6 @@ func (m Model) viewActivation() string {
 		b.WriteString(mutedStyle.Render(fmt.Sprintf("  Showing %d-%d of %d durations", start+1, end, len(selected))))
 		b.WriteString("\n")
 	}
-	b.WriteString(m.footer([]keyHint{{"tab", "switch field"}, {"enter", "next / review"}, {"esc", "back"}}))
 	return b.String()
 }
 
@@ -379,7 +380,9 @@ func (m Model) viewConfirmation() string {
 		if index == m.durationIndex {
 			marker = "> "
 		}
-		b.WriteString(fmt.Sprintf("%s%s  %s  %s\n", marker, displayName(selected[index]), accentStyle.Render(m.form.durations[selected[index].ID]), mutedStyle.Render(displayScope(selected[index]))))
+		row := fmt.Sprintf("%s%s  %s  %s", marker, displayName(selected[index]), m.form.durations[selected[index].ID], displayScope(selected[index]))
+		b.WriteString(truncateText(row, m.contentWidth()))
+		b.WriteString("\n")
 	}
 	if start > 0 || end < len(selected) {
 		b.WriteString(mutedStyle.Render(fmt.Sprintf("  Showing %d-%d of %d assignments", start+1, end, len(selected))))
@@ -389,10 +392,14 @@ func (m Model) viewConfirmation() string {
 	if justification == "" {
 		justification = "(none)"
 	}
-	b.WriteString("\n")
-	b.WriteString(panelStyle.Width(m.contentWidth() - 6).Render(
-		fmt.Sprintf("%s\n%s", violetStyle.Render("Justification"), justification),
-	))
+	if m.height < 28 {
+		b.WriteString(violetStyle.Render("Justification: ") + truncateText(strings.Join(strings.Fields(justification), " "), m.contentWidth()-15))
+	} else {
+		b.WriteString("\n")
+		b.WriteString(panelStyle.Width(m.contentWidth() - 6).Render(
+			fmt.Sprintf("%s\n%s", violetStyle.Render("Justification"), justification),
+		))
+	}
 	b.WriteString("\n\n")
 	authenticationContext, mfaRequired, authenticationErr := authenticationRequirement(selected)
 	switch {
@@ -411,7 +418,6 @@ func (m Model) viewConfirmation() string {
 		b.WriteString("\n")
 		b.WriteString(errorStyle.Render(m.err.Error()))
 	}
-	b.WriteString(m.footer([]keyHint{{"up/down", "review"}, {"enter", "activate"}, {"e", "edit request"}, {"esc", "back"}}))
 	return b.String()
 }
 
@@ -421,37 +427,39 @@ func (m Model) viewProgress() string {
 	b.WriteString("\n")
 	b.WriteString(m.stepLine(5))
 	b.WriteString("\n\n")
-	b.WriteString(panelStyle.Width(m.contentWidth() - 6).Render(
-		fmt.Sprintf("%s  Submitting %d activation requests\n%s", m.spinner.View(), len(m.assignmentList.selected()), mutedStyle.Render("The batch continues if an individual assignment fails.")),
-	))
-	b.WriteString(m.footer([]keyHint{{"ctrl+c", "quit"}}))
+	total := m.activationTotal
+	lines := []string{fmt.Sprintf("%s  %d/%d requests completed", m.spinner.View(), m.activationDone, total)}
+	if m.activationCurrent != "" {
+		lines = append(lines, "Current: "+truncateText(m.activationCurrent, m.contentWidth()-15))
+	}
+	lines = append(lines, m.resultCounts(), mutedStyle.Render("The batch continues after individual failures."))
+	b.WriteString(panelStyle.Width(m.contentWidth() - 6).Render(strings.Join(lines, "\n")))
 	return b.String()
 }
 
 func (m Model) viewSummary() string {
-	var b strings.Builder
-	b.WriteString(m.header("Activation summary", string(m.activeSection)))
-	b.WriteString("\n")
-	b.WriteString(m.stepLine(5))
-	b.WriteString("\n\n")
-	counts := lipgloss.JoinHorizontal(lipgloss.Top,
-		panelStyle.Render(successStyle.Render(fmt.Sprintf("%d activated", len(m.summary.activated)))),
-		"  ",
-		panelStyle.Render(warningStyle.Render(fmt.Sprintf("%d pending", len(m.summary.pendingApproval)))),
-		"  ",
-		panelStyle.Render(dangerStyle.Render(fmt.Sprintf("%d failed", len(m.summary.failed)))),
-	)
-	b.WriteString(counts)
-	b.WriteString("\n\n")
-	b.WriteString(m.summaryViewport.View())
-	hints := []keyHint{{"up/down", "scroll"}, {"esc", "assignments"}, {"h", "home"}, {"q", "quit"}}
-	if m.accountUnavailable() {
-		hints = append([]keyHint{{"r", "refresh account"}}, hints...)
-	} else if len(m.summary.retryableFailures()) > 0 {
-		hints = append([]keyHint{{"r", "retry failures"}}, hints...)
-	}
-	b.WriteString(m.footer(hints))
-	return b.String()
+	viewport := m.summaryViewport
+	viewport.Height = m.summaryViewportHeight()
+	return m.summaryHeading() + viewport.View()
+}
+
+func (m Model) summaryHeading() string {
+	return m.header("Activation summary", string(m.activeSection)) + "\n" + m.stepLine(5) + "\n\n" + m.resultCounts() + "\n\n"
+}
+
+func (m Model) resultCounts() string {
+	return successStyle.Render(fmt.Sprintf("%d activated", len(m.summary.activated))) + " · " +
+		warningStyle.Render(fmt.Sprintf("%d pending", len(m.summary.pendingApproval))) + " · " +
+		dangerStyle.Render(fmt.Sprintf("%d failed", len(m.summary.failed)))
+}
+
+func (m Model) summaryViewportHeight() int {
+	return max(1, m.bodyHeight()-lipgloss.Height(strings.TrimRight(m.summaryHeading(), "\n"))-1)
+}
+
+func (m *Model) syncSummaryViewportSize() {
+	m.summaryViewport.Width = m.contentWidth()
+	m.summaryViewport.Height = m.summaryViewportHeight()
 }
 
 func (m Model) viewHelp() string {
@@ -472,18 +480,24 @@ func (m Model) viewHelp() string {
 		for _, hint := range section.keys {
 			b.WriteString(fmt.Sprintf("  %-20s %s\n", keyStyle.Render(hint.key), hint.label))
 		}
-		b.WriteString("\n")
 	}
-	b.WriteString(mutedStyle.Render("Press ?, Esc, or q to close help."))
 	return b.String()
 }
 
 func (m Model) header(title, route string) string {
-	return fmt.Sprintf("%s\n%s  %s\n%s", eyebrowStyle.Render("PIM / ACCESS CONSOLE"), titleStyle.Render(title), routeStyle.Render("/ "+route), mutedStyle.Render(strings.Repeat("-", max(10, m.contentWidth()))))
+	line := titleStyle.MarginTop(0).Render(title) + "  " + routeStyle.Render(truncateText("/ "+route, m.contentWidth()-lipgloss.Width(title)-2))
+	line += "\n" + mutedStyle.Render(strings.Repeat("-", m.contentWidth()))
+	if m.height >= 28 {
+		line = eyebrowStyle.Render("PIM / ACCESS CONSOLE") + "\n" + line
+	}
+	return line
 }
 
 func (m Model) stepLine(active int) string {
 	labels := []string{"Account", "Type", "Select", "Request", "Review", "Result"}
+	if m.contentWidth() < 60 {
+		return accentStyle.Render(fmt.Sprintf("Step %d/%d · %s", active+1, len(labels), labels[active]))
+	}
 	parts := make([]string, 0, len(labels))
 	for index, label := range labels {
 		marker := "o"
@@ -502,14 +516,14 @@ func (m Model) stepLine(active int) string {
 
 func (m Model) tenantPanel() string {
 	if m.selectedTenant.ID == "" {
-		return panelStyle.Width(m.contentWidth() - 6).Render(mutedStyle.Render("No Azure tenant selected."))
+		return mutedStyle.Render("No Azure tenant selected.")
 	}
-	identity := m.accountStatus() + "  " + tenantLabel(m.selectedTenant)
-	id := mutedStyle.Render(fmt.Sprintf("%-13s %s", "Tenant", m.selectedTenant.ID))
+	identity := truncateText(m.accountStatus()+" · "+tenantLabel(m.selectedTenant), m.contentWidth())
 	if account := m.accountLabel(); account != "" {
-		identity += "\n" + account
+		identity += "\n" + mutedStyle.Render(truncateText(account, m.contentWidth()))
 	}
-	return panelStyle.Width(m.contentWidth() - 6).Render(identity + "\n" + id)
+	identity += "\n" + mutedStyle.Width(m.contentWidth()).Render("Tenant "+m.selectedTenant.ID)
+	return identity
 }
 
 func (m Model) accountStatus() string {
@@ -570,9 +584,16 @@ func (m Model) emptyAssignmentsMessage() string {
 func (m *Model) resizeComponents() {
 	inputWidth := max(20, m.contentWidth()-8)
 	m.justification.SetWidth(inputWidth)
+	if m.height < 28 {
+		m.justification.SetHeight(1)
+	} else {
+		m.justification.SetHeight(3)
+	}
 	m.duration.Width = min(28, inputWidth)
-	m.summaryViewport.Width = max(20, m.contentWidth()-2)
-	m.summaryViewport.Height = max(4, m.height-18)
+	m.syncSummaryViewportSize()
+	if m.screen == ScreenDetails {
+		m.syncDetailsViewport()
+	}
 	if len(m.summary.results) > 0 {
 		m.refreshSummaryViewport()
 	}
@@ -614,15 +635,15 @@ func (m Model) summaryContent() string {
 }
 
 func (m Model) frameWidth() int {
-	return max(42, m.width-6)
+	return max(18, m.width-6)
 }
 
 func (m Model) contentWidth() int {
-	return max(36, m.frameWidth()-4)
+	return max(12, m.frameWidth()-4)
 }
 
 func (m Model) tenantWindow(total int) (int, int) {
-	visible := min(total, max(1, (m.height-13)/2))
+	visible := min(total, max(1, (m.bodyHeight()-8)/2))
 	start := m.tenantIndex - visible + 1
 	if start < 0 {
 		start = 0
@@ -643,7 +664,7 @@ func (m Model) assignmentVisibleRows() int {
 	if assignmentError := m.assignmentError(); assignmentError != "" {
 		errorRows = lipgloss.Height(assignmentError)
 	}
-	visibleRows := max(4, m.height-19-footerExtraRows-errorRows)
+	visibleRows := max(1, m.height-19-footerExtraRows-errorRows-m.activityHeight())
 	if accountLine := m.assignmentAccountLine(); accountLine != "" {
 		visibleRows = max(1, visibleRows-lipgloss.Height(accountLine)-1)
 	}
@@ -666,7 +687,7 @@ func (m Model) assignmentWindow(total int) (int, int) {
 }
 
 func (m Model) activationDurationVisibleRows() int {
-	return max(2, m.height-24)
+	return max(1, m.height-24-m.activityHeight())
 }
 
 func (m Model) activationDurationWindow(total int) (int, int) {
@@ -682,18 +703,15 @@ func (m Model) activationDurationWindow(total int) (int, int) {
 }
 
 func (m Model) roleColumnWidth() int {
-	return max(14, (m.contentWidth()-12)*2/5)
+	return max(8, (m.contentWidth()-12)*2/5)
 }
 
 func (m Model) scopeColumnWidth() int {
-	return max(10, m.contentWidth()-m.roleColumnWidth()-19)
+	return max(6, m.contentWidth()-m.roleColumnWidth()-19)
 }
 
 func (m Model) assignmentFooter() string {
-	if m.searchMode {
-		return m.footer([]keyHint{{"type", "filter"}, {"enter", "apply"}, {"esc", "close search"}})
-	}
-	return m.footer([]keyHint{{"space", "select"}, {"a", "select all"}, {"/", "search"}, {"i", "details"}, {"enter", "continue"}, {"r", "refresh"}, {"esc", "back"}})
+	return m.footer(m.screenHints())
 }
 
 func (m Model) assignmentError() string {
@@ -767,26 +785,6 @@ func valueOrUnknown(value string) string {
 	return value
 }
 
-func truncateMiddle(value string, width int) string {
-	runes := []rune(value)
-	if len(runes) <= width {
-		return value
-	}
-	if width <= 3 {
-		return string(runes[:width])
-	}
-	prefix := (width - 3) / 2
-	suffix := width - 3 - prefix
-	return string(runes[:prefix]) + "..." + string(runes[len(runes)-suffix:])
-}
-
 func truncateText(value string, width int) string {
-	runes := []rune(value)
-	if len(runes) <= width {
-		return value
-	}
-	if width <= 3 {
-		return string(runes[:width])
-	}
-	return string(runes[:width-3]) + "..."
+	return ansi.Truncate(value, max(0, width), "...")
 }

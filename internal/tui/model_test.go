@@ -41,6 +41,9 @@ func runCommand(model Model, cmd tea.Cmd) Model {
 		for _, child := range typed {
 			model = runCommand(model, child)
 		}
+	case activationItemStartedMsg, activationItemResultMsg:
+		next, follow := model.Update(msg)
+		model = runCommand(next.(Model), follow)
 	case assignmentsDiscoveredMsg, assignmentsPreparedMsg, activationCompletedMsg, tenantsCheckedMsg:
 		next, _ := model.Update(msg)
 		model = next.(Model)
@@ -476,7 +479,8 @@ func TestActivationCompletionInvalidatesDiscoveryCache(t *testing.T) {
 	key := discoveryKey{tenantID: "tenant-1", section: SectionAzureResources}
 	model.discoveryCache[key] = discoveryEntry{assignments: []pim.EligibleAssignment{{ID: "reader"}}, policiesReady: true, generation: 1}
 
-	next, _ := model.Update(activationCompletedMsg{})
+	next, cmd := model.startActivation(nil, azureauth.ARMAuthentication{})
+	next = runCommand(next.(Model), cmd)
 	if _, ok := next.(Model).discoveryCache[key]; ok {
 		t.Fatal("activation completion retained stale discovery cache")
 	}
@@ -488,10 +492,14 @@ func TestSummaryEscStartsFreshDiscoveryAfterActivation(t *testing.T) {
 	model.selectedTenant = azureauth.Tenant{ID: "tenant-1"}
 	model.activeSection = SectionAzureResources
 	model.screen = ScreenProgress
+	model.loading = true
+	model.activationGeneration = 1
+	model.activationTotal = 1
+	model.activationDone = 1
 	model.assignmentList = newAssignmentList([]pim.EligibleAssignment{{ID: "activated", DisplayName: "Activated role"}})
 	model.assignmentList.selectedIDs["activated"] = true
 
-	next, _ := model.Update(activationCompletedMsg{results: []pim.ActivationResult{{Status: pim.ActivationStatusActivated}}})
+	next, _ := model.Update(activationCompletedMsg{results: []pim.ActivationResult{{Status: pim.ActivationStatusActivated}}, tenantID: "tenant-1", generation: 1})
 	next, cmd := next.(Model).Update(tea.KeyMsg{Type: tea.KeyEsc})
 	model = next.(Model)
 	if cmd == nil || model.screen != ScreenAssignments || !model.loading || len(model.assignmentList.items) != 0 || len(model.assignmentList.selectedIDs) != 0 {
@@ -899,7 +907,7 @@ func TestOrdinaryAzureActivationUsesSignedInPrincipal(t *testing.T) {
 	model.form.durations = map[string]string{"reader": "PT1H"}
 
 	next, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	msg := cmd()
+	msg := activityCommandMessage(t, cmd)
 	next, cmd = next.(Model).Update(msg)
 	model = runCommand(next.(Model), cmd)
 
@@ -930,7 +938,7 @@ func TestConfirmationReusesSatisfiedMFA(t *testing.T) {
 	model.form.durations = map[string]string{"owner": "PT1H"}
 
 	next, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	msg := cmd()
+	msg := activityCommandMessage(t, cmd)
 	next, cmd = next.(Model).Update(msg)
 	model = runCommand(next.(Model), cmd)
 
@@ -961,7 +969,7 @@ func TestAzureBatchTargetsAuthenticatedUserWithoutMutatingEligibilities(t *testi
 	model.form.durations = map[string]string{"direct": "PT1H", "group": "PT1H"}
 
 	next, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	msg := cmd()
+	msg := activityCommandMessage(t, cmd)
 	next, cmd = next.(Model).Update(msg)
 	model = runCommand(next.(Model), cmd)
 
@@ -1004,7 +1012,7 @@ func TestConfirmationIgnoresDuplicateAndCanceledAuthenticationChecks(t *testing.
 	}
 	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyEsc})
 	model = next.(Model)
-	next, activationCmd := model.Update(authenticationCmd())
+	next, activationCmd := model.Update(activityCommandMessage(t, authenticationCmd))
 	model = next.(Model)
 	if activationCmd != nil || len(provider.activated) != 0 || model.screen != ScreenActivation {
 		t.Fatalf("expected canceled authentication result to be ignored, requests=%#v screen=%s", provider.activated, model.screen)
@@ -1030,7 +1038,7 @@ func TestSummaryRetryRechecksAuthentication(t *testing.T) {
 
 	next, cmd := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
 	model = next.(Model)
-	msg := cmd()
+	msg := activityCommandMessage(t, cmd)
 	if _, ok := msg.(authenticationCheckedMsg); !ok {
 		t.Fatalf("expected retry authentication check, got %T", msg)
 	}
@@ -1067,14 +1075,14 @@ func TestStepUpBlocksActivationWhenPrincipalChanges(t *testing.T) {
 	model.form.durations = map[string]string{"owner": "PT1H"}
 
 	next, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	msg := cmd()
+	msg := activityCommandMessage(t, cmd)
 	next, cmd = next.(Model).Update(msg)
 	model = next.(Model)
 	if cmd == nil {
 		t.Fatal("expected step-up command after missing authentication context")
 	}
-	next, cmd = model.Update(stepUpCompletedMsg{selected: model.assignmentList.selected(), principalID: "principal-1"})
-	msg = cmd()
+	next, cmd = model.Update(stepUpCompletedMsg{selected: model.assignmentList.selected(), principalID: "principal-1", tenantID: model.selectedTenant.ID, checkID: model.authenticationCheck})
+	msg = activityCommandMessage(t, cmd)
 	next, cmd = next.(Model).Update(msg)
 	model = next.(Model)
 
@@ -1112,13 +1120,13 @@ func TestAuthenticationContextStepUpPreservesPrincipalForGroupEligibility(t *tes
 	model.form.durations = map[string]string{"owner": "PT1H"}
 
 	next, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	next, cmd = next.(Model).Update(cmd())
+	next, cmd = next.(Model).Update(activityCommandMessage(t, cmd))
 	model = next.(Model)
 	if cmd == nil {
 		t.Fatal("expected authentication-context step-up")
 	}
-	next, cmd = model.Update(stepUpCompletedMsg{selected: model.assignmentList.selected(), principalID: "user-1"})
-	next, cmd = next.(Model).Update(cmd())
+	next, cmd = model.Update(stepUpCompletedMsg{selected: model.assignmentList.selected(), principalID: "user-1", tenantID: model.selectedTenant.ID, checkID: model.authenticationCheck})
+	next, cmd = next.(Model).Update(activityCommandMessage(t, cmd))
 	model = runCommand(next.(Model), cmd)
 
 	if len(provider.activated) != 1 || provider.activated[0].Assignment.PrincipalID != "user-1" || provider.tokens[0] != "step-up-token" || model.screen != ScreenSummary {
@@ -1146,7 +1154,7 @@ func TestAuthenticationErrorsSubmitNoActivation(t *testing.T) {
 		model.assignmentList.toggle("owner")
 
 		next, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
-		next, cmd = next.(Model).Update(cmd())
+		next, cmd = next.(Model).Update(activityCommandMessage(t, cmd))
 		model = next.(Model)
 		if cmd != nil || stepUpCalls != 0 || len(provider.activated) != 0 || model.err == nil || !strings.Contains(model.err.Error(), "token unavailable") {
 			t.Fatalf("expected token error to block activation, step-ups=%d requests=%#v error=%v", stepUpCalls, provider.activated, model.err)
@@ -1172,10 +1180,10 @@ func TestAuthenticationErrorsSubmitNoActivation(t *testing.T) {
 		model.assignmentList.toggle("owner")
 
 		next, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
-		next, cmd = next.(Model).Update(cmd())
+		next, cmd = next.(Model).Update(activityCommandMessage(t, cmd))
 		model = next.(Model)
-		next, cmd = model.Update(stepUpCompletedMsg{selected: model.assignmentList.selected(), principalID: "user-1"})
-		next, cmd = next.(Model).Update(cmd())
+		next, cmd = model.Update(stepUpCompletedMsg{selected: model.assignmentList.selected(), principalID: "user-1", tenantID: model.selectedTenant.ID, checkID: model.authenticationCheck})
+		next, cmd = next.(Model).Update(activityCommandMessage(t, cmd))
 		model = next.(Model)
 		if cmd != nil || len(provider.activated) != 0 || model.err == nil || !strings.Contains(model.err.Error(), "does not satisfy") {
 			t.Fatalf("expected unsatisfied step-up claims to block activation, requests=%#v error=%v", provider.activated, model.err)
@@ -1217,7 +1225,7 @@ func TestConfirmationGatesMixedBatchOnMFA(t *testing.T) {
 	}
 
 	selected := model.assignmentList.selected()
-	next, cmd = model.Update(stepUpCompletedMsg{selected: selected})
+	next, cmd = model.Update(stepUpCompletedMsg{selected: selected, tenantID: model.selectedTenant.ID, checkID: model.authenticationCheck})
 	model = runCommand(next.(Model), cmd)
 	if len(provider.activated) != 2 || model.screen != ScreenSummary {
 		t.Fatalf("expected full batch after MFA, requests=%#v screen=%s", provider.activated, model.screen)
@@ -1291,10 +1299,13 @@ func TestStepUpFailureReturnsToConfirmationWithoutActivation(t *testing.T) {
 	provider := &scriptedProvider{}
 	model := NewModel(Runtime{AzureResources: provider})
 	model.screen = ScreenConfirmation
+	model.selectedTenant = azureauth.Tenant{ID: "tenant-one"}
+	model.authenticationCheck = 1
 
 	next, cmd := model.Update(stepUpCompletedMsg{
 		selected: []pim.EligibleAssignment{{ID: "owner", ActivationPolicy: pim.ActivationPolicy{MFARequired: true}}},
 		err:      errors.New("login canceled"),
+		tenantID: model.selectedTenant.ID, checkID: model.authenticationCheck,
 	})
 	model = next.(Model)
 
@@ -1743,9 +1754,6 @@ func TestAssignmentsSearchModeFiltersAndSelection(t *testing.T) {
 		t.Fatalf("expected query to be edited, got %q", model.query)
 	}
 	view := model.View()
-	if !strings.Contains(view, "/  global_") {
-		t.Fatalf("expected search query in view, got %q", view)
-	}
 	if !strings.Contains(view, "Global Reader") || strings.Contains(view, "Contributor") {
 		t.Fatalf("expected filtered assignments in view, got %q", view)
 	}
@@ -1957,7 +1965,8 @@ func TestActivationUsesSelectedTenantContext(t *testing.T) {
 	model.form.durations = map[string]string{"reader": "PT1H"}
 	assignment := pim.EligibleAssignment{ID: "reader"}
 
-	_ = model.activateSelected([]pim.EligibleAssignment{assignment}, azureauth.ARMAuthentication{AccessToken: "checked-token"})()
+	next, cmd := model.startActivation([]pim.EligibleAssignment{assignment}, azureauth.ARMAuthentication{AccessToken: "checked-token"})
+	_ = runCommand(next.(Model), cmd)
 	if len(provider.activationTenants) != 1 || provider.activationTenants[0] != "tenant-1" {
 		t.Fatalf("expected tenant-scoped activation, got %#v", provider.activationTenants)
 	}

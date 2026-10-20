@@ -106,10 +106,10 @@ The Bubble Tea app uses a simple stack-like screen flow:
 | Tenant selection | List Azure CLI tenants; auto-select one tenant or require a choice when multiple tenants are available. |
 | Home | Choose Azure Resources; show the selected tenant plus the Entra Roles and Groups pause explanation. |
 | Assignment list | Fetch and render eligible assignments for the selected section; support search, filter, inspect, and multi-select. |
-| Assignment details | Show source, scope, assignment identifiers, policy hints, and activation constraints for the focused item. |
+| Assignment details | Scroll through source, scope, assignment identifiers, policy hints, and activation constraints without displacing the activity dock or controls. |
 | Activation form | Enter shared justification and duration for all selected assignments. |
 | Confirmation | Review selected assignments and activation inputs before submitting. |
-| Progress | Show batch activation progress with per-assignment updates. |
+| Progress | Show the current assignment, completed/total requests, and per-assignment outcomes as the batch runs. |
 | Summary | Show activated, pending approval, and failed results; allow manual retry for retryable failures. |
 
 Keyboard behavior:
@@ -124,6 +124,12 @@ Keyboard behavior:
 | `?` | Show contextual help. |
 
 Bubbles components should be used where they fit: list or table for assignments, text input or textarea for activation form fields, spinner or progress for activation, and viewport for long summaries.
+
+All workflow screens share a bottom activity dock above contextual keyboard controls. It retains a bounded, timestamped in-memory session history and shows named in-flight stages with elapsed time, including ARM authentication preflight and retry validation. On short terminals it collapses to one status row; assignment, duration, and summary windows reserve space for the dock and controls. Unknown discovery totals use indeterminate feedback, not estimated percentages.
+
+Activation emits individual started/result updates before moving to the next assignment. Live counts and the final summary distinguish activated, pending approval, and failed outcomes; failures do not stop the remaining batch. Manual retry counts describe only the submitted retry subset. Intermediate results remain guarded by originating tenant and workflow generation. Step-up completion is similarly scoped before updating screen or activity state.
+
+Activity messages use allowlisted operation names, counts, and sanitized assignment labels. They exclude tokens, claims, justification, full request/response payloads, and raw errors; detailed diagnostics remain on existing error and summary surfaces. Tenant or principal workflow resets clear activity and operation clocks. The history is neither persisted nor presented as an audit trail.
 
 ## Activation Behavior
 
