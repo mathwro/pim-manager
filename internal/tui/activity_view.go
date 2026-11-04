@@ -123,6 +123,9 @@ func (m Model) screenHints() []keyHint {
 		if m.graphConnecting {
 			return []keyHint{{"esc", "cancel"}, {"ctrl+c", "quit"}}
 		}
+		if m.accountUnavailable() {
+			return []keyHint{{"r", "refresh account"}, {"esc", "back"}, {"q", "quit"}}
+		}
 		return []keyHint{{"enter", "open browser"}, {"up/down", "scroll"}, {"esc", "back"}, {"?", "help"}, {"q", "quit"}}
 	case ScreenAssignments:
 		if m.loading {

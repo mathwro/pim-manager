@@ -111,6 +111,30 @@ func TestGraphConnectScreenRejectsPendingARMDiscovery(t *testing.T) {
 	}
 }
 
+// After az login elsewhere, the connection screen's r must recheck the account and then allow sign-in.
+func TestGraphConnectScreenRechecksUnavailableAccount(t *testing.T) {
+	connections := 0
+	model := NewModel(Runtime{Entra: &scriptedProvider{}, GraphConnected: func(context.Context) bool { return false },
+		GraphConnect: func(context.Context) error { connections++; return nil },
+		CheckAccount: func(context.Context) (azureauth.AccountHealth, error) {
+			return azureauth.AccountHealth{TenantID: "tenant-1", PrincipalID: "user-1"}, nil
+		},
+	})
+	model.selectedTenant = azureauth.Tenant{ID: "tenant-1"}
+	model.markAccountUnavailable(fmt.Errorf("%w: run az login", azureauth.ErrAccountUnavailable))
+	next, _ := model.beginDiscovery(SectionEntra, false)
+	next, cmd := next.(Model).Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
+	model = driveGraphCommand(next.(Model), cmd)
+	if model.accountUnavailable() || model.screen != ScreenGraphConnect {
+		t.Fatalf("r did not recheck the account from the connection screen: screen=%s err=%v", model.screen, model.accountErr)
+	}
+	next, cmd = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	driveGraphCommand(next.(Model), cmd)
+	if connections != 1 {
+		t.Fatalf("recovered account could not connect Graph: connections=%d", connections)
+	}
+}
+
 func TestGraphConnectionCancelRejectsLateSuccess(t *testing.T) {
 	var connectionContext context.Context
 	resets := 0

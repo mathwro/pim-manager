@@ -41,7 +41,8 @@ func (m Model) updateGraphConnect(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	}
 	if m.accountUnavailable() {
-		return m, nil
+		// The account warning tells the user to press r after az login; recheck before allowing sign-in.
+		return m.refreshAccountAndWorkflow()
 	}
 	m.graphConnectCheck++
 	ctx, cancel := context.WithCancel(m.tenantContext())
