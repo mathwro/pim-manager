@@ -121,6 +121,7 @@ func (s *Session) begin(ctx context.Context, connect bool) (*operation, error) {
 	if connect {
 		s.resetLocked()
 		s.tenant = tenant
+		current = nil
 	} else if current == nil {
 		return nil, ErrReconnect
 	}
@@ -208,7 +209,8 @@ func (s *Session) checkARM(ctx context.Context, current *connection) error {
 	return nil
 }
 
-// Connect is the explicit consent entry point. MSAL may reuse this session silently.
+// Connect is the explicit consent entry point. It always signs in through the
+// browser; the TUI offers it only while the session is disconnected.
 func (s *Session) Connect(ctx context.Context) (err error) {
 	op, err := s.begin(ctx, true)
 	if err != nil {
@@ -219,40 +221,14 @@ func (s *Session) Connect(ctx context.Context) (err error) {
 	if err != nil {
 		return err
 	}
-	current := op.connection
-	if current != nil && !strings.EqualFold(current.principal, identity.Principal) {
-		return fmt.Errorf("Azure CLI principal changed: %w", ErrReconnect)
-	}
-	if current == nil {
-		client, clientErr := s.newClient(op.tenant)
-		if clientErr != nil {
-			return authenticationError(op.ctx, "create Microsoft Graph client", clientErr)
-		}
-		current = &connection{tenant: op.tenant, principal: identity.Principal, client: client}
-	} else {
-		copy := *current
-		current = &copy
-	}
-	current.loginHint = identity.username()
-	var result public.AuthResult
-	if current.account.HomeAccountID != "" {
-		result, err = current.client.acquireSilent(op.ctx, workflowScopes, current.account, "")
-	} else {
-		err = ErrReconnect
-	}
+	client, err := s.newClient(op.tenant)
 	if err != nil {
-		if ctxErr := op.ctx.Err(); ctxErr != nil {
-			return ctxErr
-		}
-		if current.account.HomeAccountID != "" {
-			if err = s.checkARM(op.ctx, current); err != nil {
-				return err
-			}
-		}
-		result, err = current.client.acquireInteractive(op.ctx, workflowScopes, "", current.browserHint())
-		if err != nil {
-			return authenticationError(op.ctx, "connect Microsoft Graph", err)
-		}
+		return authenticationError(op.ctx, "create Microsoft Graph client", err)
+	}
+	current := &connection{tenant: op.tenant, principal: identity.Principal, client: client, loginHint: identity.username()}
+	result, err := client.acquireInteractive(op.ctx, workflowScopes, "", current.browserHint())
+	if err != nil {
+		return authenticationError(op.ctx, "connect Microsoft Graph", err)
 	}
 	if _, err = validateResult(result, current); err != nil {
 		return err

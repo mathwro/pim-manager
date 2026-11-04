@@ -199,14 +199,11 @@ func TestSessionReusesClientAndNeverBrowsesDuringAccessToken(t *testing.T) {
 	if err := s.Connect(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Connect(ctx); err != nil {
-		t.Fatal(err)
-	}
 	token, err := s.AccessToken(ctx, "https://graph.microsoft.com/")
 	if err != nil || token == "" {
 		t.Fatalf("silent token: %q, %v", token, err)
 	}
-	if interactive != 1 || created != 1 || silent != 2 {
+	if interactive != 1 || created != 1 || silent != 1 {
 		t.Fatalf("acquisitions: browser=%d clients=%d silent=%d", interactive, created, silent)
 	}
 	client.silent = func(context.Context, []string, public.Account, string) (public.AuthResult, error) {
