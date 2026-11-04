@@ -77,6 +77,7 @@ func TestPrepareAssignmentsFailsClosedOnUnresolvablePolicies(t *testing.T) {
 		{"unknown enablement", strings.ReplaceAll(good, `"enabledRules":[]`, `"enabledRules":["Ticketing"]`)},
 		{"missing context state", strings.ReplaceAll(good, `"isEnabled":false,`, ``)},
 		{"empty enabled context", strings.ReplaceAll(good, `"isEnabled":false`, `"isEnabled":true`)},
+		{"unknown end-user rule", withEndUserRule(good, "Ticketing_EndUser_Assignment")},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			client := &policyFake{get: func(string) (string, error) { return test.response, nil }}
@@ -90,6 +91,24 @@ func TestPrepareAssignmentsFailsClosedOnUnresolvablePolicies(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Notification rules are informational; Microsoft returns three of them for every end-user activation policy.
+func TestPrepareAssignmentsAcceptsNotificationRules(t *testing.T) {
+	fixture := policyFixture("/", "DirectoryRole", "role-1", "PT8H", ``, false, "")
+	for _, id := range []string{"Notification_Admin_EndUser_Assignment", "Notification_Requestor_EndUser_Assignment", "Notification_Approver_EndUser_Assignment"} {
+		fixture = withEndUserRule(fixture, id)
+	}
+	client := &policyFake{get: func(string) (string, error) { return fixture, nil }}
+	if _, err := PrepareAssignments(context.Background(), client, []pim.EligibleAssignment{{Source: pim.AssignmentSourceEntra, RoleDefinitionID: "role-1"}}); err != nil {
+		t.Fatalf("notification rules blocked activation: %v", err)
+	}
+}
+
+func withEndUserRule(fixture, id string) string {
+	const anchor = `{"@odata.type":"#microsoft.graph.unifiedRoleManagementPolicyAuthenticationContextRule"`
+	rule := fmt.Sprintf(`{"id":%q,"target":{"caller":"EndUser","level":"Assignment","operations":["All"]}},`, id)
+	return strings.Replace(fixture, anchor, rule+anchor, 1)
 }
 
 func TestPrepareAssignmentsFollowsAssignmentAndRulePages(t *testing.T) {

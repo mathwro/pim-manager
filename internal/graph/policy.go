@@ -155,7 +155,11 @@ func normalizeActivationPolicy(rules []policyRule) (pim.ActivationPolicy, error)
 			}
 			seen[id] = true
 		default:
-			continue
+			// Notification rules only send email; any other applicable rule is a requirement this client cannot satisfy.
+			if strings.HasPrefix(id, "notification_") {
+				continue
+			}
+			return pim.ActivationPolicy{}, fmt.Errorf("Graph activation requires unsupported policy rule %s; activate it in the Microsoft Entra admin center", rule.ID)
 		}
 		switch id {
 		case "expiration_enduser_assignment":
