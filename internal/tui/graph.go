@@ -65,9 +65,13 @@ func (m Model) graphConnected(msg graphConnectedMsg) (tea.Model, tea.Cmd) {
 	}
 	m.cancelGraphConnection(false)
 	if msg.err != nil {
+		m.recordActivity("Microsoft Graph sign-in failed", true)
+		if accountUnavailableError(msg.err) {
+			m.markAccountUnavailable(msg.err)
+			return m, nil
+		}
 		m.detailsViewport.GotoTop()
 		m.err = fmt.Errorf("Microsoft Graph sign-in failed: %w", msg.err)
-		m.recordActivity("Microsoft Graph sign-in failed", true)
 		return m, nil
 	}
 	m.recordActivity("Microsoft Graph connected", false)

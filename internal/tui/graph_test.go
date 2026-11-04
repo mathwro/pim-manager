@@ -85,6 +85,19 @@ func TestGraphConnectionFailureDoesNotDiscoverOrBlockARM(t *testing.T) {
 	}
 }
 
+// An expired Azure CLI login during Graph sign-in must use the same recovery path as ARM.
+func TestGraphConnectionMarksSignedOutAccountUnavailable(t *testing.T) {
+	model := NewModel(Runtime{Entra: &scriptedProvider{}, GraphConnected: func(context.Context) bool { return false }, GraphConnect: func(context.Context) error {
+		return fmt.Errorf("check Azure CLI ARM identity: %w; run az login", azureauth.ErrAccountUnavailable)
+	}})
+	next, _ := model.beginDiscovery(SectionEntra, false)
+	next, cmd := next.(Model).Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = driveGraphCommand(next.(Model), cmd)
+	if !errors.Is(model.accountErr, azureauth.ErrAccountUnavailable) || !model.accountUnavailable() {
+		t.Fatalf("signed-out CLI account not marked unavailable: %v", model.accountErr)
+	}
+}
+
 func TestGraphConnectionCancelRejectsLateSuccess(t *testing.T) {
 	var connectionContext context.Context
 	resets := 0

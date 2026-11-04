@@ -3,6 +3,7 @@ package graphauth
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -42,5 +43,16 @@ func TestARMLoginFailurePreservesActionableLoginCommand(t *testing.T) {
 	got := authenticationError(tenantContext(), "check Azure CLI ARM identity", azureauth.ErrNotLoggedIn).Error()
 	if !strings.Contains(got, "az login --tenant "+testTenant) {
 		t.Fatalf("Azure CLI recovery command lost: %s", got)
+	}
+}
+
+// The TUI marks the account unavailable only when these sentinels survive sanitizing.
+func TestARMLoginFailureKeepsAccountSentinels(t *testing.T) {
+	cause := errors.New("ERROR: AADSTS700082 refresh token expired; run 'az login'")
+	for _, sentinel := range []error{azureauth.ErrNotLoggedIn, azureauth.ErrAccountUnavailable} {
+		got := authenticationError(tenantContext(), "check Azure CLI ARM identity", fmt.Errorf("get Azure CLI access token: %w: %w", sentinel, cause))
+		if !errors.Is(got, sentinel) || errors.Is(got, cause) {
+			t.Fatalf("want %v without the raw CLI error, got %v", sentinel, got)
+		}
 	}
 }

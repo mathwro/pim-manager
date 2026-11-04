@@ -78,7 +78,7 @@ func authenticationError(ctx context.Context, operation string, err error) error
 		}
 	}
 	action := "check tenant consent and Conditional Access policy, then try Connect Microsoft Graph again"
-	if errors.Is(err, azureauth.ErrNotLoggedIn) || strings.Contains(strings.ToLower(message), "az login") || strings.Contains(strings.ToLower(message), "not logged in") {
+	if errors.Is(err, azureauth.ErrNotLoggedIn) || errors.Is(err, azureauth.ErrAccountUnavailable) || strings.Contains(strings.ToLower(message), "az login") || strings.Contains(strings.ToLower(message), "not logged in") {
 		action = "run az login"
 		if tenant, tenantErr := selectedTenant(ctx); tenantErr == nil {
 			action += " --tenant " + tenant
@@ -91,8 +91,17 @@ func authenticationError(ctx context.Context, operation string, err error) error
 	if seen["AADSTS65001"] || seen["AADSTS65004"] || strings.Contains(message, "consent_required") {
 		action = "consent was not granted; obtain the requested delegated Microsoft Graph permissions from your tenant administrator"
 	}
+	if len(details) > 0 {
+		action = strings.Join(details, "; ") + "; " + action
+	}
+	// Wrap only the account sentinels: the TUI's account recovery path needs them, and they carry no secrets.
+	for _, sentinel := range []error{azureauth.ErrNotLoggedIn, azureauth.ErrAccountUnavailable} {
+		if errors.Is(err, sentinel) {
+			return fmt.Errorf("%s: %w; %s", operation, sentinel, action)
+		}
+	}
 	if len(details) == 0 {
 		return fmt.Errorf("%s failed; %s", operation, action)
 	}
-	return fmt.Errorf("%s: %s; %s", operation, strings.Join(details, "; "), action)
+	return fmt.Errorf("%s: %s", operation, action)
 }
