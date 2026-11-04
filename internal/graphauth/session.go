@@ -281,10 +281,9 @@ func (s *Session) Authentication(ctx context.Context, mfaRequired bool, authenti
 			auth = azureauth.ARMAuthentication{}
 		}
 	}()
+	// Silent acquisition opens no browser; the CLI identity is checked before any
+	// browser step-up and again before the token is returned.
 	current := op.connection
-	if err = s.checkARM(op.ctx, current); err != nil {
-		return auth, err
-	}
 	result, err := current.client.acquireSilent(op.ctx, workflowScopes, current.account, "")
 	if err != nil {
 		return auth, authenticationError(op.ctx, "check Microsoft Graph token; reconnect Microsoft Graph if interaction is required", err)

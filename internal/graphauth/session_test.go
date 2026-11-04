@@ -312,24 +312,27 @@ func TestAuthenticationRequestsMFAAndContextClaimsAndRejectsStepUpDrift(t *testi
 	}
 }
 
+// CLI drift must be rejected without opening a browser or returning a token, whether or not step-up is needed.
 func TestAuthenticationRejectsCLIPrincipalDriftBeforeStepUp(t *testing.T) {
-	principal := testPrincipal
-	client := &fakeMSAL{interactive: func(context.Context, []string, string, string) (public.AuthResult, error) {
-		return graphIdentity(testTenant, testPrincipal, nil, nil), nil
-	}}
-	s := testSession(client, fakeARM{check: func(context.Context) (azureauth.ARMAuthentication, error) {
-		return armIdentity(testTenant, principal), nil
-	}})
-	if err := s.Connect(tenantContext()); err != nil {
-		t.Fatal(err)
-	}
-	principal = testOtherPrincipal
-	client.silent = func(context.Context, []string, public.Account, string) (public.AuthResult, error) {
-		t.Fatal("token requested after CLI principal drift")
-		return public.AuthResult{}, nil
-	}
-	if auth, err := s.Authentication(tenantContext(), false, ""); err == nil || auth.AccessToken != "" {
-		t.Fatal("CLI drift accepted")
+	for _, mfaRequired := range []bool{false, true} {
+		principal := testPrincipal
+		client := &fakeMSAL{interactive: func(context.Context, []string, string, string) (public.AuthResult, error) {
+			return graphIdentity(testTenant, testPrincipal, nil, nil), nil
+		}}
+		s := testSession(client, fakeARM{check: func(context.Context) (azureauth.ARMAuthentication, error) {
+			return armIdentity(testTenant, principal), nil
+		}})
+		if err := s.Connect(tenantContext()); err != nil {
+			t.Fatal(err)
+		}
+		principal = testOtherPrincipal
+		client.interactive = func(context.Context, []string, string, string) (public.AuthResult, error) {
+			t.Fatal("browser opened after CLI principal drift")
+			return public.AuthResult{}, nil
+		}
+		if auth, err := s.Authentication(tenantContext(), mfaRequired, ""); !errors.Is(err, ErrReconnect) || auth.AccessToken != "" {
+			t.Fatalf("CLI drift accepted (mfa=%t): %v", mfaRequired, err)
+		}
 	}
 }
 
