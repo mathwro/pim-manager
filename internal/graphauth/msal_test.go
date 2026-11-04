@@ -6,9 +6,11 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/AzureAD/microsoft-authentication-library-for-go/apps/public"
 )
@@ -105,5 +107,34 @@ func TestRemovingDefaultChooserPreservesAllOtherAuthorizeFields(t *testing.T) {
 		if err != nil || got != tc.address {
 			t.Fatalf("unrelated prompt/hint was changed: %q %v", got, err)
 		}
+	}
+}
+
+// Helper launcher for TestBrowserLaunchDoesNotWaitForBrowserExit.
+func TestBrowserLauncherHelper(t *testing.T) {
+	switch os.Getenv("GRAPHAUTH_BROWSER_LAUNCHER") {
+	case "stay-open":
+		time.Sleep(5 * time.Second)
+		os.Exit(0)
+	case "fail":
+		os.Exit(3)
+	}
+}
+
+// MSAL processes the sign-in callback only after the opener returns; xdg-open may live as long as the browser.
+func TestBrowserLaunchDoesNotWaitForBrowserExit(t *testing.T) {
+	args := []string{"-test.run=^TestBrowserLauncherHelper$"}
+	t.Setenv("GRAPHAUTH_BROWSER_LAUNCHER", "stay-open")
+	start := time.Now()
+	if err := launchBrowser(context.Background(), os.Args[0], args, 200*time.Millisecond); err != nil {
+		t.Fatalf("running launcher reported failure: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 3*time.Second {
+		t.Fatalf("waited %s for the browser to exit", elapsed)
+	}
+	t.Setenv("GRAPHAUTH_BROWSER_LAUNCHER", "fail")
+	var launchErr *browserError
+	if err := launchBrowser(context.Background(), os.Args[0], args, 10*time.Second); !errors.As(err, &launchErr) {
+		t.Fatalf("failed launcher was not reported: %v", err)
 	}
 }

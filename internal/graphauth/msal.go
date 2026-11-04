@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/AzureAD/microsoft-authentication-library-for-go/apps/public"
 )
@@ -88,13 +89,37 @@ func openBrowser(ctx context.Context, url string) error {
 		}
 	}
 	name, args := browserCommand(runtime.GOOS, wsl, url)
-	if err := exec.CommandContext(ctx, name, args...).Run(); err != nil {
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
+	return launchBrowser(ctx, name, args, browserLaunchGrace)
+}
+
+// browserLaunchGrace bounds the wait for launcher failures. Some xdg-open setups
+// stay alive until the browser exits, and MSAL handles the callback only after
+// the opener returns.
+const browserLaunchGrace = 2 * time.Second
+
+// launchBrowser reports launchers that fail within grace, then returns while a
+// still-running launcher is reaped in the background. Without CommandContext,
+// finishing or canceling sign-in cannot kill a browser the launcher became.
+func launchBrowser(ctx context.Context, name string, args []string, grace time.Duration) error {
+	cmd := exec.Command(name, args...)
+	if err := cmd.Start(); err != nil {
 		return &browserError{executable: name, missing: errors.Is(err, exec.ErrNotFound)}
 	}
-	return nil
+	exited := make(chan error, 1)
+	go func() { exited <- cmd.Wait() }()
+	timer := time.NewTimer(grace)
+	defer timer.Stop()
+	select {
+	case err := <-exited:
+		if err != nil {
+			return &browserError{executable: name}
+		}
+		return nil
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 type browserError struct {
