@@ -82,9 +82,10 @@ type ActivationRequest struct {
 type ActivationStatus string
 
 const (
-	ActivationStatusActivated       ActivationStatus = "activated"
-	ActivationStatusPendingApproval ActivationStatus = "pending_approval"
-	ActivationStatusFailed          ActivationStatus = "failed"
+	ActivationStatusActivated           ActivationStatus = "activated"
+	ActivationStatusPendingApproval     ActivationStatus = "pending_approval"
+	ActivationStatusFailed              ActivationStatus = "failed"
+	ActivationStatusPendingProvisioning ActivationStatus = "pending_provisioning"
 )
 
 type ActivationResult struct {
@@ -100,6 +101,10 @@ func (r ActivationResult) Success() bool {
 
 func (r ActivationResult) PendingApproval() bool {
 	return r.Status == ActivationStatusPendingApproval
+}
+
+func (r ActivationResult) PendingProvisioning() bool {
+	return r.Status == ActivationStatusPendingProvisioning
 }
 
 func (r ActivationResult) Failure() bool {

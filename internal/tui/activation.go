@@ -36,10 +36,11 @@ func (f activationForm) validate(selected []pim.EligibleAssignment) error {
 }
 
 type summary struct {
-	results         []pim.ActivationResult
-	activated       []pim.ActivationResult
-	pendingApproval []pim.ActivationResult
-	failed          []pim.ActivationResult
+	results             []pim.ActivationResult
+	activated           []pim.ActivationResult
+	pendingApproval     []pim.ActivationResult
+	pendingProvisioning []pim.ActivationResult
+	failed              []pim.ActivationResult
 }
 
 func newSummary(results []pim.ActivationResult) summary {
@@ -51,6 +52,8 @@ func newSummary(results []pim.ActivationResult) summary {
 			s.activated = append(s.activated, result)
 		case result.PendingApproval():
 			s.pendingApproval = append(s.pendingApproval, result)
+		case result.PendingProvisioning():
+			s.pendingProvisioning = append(s.pendingProvisioning, result)
 		case result.Failure():
 			s.failed = append(s.failed, result)
 		}

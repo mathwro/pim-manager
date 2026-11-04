@@ -4,13 +4,13 @@
 
 ## Current MVP
 
-Running `pim-manager` opens an interactive Bubble Tea TUI. It validates the existing Azure CLI session and, when multiple tenants are available, asks which tenant to use before showing the PIM areas. Azure Resources is active for eligible Azure RBAC assignments across management groups, subscriptions, and resource groups. Entra Roles and Groups are shown as paused until Azure CLI can obtain their required Microsoft Graph PIM permissions.
+Running `pim-manager` opens an interactive Bubble Tea TUI. It validates the existing Azure CLI session and, when multiple tenants are available, asks which tenant to use before showing the PIM areas. Azure Resources handles eligible Azure RBAC assignments across management groups, subscriptions, and resource groups. Entra Roles handles eligible directory roles, and Groups handles eligible PIM group member and owner assignments through a separate session-only Microsoft Graph browser connection.
 
 In the Azure Resources assignment list, press `/` to search by role, subscription or management group name or ID, or resource group scope. Search is case-insensitive and accepts part of a name or ID.
 
 Press `i` to inspect an assignment. Details scroll with arrow keys or `j`/`k`, keeping long identifiers and policy diagnostics accessible above the activity dock; press Esc to return.
 
-The bottom activity dock retains recent timestamped events while you navigate. Running tenant, account, discovery, policy, and activation-authentication checks show their stage and elapsed time; no estimated completion percentage is shown. During activation, the TUI displays the current assignment, completed-request count, and activated, pending-approval, and failed totals as results arrive. Manual retries show progress for the retryable subset only.
+The bottom activity dock retains recent timestamped events while you navigate. Running tenant, account, discovery, policy, and activation-authentication checks show their stage and elapsed time; no estimated completion percentage is shown. During activation, the TUI displays the current assignment, completed-request count, and activated, pending-approval, pending-provisioning, and failed totals as results arrive. Manual retries show progress for the retryable subset only; accepted requests awaiting provisioning are not retryable failures.
 
 Activity is bounded and kept only in memory for the current session, not written as an audit log. Tenant or principal workflow resets clear it. Activity messages omit credentials, claims, justification text, and raw Azure error payloads; actionable diagnostics remain in the existing error and result views. Short terminals collapse the dock to one status row, keeping contextual keyboard controls below it.
 
@@ -48,15 +48,25 @@ az login
 
 If Azure CLI exposes more than one tenant, `pim-manager` shows a keyboard-driven tenant menu before the PIM areas. Rows use `Tenant Name (default.domain)` when available and retain the tenant ID beneath the label; name-only, domain-only, and ID-only fallbacks are supported. A single tenant is selected automatically. The choice applies only to the current `pim-manager` session: token acquisition, discovery, authentication checks, and activation use that tenant without running `az account set`.
 
-After tenant selection, a non-blocking account check uses a tenant-scoped Azure CLI token and a live Microsoft Graph self-profile lookup. The check has a fifteen-second background deadline, including Azure CLI startup, token acquisition, and the Graph request; it does not delay navigation or role discovery. The UI distinguishes **Checking account**, **Account found**, **Account unverified**, and **Account unavailable**; finding an account does not guarantee its roles or sign-in remain active. An inconclusive check displays the failing stage and error, so a token-acquisition timeout can be distinguished from a Graph timeout or permission failure. Basic self-profile access uses `User.Read`, not the unavailable Graph PIM permissions.
+After tenant selection, a non-blocking account check uses a tenant-scoped Azure CLI token and a live Microsoft Graph self-profile lookup. The check has a fifteen-second background deadline, including Azure CLI startup, token acquisition, and the Graph request; it does not delay navigation or role discovery. The UI distinguishes **Checking account**, **Account found**, **Account unverified**, and **Account unavailable**; finding an account does not guarantee its roles or sign-in remain active. An inconclusive check displays the failing stage and error, so a token-acquisition timeout can be distinguished from a Graph timeout or permission failure. Basic self-profile access uses `User.Read` and does not establish Graph PIM authorization.
 
 Conclusive account status is retained for up to five minutes. An inconclusive check is not treated as fresh: the next assignment-list entry or empty-discovery result can check again, without repeating an in-flight check. Returning to cached assignments also refreshes stale status. Press `r` to refresh account status, tenants, and the current assignment workflow explicitly. There is no continuous polling or automatic login.
 
 An explicit missing/disabled account or unusable sign-in clears affected cached assignments and blocks activation. Follow the displayed `az login --tenant <tenant-id>` command, then press `r` to reload. Network timeouts and Graph permission restrictions leave the account **unverified** rather than incorrectly reporting it as deleted; they do not block otherwise-valid ARM activation. Discovery failures are shown as errors, not as an empty list of eligible roles.
 
-When a selected role requires standard MFA or a Conditional Access authentication context, `pim-manager` temporarily hands the terminal to an interactive Azure CLI login. Complete verification in the browser; Azure CLI then returns directly to the TUI without asking you to select a subscription. Activation requests are submitted only after verification succeeds.
+Azure Resources reuses the exact checked ARM token for standard MFA-only policies; ARM/PIM remains authoritative. When an enabled Conditional Access authentication context is missing, `pim-manager` temporarily hands the terminal to interactive Azure CLI login. Complete verification in the browser; Azure CLI returns directly to the TUI without asking you to select a subscription. Subscription-selector settings change only for that child process.
 
 A batch can use one authentication context. If selected assignments require different contexts, activate them in separate batches.
+
+### Entra Roles and Groups
+
+Opening either Graph-backed section first shows a connection screen. Press Enter to open native MSAL browser sign-in with PKCE. Microsoft displays **Microsoft Graph Command Line Tools**, the existing public client used for this connection; no PowerShell installation, device code, or new app registration is involved. Tenant consent and Conditional Access still apply. If approval is required, the connection fails with a diagnostic rather than changing tenant permissions.
+
+The checked Azure CLI username is supplied as a login hint when available, without forcing the browser's account chooser. Existing browser sessions may continue directly; Microsoft can still require credentials, MFA, consent, or account selection. The resulting tenant and principal must match the checked CLI identity before discovery or activation is allowed.
+
+The connection is shared by Entra Roles and Groups and stays in memory until the process exits, the tenant or principal changes, or the connection is reset. It does not modify the Azure CLI context or persist a token cache. Esc cancels an in-progress connection; stale or canceled callbacks cannot reconnect a discarded workflow.
+
+Discovery reads the effective activation policy, including inherited requirements. Unknown requirements, unavailable policies, and unsupported ticket requirements block submission rather than guessing defaults. Before every activation batch or manual retry, the app rechecks identity, scopes, and required MFA/authentication-context claims; a missing Graph policy claim triggers browser step-up. One exact validated Graph token is pinned to every request in that batch. Failed or canceled verification submits nothing, and quitting or changing tenants cancels queued submissions. Requests already accepted by Microsoft cannot be undone by closing the app.
 
 ## Development
 

@@ -57,3 +57,14 @@ func TestSummaryGroupsResults(t *testing.T) {
 		t.Fatalf("expected one retryable failure")
 	}
 }
+
+func TestSummaryKeepsAcceptedProvisioningSeparateFromFailuresAndApproval(t *testing.T) {
+	result := pim.ActivationResult{Status: pim.ActivationStatus("pending_provisioning"), Retryable: true}
+	summary := newSummary([]pim.ActivationResult{result})
+	if len(summary.pendingProvisioning) != 1 || len(summary.failed) != 0 || len(summary.activated) != 0 || len(summary.pendingApproval) != 0 {
+		t.Fatalf("accepted provisioning was misclassified: %#v", summary)
+	}
+	if len(summary.retryableFailures()) != 0 {
+		t.Fatal("accepted provisioning was offered for resubmission")
+	}
+}

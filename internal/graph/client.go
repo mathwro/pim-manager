@@ -24,6 +24,17 @@ type Client struct {
 	baseURL     string
 }
 
+type accessTokenKey struct{}
+
+func WithAccessToken(ctx context.Context, token string) context.Context {
+	return context.WithValue(ctx, accessTokenKey{}, token)
+}
+
+func PinnedAccessToken(ctx context.Context) string {
+	token, _ := ctx.Value(accessTokenKey{}).(string)
+	return token
+}
+
 type ResponseError struct {
 	Method     string
 	URL        string
@@ -40,7 +51,25 @@ func NewClient(httpClient *http.Client, tokenSource TokenSource) Client {
 	if httpClient == nil {
 		httpClient = http.DefaultClient
 	}
-	return Client{httpClient: httpClient, tokenSource: tokenSource, baseURL: BaseURL}
+	client := *httpClient
+	checkRedirect := client.CheckRedirect
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		// A redirected POST can replay a real activation without fresh confirmation.
+		if len(via) == 0 || via[0].Method != http.MethodGet {
+			return http.ErrUseLastResponse
+		}
+		if !sameOrigin(req.URL, via[0].URL) {
+			return fmt.Errorf("refusing Graph redirect outside Graph origin")
+		}
+		if checkRedirect != nil {
+			return checkRedirect(req, via)
+		}
+		if len(via) >= 10 {
+			return fmt.Errorf("stopped after 10 Graph redirects")
+		}
+		return nil
+	}
+	return Client{httpClient: &client, tokenSource: tokenSource, baseURL: BaseURL}
 }
 
 func (c Client) Get(ctx context.Context, path string, out any) error {
@@ -52,13 +81,22 @@ func (c Client) Post(ctx context.Context, path string, body any, out any) error 
 }
 
 func (c Client) do(ctx context.Context, method string, path string, body any, out any) error {
-	token, err := c.tokenSource.AccessToken(ctx, Resource)
+	u, err := c.requestURL(path)
 	if err != nil {
 		return err
 	}
-	u := c.baseURL + path
-	if strings.HasPrefix(path, "https://") {
-		u = path
+	token := PinnedAccessToken(ctx)
+	if token == "" {
+		if c.tokenSource == nil {
+			return fmt.Errorf("Graph authentication is not connected")
+		}
+		token, err = c.tokenSource.AccessToken(ctx, Resource)
+		if err != nil {
+			return err
+		}
+	}
+	if token == "" {
+		return fmt.Errorf("Graph authentication returned an empty access token")
 	}
 	var reader io.Reader
 	if body != nil {
@@ -94,6 +132,32 @@ func (c Client) do(ctx context.Context, method string, path string, body any, ou
 		return nil
 	}
 	return json.NewDecoder(resp.Body).Decode(out)
+}
+
+func (c Client) requestURL(path string) (string, error) {
+	base, err := url.Parse(c.baseURL)
+	if err != nil {
+		return "", fmt.Errorf("invalid Graph base URL: %w", err)
+	}
+	target, err := url.Parse(path)
+	if err != nil {
+		return "", fmt.Errorf("invalid Graph request URL: %w", err)
+	}
+	if target.IsAbs() {
+		if !sameOrigin(target, base) {
+			return "", fmt.Errorf("refusing Graph URL outside Graph origin: %s", path)
+		}
+		return target.String(), nil
+	}
+	if !strings.HasPrefix(path, "/") || strings.HasPrefix(path, "//") || target.Host != "" || target.User != nil || target.Fragment != "" {
+		return "", fmt.Errorf("invalid relative Graph request URL: %s", path)
+	}
+	return c.baseURL + path, nil
+}
+
+func sameOrigin(target, base *url.URL) bool {
+	return target.User == nil && target.Opaque == "" && target.Fragment == "" &&
+		strings.EqualFold(target.Scheme, base.Scheme) && strings.EqualFold(target.Host, base.Host)
 }
 
 func EscapeFilterValue(value string) string {
