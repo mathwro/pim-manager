@@ -3,7 +3,6 @@ package entra
 import (
 	"context"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/mathwro/pim-manager/internal/activation"
@@ -120,7 +119,7 @@ func (p Provider) Activate(ctx context.Context, request pim.ActivationRequest) (
 	if err != nil {
 		return pim.ActivationResult{}, activation.WrapRetryable(fmt.Errorf("activate Entra role %s: %w", request.Assignment.DisplayName, err))
 	}
-	return p.mapStatus(request.Assignment, response.Status), nil
+	return graph.ActivationResult(request.Assignment, response.Status), nil
 }
 
 func activationBody(request pim.ActivationRequest) activationRequestBody {
@@ -139,22 +138,4 @@ func activationBody(request pim.ActivationRequest) activationRequestBody {
 			},
 		},
 	}
-}
-
-func (p Provider) mapStatus(assignment pim.EligibleAssignment, status string) pim.ActivationResult {
-	result := pim.ActivationResult{Assignment: assignment, Message: status}
-	switch strings.ToLower(status) {
-	case "granted", "provisioned", "schedulecreated":
-		result.Status = pim.ActivationStatusActivated
-	case "pendingapproval", "pendingapprovalprovisioning", "pendingadmindecision":
-		result.Status = pim.ActivationStatusPendingApproval
-	case "pendingprovisioning", "pendingschedulecreation":
-		result.Status = pim.ActivationStatusPendingProvisioning
-	default:
-		result.Status = pim.ActivationStatusFailed
-		if status == "" {
-			result.Message = "Graph activation response did not include a status; check PIM before resubmitting"
-		}
-	}
-	return result
 }

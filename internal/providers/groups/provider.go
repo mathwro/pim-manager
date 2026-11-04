@@ -3,7 +3,6 @@ package groups
 import (
 	"context"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/mathwro/pim-manager/internal/activation"
@@ -115,21 +114,7 @@ func (p Provider) Activate(ctx context.Context, request pim.ActivationRequest) (
 	if err != nil {
 		return pim.ActivationResult{}, activation.WrapRetryable(fmt.Errorf("activate PIM group %s: %w", request.Assignment.DisplayName, err))
 	}
-	result := pim.ActivationResult{Assignment: request.Assignment, Message: response.Status}
-	switch strings.ToLower(response.Status) {
-	case "granted", "provisioned", "schedulecreated":
-		result.Status = pim.ActivationStatusActivated
-	case "pendingapproval", "pendingapprovalprovisioning", "pendingadmindecision":
-		result.Status = pim.ActivationStatusPendingApproval
-	case "pendingprovisioning", "pendingschedulecreation":
-		result.Status = pim.ActivationStatusPendingProvisioning
-	default:
-		result.Status = pim.ActivationStatusFailed
-		if response.Status == "" {
-			result.Message = "Graph activation response did not include a status; check PIM before resubmitting"
-		}
-	}
-	return result, nil
+	return graph.ActivationResult(request.Assignment, response.Status), nil
 }
 
 func activationBody(request pim.ActivationRequest) activationRequestBody {

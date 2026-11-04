@@ -65,14 +65,6 @@ func TestActivationRequestBody(t *testing.T) {
 	}
 }
 
-func TestMapStatus(t *testing.T) {
-	provider := Provider{}
-	result := provider.mapStatus(pim.EligibleAssignment{ID: "one"}, "PendingApproval")
-	if result.Status != pim.ActivationStatusPendingApproval {
-		t.Fatalf("expected pending approval, got %#v", result)
-	}
-}
-
 func TestDiscoverFetchesAllPages(t *testing.T) {
 	graph := &pagingFakeGraph{
 		responses: []roleEligibilityResponse{
@@ -258,25 +250,6 @@ func TestActivationPreservesCheckedTokenAndUserVisibleClaimsFailure(t *testing.T
 	var responseErr graph.ResponseError
 	if !errors.As(err, &responseErr) || activation.IsRetryable(err) || !strings.Contains(err.Error(), "AuthenticationContext c2") || requests != 1 {
 		t.Fatalf("lost claims failure or automatically resubmitted: err=%v requests=%d", err, requests)
-	}
-}
-
-func TestMapStatusPreservesGraphProvisioningAndApprovalOutcomes(t *testing.T) {
-	for _, test := range []struct {
-		status string
-		want   pim.ActivationStatus
-	}{
-		{"Granted", pim.ActivationStatusActivated}, {"Provisioned", pim.ActivationStatusActivated}, {"ScheduleCreated", pim.ActivationStatusActivated},
-		{"PendingApproval", pim.ActivationStatusPendingApproval}, {"PendingAdminDecision", pim.ActivationStatusPendingApproval},
-		{"PendingProvisioning", pim.ActivationStatusPendingProvisioning}, {"PendingScheduleCreation", pim.ActivationStatusPendingProvisioning},
-		{"Failed", pim.ActivationStatusFailed}, {"Denied", pim.ActivationStatusFailed}, {"unexpected", pim.ActivationStatusFailed},
-	} {
-		t.Run(test.status, func(t *testing.T) {
-			result := (Provider{}).mapStatus(pim.EligibleAssignment{ID: "one"}, test.status)
-			if result.Status != test.want || result.Retryable || !strings.Contains(result.Message, test.status) {
-				t.Fatalf("wrong outcome: %#v", result)
-			}
-		})
 	}
 }
 
