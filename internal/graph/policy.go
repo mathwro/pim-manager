@@ -44,7 +44,10 @@ type policyRule struct {
 	EnabledRules    []string `json:"enabledRules"`
 	IsEnabled       *bool    `json:"isEnabled"`
 	ClaimValue      string   `json:"claimValue"`
-	Target          struct {
+	Setting         *struct {
+		IsRequestorJustificationRequired bool `json:"isRequestorJustificationRequired"`
+	} `json:"setting"`
+	Target struct {
 		Caller     string   `json:"caller"`
 		Level      string   `json:"level"`
 		Operations []string `json:"operations"`
@@ -146,7 +149,7 @@ func normalizeActivationPolicy(rules []policyRule) (pim.ActivationPolicy, error)
 		}
 		id := strings.ToLower(rule.ID)
 		switch id {
-		case "expiration_enduser_assignment", "enablement_enduser_assignment", "authenticationcontext_enduser_assignment":
+		case "expiration_enduser_assignment", "enablement_enduser_assignment", "authenticationcontext_enduser_assignment", "approval_enduser_assignment":
 			if seen[id] {
 				return pim.ActivationPolicy{}, fmt.Errorf("duplicate Graph activation policy rule %s", rule.ID)
 			}
@@ -180,6 +183,10 @@ func normalizeActivationPolicy(rules []policyRule) (pim.ActivationPolicy, error)
 				if policy.AuthenticationContext == "" {
 					return pim.ActivationPolicy{}, fmt.Errorf("Graph activation policy has an enabled but empty authentication context")
 				}
+			}
+		case "approval_enduser_assignment":
+			if rule.Setting != nil && rule.Setting.IsRequestorJustificationRequired {
+				policy.JustificationRequired = true
 			}
 		}
 	}

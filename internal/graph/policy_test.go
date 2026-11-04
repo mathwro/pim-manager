@@ -227,3 +227,29 @@ func TestPrepareAssignmentsUsesInheritedEffectiveRules(t *testing.T) {
 		t.Fatalf("inherited requirements ignored: %#v %v", prepared, err)
 	}
 }
+
+// The approval rule can require a justification even when the enablement rule omits it.
+func TestPrepareAssignmentsRequiresApprovalRuleJustification(t *testing.T) {
+	for _, required := range []bool{true, false} {
+		var response map[string]any
+		if err := json.Unmarshal([]byte(policyFixture("/", "DirectoryRole", "role-1", "PT8H", ``, false, "")), &response); err != nil {
+			t.Fatal(err)
+		}
+		policy := response["value"].([]any)[0].(map[string]any)["policy"].(map[string]any)
+		policy["effectiveRules"] = append(policy["effectiveRules"].([]any), map[string]any{
+			"@odata.type": "#microsoft.graph.unifiedRoleManagementPolicyApprovalRule",
+			"id":          "Approval_EndUser_Assignment",
+			"setting":     map[string]any{"isApprovalRequired": false, "isRequestorJustificationRequired": required, "approvalMode": "NoApproval", "approvalStages": []any{}},
+			"target":      map[string]any{"caller": "EndUser", "level": "Assignment", "operations": []string{"All"}},
+		})
+		encoded, err := json.Marshal(response)
+		if err != nil {
+			t.Fatal(err)
+		}
+		client := &policyFake{get: func(string) (string, error) { return string(encoded), nil }}
+		prepared, err := PrepareAssignments(context.Background(), client, []pim.EligibleAssignment{{Source: pim.AssignmentSourceEntra, RoleDefinitionID: "role-1"}})
+		if err != nil || len(prepared) != 1 || prepared[0].ActivationPolicy.JustificationRequired != required {
+			t.Fatalf("approval justification required=%t: %#v %v", required, prepared, err)
+		}
+	}
+}
