@@ -456,6 +456,28 @@ func TestCanceledReadKeepsSharedSession(t *testing.T) {
 	}
 }
 
+// Graph rejecting the session's token must force reconnection; a stale rejection of an older token must not.
+func TestInvalidateAccessTokenDropsOnlyTheIssuedToken(t *testing.T) {
+	s := testSession(&fakeMSAL{interactive: func(context.Context, []string, string, string) (public.AuthResult, error) {
+		return graphIdentity(testTenant, testPrincipal, nil, nil), nil
+	}}, fakeARM{})
+	if err := s.Connect(tenantContext()); err != nil {
+		t.Fatal(err)
+	}
+	token, err := s.AccessToken(tenantContext(), "https://graph.microsoft.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.InvalidateAccessToken("older-token")
+	if !s.Connected(tenantContext()) {
+		t.Fatal("rejection of another token disconnected the session")
+	}
+	s.InvalidateAccessToken(token)
+	if s.Connected(tenantContext()) {
+		t.Fatal("rejected token kept the session connected")
+	}
+}
+
 func TestAuthenticationErrorsPreserveCodesWithoutSecrets(t *testing.T) {
 	client := &fakeMSAL{interactive: func(context.Context, []string, string, string) (public.AuthResult, error) {
 		return public.AuthResult{}, errors.New(`AADSTS53003 blocked access_token=secret-token claims={"acrs":"secret-context"}`)

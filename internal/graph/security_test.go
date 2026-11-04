@@ -82,3 +82,39 @@ func (s *countingTokenSource) AccessToken(context.Context, string) (string, erro
 	s.calls++
 	return "alternative-token", nil
 }
+
+type invalidatingTokenSource struct {
+	countingTokenSource
+	invalidated []string
+}
+
+func (s *invalidatingTokenSource) InvalidateAccessToken(token string) {
+	s.invalidated = append(s.invalidated, token)
+}
+
+// A cached but rejected token must be dropped, or every refresh reuses it.
+func TestGraphInvalidatesOnlyTokensRejectedWith401(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		ctx    context.Context
+		status int
+		want   string
+	}{
+		{"pinned token rejected", WithAccessToken(context.Background(), "checked-token"), 401, "checked-token"},
+		{"source token rejected", context.Background(), 401, "alternative-token"},
+		{"permission denied", context.Background(), 403, ""},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			source := &invalidatingTokenSource{}
+			client := NewClient(&http.Client{Transport: graphRoundTrip(func(*http.Request) (*http.Response, error) {
+				return &http.Response{StatusCode: test.status, Status: http.StatusText(test.status), Body: io.NopCloser(strings.NewReader(`{}`))}, nil
+			})}, source)
+			if err := client.Get(test.ctx, "/me", nil); err == nil {
+				t.Fatal("rejected request succeeded")
+			}
+			if got := strings.Join(source.invalidated, ","); got != test.want {
+				t.Fatalf("invalidated %q, want %q", got, test.want)
+			}
+		})
+	}
+}

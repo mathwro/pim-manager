@@ -18,6 +18,12 @@ type TokenSource interface {
 	AccessToken(context.Context, string) (string, error)
 }
 
+// tokenInvalidator is implemented by token sources that cache tokens: a token
+// Graph rejects with 401 must not be served again.
+type tokenInvalidator interface {
+	InvalidateAccessToken(string)
+}
+
 type Client struct {
 	httpClient  *http.Client
 	tokenSource TokenSource
@@ -119,6 +125,9 @@ func (c Client) do(ctx context.Context, method string, path string, body any, ou
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		if invalidator, ok := c.tokenSource.(tokenInvalidator); ok && resp.StatusCode == http.StatusUnauthorized {
+			invalidator.InvalidateAccessToken(token)
+		}
 		b, _ := io.ReadAll(resp.Body)
 		return ResponseError{
 			Method:     method,

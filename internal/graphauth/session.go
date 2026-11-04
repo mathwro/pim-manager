@@ -41,11 +41,12 @@ type tokenClient interface {
 }
 
 type connection struct {
-	tenant    string
-	principal string
-	client    tokenClient
-	account   public.Account
-	loginHint string
+	tenant      string
+	principal   string
+	client      tokenClient
+	account     public.Account
+	loginHint   string
+	accessToken string
 }
 
 type Session struct {
@@ -89,6 +90,17 @@ func (s *Session) Connected(ctx context.Context) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.connected != nil && s.connected.tenant == tenant
+}
+
+// InvalidateAccessToken disconnects the session when Graph rejects the token it
+// last issued, so the next attempt requires Connect instead of reusing the cached
+// token. Rejections of an older token are ignored; a newer token may still be valid.
+func (s *Session) InvalidateAccessToken(token string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if token != "" && s.connected != nil && s.connected.accessToken == token {
+		s.resetLocked()
+	}
 }
 
 type operation struct {
@@ -164,6 +176,7 @@ func (o *operation) commit(current *connection, result public.AuthResult) error 
 	}
 	updated := *current
 	updated.account = result.Account
+	updated.accessToken = result.AccessToken
 	s.connected = &updated
 	return nil
 }
