@@ -13,6 +13,8 @@ import (
 	"github.com/AzureAD/microsoft-authentication-library-for-go/apps/public"
 )
 
+// microsoftGraphClientID is the hardcoded application (client) ID of Microsoft's
+// Microsoft Graph Command Line Tools public client, not a tenant-specific service principal object ID.
 const microsoftGraphClientID = "14d82eec-204b-4c2f-b7e8-296a70dab67e"
 
 type msalClient struct {
