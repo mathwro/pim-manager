@@ -417,6 +417,45 @@ func TestConcurrentSilentAcquisitionsCanBeReset(t *testing.T) {
 	}
 }
 
+// A section switch cancels the old discovery's read; the shared session and the new read must survive.
+func TestCanceledReadKeepsSharedSession(t *testing.T) {
+	client := &fakeMSAL{interactive: func(context.Context, []string, string, string) (public.AuthResult, error) {
+		return graphIdentity(testTenant, testPrincipal, nil, nil), nil
+	}}
+	s := testSession(client, fakeARM{})
+	if err := s.Connect(tenantContext()); err != nil {
+		t.Fatal(err)
+	}
+	entered := make(chan struct{}, 2)
+	release := make(chan struct{})
+	client.silent = func(ctx context.Context, _ []string, _ public.Account, _ string) (public.AuthResult, error) {
+		entered <- struct{}{}
+		select {
+		case <-ctx.Done():
+			return public.AuthResult{}, ctx.Err()
+		case <-release:
+			return graphIdentity(testTenant, testPrincipal, nil, nil), nil
+		}
+	}
+	oldContext, cancelOld := context.WithCancel(tenantContext())
+	oldResult, newResult := make(chan error, 1), make(chan error, 1)
+	go func() { _, err := s.AccessToken(oldContext, "https://graph.microsoft.com"); oldResult <- err }()
+	go func() { _, err := s.AccessToken(tenantContext(), "https://graph.microsoft.com"); newResult <- err }()
+	<-entered
+	<-entered
+	cancelOld()
+	if err := <-oldResult; !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled read: %v", err)
+	}
+	close(release)
+	if err := <-newResult; err != nil {
+		t.Fatalf("canceled read aborted another section's read: %v", err)
+	}
+	if !s.Connected(tenantContext()) {
+		t.Fatal("canceled read disconnected the shared session")
+	}
+}
+
 func TestAuthenticationErrorsPreserveCodesWithoutSecrets(t *testing.T) {
 	client := &fakeMSAL{interactive: func(context.Context, []string, string, string) (public.AuthResult, error) {
 		return public.AuthResult{}, errors.New(`AADSTS53003 blocked access_token=secret-token claims={"acrs":"secret-context"}`)

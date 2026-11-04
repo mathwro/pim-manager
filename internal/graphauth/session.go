@@ -131,7 +131,10 @@ func (s *Session) begin(ctx context.Context, connect bool) (*operation, error) {
 	return &operation{session: s, ctx: opCtx, cancel: cancel, tenant: tenant, generation: s.generation, id: id, connection: current}, nil
 }
 
-func (o *operation) finish(err error) error {
+// finish releases the operation. Failures reset the session, except when a read's
+// caller canceled it: that read proved nothing about the established connection.
+func (o *operation) finish(err error, keepOnCallerCancel bool) error {
+	canceled := o.ctx.Err() != nil
 	if err == nil {
 		err = o.ctx.Err()
 	}
@@ -140,7 +143,9 @@ func (o *operation) finish(err error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.active, o.id)
-	if err != nil && s.generation == o.generation {
+	// A reset bumps the generation, so a canceled same-generation operation was canceled by its caller.
+	callerCanceled := canceled && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded))
+	if err != nil && s.generation == o.generation && !(keepOnCallerCancel && callerCanceled) {
 		s.resetLocked()
 	}
 	return err
@@ -209,7 +214,7 @@ func (s *Session) Connect(ctx context.Context) (err error) {
 	if err != nil {
 		return err
 	}
-	defer func() { err = op.finish(err) }()
+	defer func() { err = op.finish(err, false) }()
 	identity, err := s.armIdentity(op.ctx, op.tenant)
 	if err != nil {
 		return err
@@ -268,7 +273,7 @@ func (s *Session) AccessToken(ctx context.Context, resource string) (token strin
 		return "", err
 	}
 	defer func() {
-		err = op.finish(err)
+		err = op.finish(err, true)
 		if err != nil {
 			token = ""
 		}
@@ -295,7 +300,7 @@ func (s *Session) Authentication(ctx context.Context, mfaRequired bool, authenti
 		return auth, err
 	}
 	defer func() {
-		err = op.finish(err)
+		err = op.finish(err, false)
 		if err != nil {
 			auth = azureauth.ARMAuthentication{}
 		}
