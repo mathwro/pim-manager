@@ -2,11 +2,11 @@ package groups
 
 import (
 	"context"
-	"net/url"
-	"strings"
+	"fmt"
 	"time"
 
 	"github.com/mathwro/pim-manager/internal/activation"
+	"github.com/mathwro/pim-manager/internal/graph"
 	"github.com/mathwro/pim-manager/internal/pim"
 )
 
@@ -16,12 +16,11 @@ type GraphClient interface {
 }
 
 type Provider struct {
-	graph       GraphClient
-	principalID string
+	graph GraphClient
 }
 
-func NewProvider(graph GraphClient, principalID string) Provider {
-	return Provider{graph: graph, principalID: principalID}
+func NewProvider(graph GraphClient) Provider {
+	return Provider{graph: graph}
 }
 
 type eligibilityResponse struct {
@@ -30,21 +29,23 @@ type eligibilityResponse struct {
 }
 
 type eligibilityScheduleInstance struct {
-	ID          string `json:"id"`
-	AccessID    string `json:"accessId"`
-	PrincipalID string `json:"principalId"`
-	GroupID     string `json:"groupId"`
+	ID                    string `json:"id"`
+	EligibilityScheduleID string `json:"eligibilityScheduleId"`
+	AccessID              string `json:"accessId"`
+	PrincipalID           string `json:"principalId"`
+	GroupID               string `json:"groupId"`
+	Group                 struct {
+		DisplayName string `json:"displayName"`
+	} `json:"group"`
 }
 
 func (p Provider) Discover(ctx context.Context) ([]pim.EligibleAssignment, error) {
-	principalID := strings.ReplaceAll(p.principalID, "'", "''")
-	filter := url.QueryEscape("principalId eq '" + principalID + "'")
-	path := "/identityGovernance/privilegedAccess/group/eligibilityScheduleInstances?$filter=" + filter
+	path := "/identityGovernance/privilegedAccess/group/eligibilityScheduleInstances/filterByCurrentUser(on='principal')?$expand=group"
 	assignments := make([]pim.EligibleAssignment, 0)
 	for path != "" {
 		var response eligibilityResponse
 		if err := p.graph.Get(ctx, path, &response); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("discover eligible PIM groups: %w", err)
 		}
 		for _, item := range response.Value {
 			assignments = append(assignments, normalizeEligibility(item))
@@ -54,23 +55,31 @@ func (p Provider) Discover(ctx context.Context) ([]pim.EligibleAssignment, error
 	return assignments, nil
 }
 
+func (p Provider) Prepare(ctx context.Context, assignments []pim.EligibleAssignment) ([]pim.EligibleAssignment, error) {
+	return graph.PrepareAssignments(ctx, p.graph, assignments)
+}
+
 func normalizeEligibility(item eligibilityScheduleInstance) pim.EligibleAssignment {
 	kind := pim.AssignmentKindGroupMember
 	if item.AccessID == "owner" {
 		kind = pim.AssignmentKindGroupOwner
 	}
+	groupName := item.Group.DisplayName
+	if groupName == "" {
+		groupName = item.GroupID
+	}
 	return pim.EligibleAssignment{
 		ID:                    item.ID,
 		Source:                pim.AssignmentSourceGroup,
 		Kind:                  kind,
-		DisplayName:           "Group " + item.AccessID,
+		DisplayName:           groupName + " (" + item.AccessID + ")",
 		PrincipalID:           item.PrincipalID,
 		GroupID:               item.GroupID,
 		AccessID:              item.AccessID,
-		EligibilityScheduleID: item.ID,
+		EligibilityScheduleID: item.EligibilityScheduleID,
 		Scope: pim.Scope{
 			ID:          item.GroupID,
-			DisplayName: item.GroupID,
+			DisplayName: groupName,
 			Type:        pim.ScopeTypeGroup,
 		},
 	}
@@ -103,16 +112,9 @@ func (p Provider) Activate(ctx context.Context, request pim.ActivationRequest) (
 	var response activationResponse
 	err := p.graph.Post(ctx, "/identityGovernance/privilegedAccess/group/assignmentScheduleRequests", activationBody(request), &response)
 	if err != nil {
-		return pim.ActivationResult{}, activation.WrapRetryable(err)
+		return pim.ActivationResult{}, activation.WrapRetryable(fmt.Errorf("activate PIM group %s: %w", request.Assignment.DisplayName, err))
 	}
-	switch response.Status {
-	case "Granted", "Provisioned":
-		return pim.ActivationResult{Assignment: request.Assignment, Status: pim.ActivationStatusActivated, Message: response.Status}, nil
-	case "PendingApproval", "PendingApprovalProvisioning", "PendingAdminDecision":
-		return pim.ActivationResult{Assignment: request.Assignment, Status: pim.ActivationStatusPendingApproval, Message: response.Status}, nil
-	default:
-		return pim.ActivationResult{Assignment: request.Assignment, Status: pim.ActivationStatusFailed, Message: response.Status}, nil
-	}
+	return graph.ActivationResult(request.Assignment, response.Status), nil
 }
 
 func activationBody(request pim.ActivationRequest) activationRequestBody {

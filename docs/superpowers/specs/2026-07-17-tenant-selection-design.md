@@ -18,16 +18,15 @@ The flow becomes:
 - Skip the tenant-selection screen when Azure CLI returns exactly one tenant.
 - Keep discovery, authentication checks, step-up, and activation inside the selected tenant.
 - Preserve the existing checked-token pinning and principal-drift protections.
-- Keep tenant selection session-local; policy-required interactive step-up retains its existing Azure CLI login behavior.
+- Keep tenant selection session-local; Azure Resource authentication-context step-up retains Azure CLI login, while Graph-backed sections bind their native browser session to the same tenant and checked principal.
 
 ## Non-Goals
 
 - Selecting an Azure subscription.
 - Persisting a preferred tenant.
 - Running `az account set` or changing Azure CLI configuration.
-- Signing into an additional account from inside `pim-manager`.
+- Selecting a different principal from the checked Azure CLI identity inside `pim-manager`.
 - Adding tenant search or filtering.
-- Reactivating the paused Entra Roles or Groups providers.
 
 ## Azure CLI Behavior
 
@@ -53,7 +52,7 @@ The selected tenant is session-local. Token retrieval uses:
 az account get-access-token --resource <resource> --tenant <tenant-id> --output json
 ```
 
-This follows Azure CLI's supported per-command tenant selection and does not mutate the active Azure CLI account. Interactive step-up continues to use `az login --tenant <tenant-id>` with the existing claims challenge and child-process-only subscription-selector override.
+This follows Azure CLI's supported per-command tenant selection and does not mutate the active Azure CLI account. ARM authentication-context step-up uses `az login --tenant <tenant-id>` with the existing claims challenge and child-process-only subscription-selector override. Entra Roles and Groups use the tenant-bound native Graph browser session defined in the main product design.
 
 ## Product Flow
 
@@ -78,6 +77,8 @@ The screen is keyboard-first:
 | `q` or Ctrl-C | Quit. |
 
 The PIM-area home shows the selected tenant rather than the current subscription. If multiple tenants are available, Esc returns to tenant selection. Selecting another tenant clears assignment discovery, selections, form inputs, authentication state, progress, errors, and summaries before any new discovery can begin.
+
+Tenant changes also reset the shared in-memory Graph connection and cancel queued activation commands. Stale or already-canceled callers cannot clear a newer tenant's connection. Reconnecting Graph requires explicit user action and validates the same tenant and CLI principal before accepting tokens.
 
 The progress labels become:
 
@@ -117,7 +118,7 @@ Discovery result messages include the originating tenant ID and a request genera
 
 Provider interfaces remain unchanged. Providers receive the tenant-scoped context through their existing `Discover` and `Activate` methods. The ARM client obtains discovery tokens through that context.
 
-Before activation, the TUI obtains and inspects an ARM token using the selected tenant context. The exact checked token remains pinned in the activation context and is reused for every request in the batch. No token is fetched between validation and submission.
+Before Azure Resource activation, the TUI obtains and inspects an ARM token using the selected tenant context. Graph-backed sections validate their own token against that tenant and the checked CLI principal. The exact checked service token remains pinned in the cancelable activation context and is reused for every request in its batch. No token is fetched between validation and submission.
 
 A failed or canceled token check or step-up submits no activation requests. The existing principal-ID comparison after step-up remains authoritative for detecting account drift.
 

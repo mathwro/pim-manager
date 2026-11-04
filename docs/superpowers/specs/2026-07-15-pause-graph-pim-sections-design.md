@@ -1,5 +1,7 @@
 # Pause Graph PIM Sections Design
 
+**Historical, superseded:** Entra Roles and Groups are re-enabled through the session-only native MSAL browser connection described in `2026-07-14-pim-manager-design.md`. Azure CLI's scope limitation remains, but the product explicitly adopted the existing Microsoft Graph Command Line Tools public client rather than a new registration. The sections below record the former pause, not current runtime requirements.
+
 ## Goal
 
 Prevent unusable Entra Roles and Groups workflows from exposing raw Microsoft Graph permission failures while retaining the working Azure Resources workflow.

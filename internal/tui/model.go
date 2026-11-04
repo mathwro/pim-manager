@@ -16,6 +16,7 @@ import (
 	"github.com/mathwro/pim-manager/internal/activation"
 	"github.com/mathwro/pim-manager/internal/arm"
 	"github.com/mathwro/pim-manager/internal/azureauth"
+	"github.com/mathwro/pim-manager/internal/graph"
 	"github.com/mathwro/pim-manager/internal/pim"
 )
 
@@ -23,6 +24,7 @@ type Screen string
 
 const (
 	ScreenTenants      Screen = "tenants"
+	ScreenGraphConnect Screen = "graph_connect"
 	ScreenHome         Screen = "home"
 	ScreenAssignments  Screen = "assignments"
 	ScreenDetails      Screen = "details"
@@ -41,14 +43,18 @@ const (
 )
 
 type Runtime struct {
-	Entra             AssignmentProvider
-	AzureResources    AssignmentProvider
-	Groups            AssignmentProvider
-	Tenants           TenantProvider
-	StepUpCommand     func(string, bool, string) (*exec.Cmd, error)
-	ARMAuthentication func(context.Context, bool, string) (azureauth.ARMAuthentication, error)
-	CheckUpdate       func(context.Context) (string, error)
-	CheckAccount      func(context.Context) (azureauth.AccountHealth, error)
+	Entra               AssignmentProvider
+	AzureResources      AssignmentProvider
+	Groups              AssignmentProvider
+	Tenants             TenantProvider
+	StepUpCommand       func(string, bool, string) (*exec.Cmd, error)
+	ARMAuthentication   func(context.Context, bool, string) (azureauth.ARMAuthentication, error)
+	CheckUpdate         func(context.Context) (string, error)
+	CheckAccount        func(context.Context) (azureauth.AccountHealth, error)
+	GraphConnect        func(context.Context) error
+	GraphConnected      func(context.Context) bool
+	GraphAuthentication func(context.Context, bool, string) (azureauth.ARMAuthentication, error)
+	ResetGraph          func()
 }
 
 type AssignmentProvider interface {
@@ -91,6 +97,8 @@ type Model struct {
 	activationCurrent      string
 	activationGeneration   int
 	activationAccountErr   error
+	activationContext      context.Context
+	activationCancel       context.CancelFunc
 	loading                bool
 	checkingAuthentication bool
 	authenticationCheck    int
@@ -112,6 +120,10 @@ type Model struct {
 	availableUpdate        string
 	discoveryCheck         int
 	discoveryCancel        context.CancelFunc
+	graphConnecting        bool
+	graphConnectCheck      int
+	graphCancel            context.CancelFunc
+	authenticationCancel   context.CancelFunc
 	discoveryCancelKey     discoveryKey
 	discoveryCache         map[discoveryKey]discoveryEntry
 	policiesReady          bool
@@ -235,7 +247,7 @@ func NewModel(runtime Runtime) Model {
 		runtime:         runtime,
 		screen:          ScreenHome,
 		selectedSection: SectionAzureResources,
-		sections:        []Section{SectionAzureResources},
+		sections:        []Section{SectionAzureResources, SectionEntra, SectionGroups},
 		assignmentList:  newAssignmentList(nil),
 		discoveryCache:  make(map[discoveryKey]discoveryEntry),
 		policiesReady:   true,
@@ -282,7 +294,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.resizeComponents()
 		return m, nil
 	case spinner.TickMsg:
-		if !m.loading && !m.checkingAuthentication && !m.checkingTenants && !m.checkingAccount && !m.preparingPolicies && !m.waitingForPolicies {
+		if !m.loading && !m.checkingAuthentication && !m.checkingTenants && !m.checkingAccount && !m.preparingPolicies && !m.waitingForPolicies && !m.graphConnecting {
 			return m, nil
 		}
 		var cmd tea.Cmd
@@ -296,6 +308,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case accountCheckedMsg:
 		return m.accountChecked(typed)
+	case graphConnectedMsg:
+		return m.graphConnected(typed)
 	case assignmentsDiscoveredMsg:
 		key := discoveryKey{tenantID: typed.tenantID, section: typed.section}
 		if typed.checkID != m.discoveryCheck || typed.tenantID != m.selectedTenant.ID {
@@ -404,6 +418,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		outcome := "Activation completed: "
 		if typed.result.PendingApproval() {
 			outcome = "Approval pending: "
+		} else if typed.result.PendingProvisioning() {
+			outcome = "Provisioning pending: "
 		} else if typed.result.Failure() {
 			outcome = "Activation failed: "
 		}
@@ -416,6 +432,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.summary.activated = append(m.summary.activated, typed.result)
 		case typed.result.PendingApproval():
 			m.summary.pendingApproval = append(m.summary.pendingApproval, typed.result)
+		case typed.result.PendingProvisioning():
+			m.summary.pendingProvisioning = append(m.summary.pendingProvisioning, typed.result)
 		case typed.result.Failure():
 			m.summary.failed = append(m.summary.failed, typed.result)
 		}
@@ -431,6 +449,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.screen != ScreenProgress || !m.loading || typed.generation != m.activationGeneration || typed.tenantID != m.selectedTenant.ID || m.activationDone != m.activationTotal {
 			return m, nil
 		}
+		m.cancelActivation()
 		done, total := m.activationDone, m.activationTotal
 		failed := len(m.summary.failed) > 0
 		if typed.accountErr != nil {
@@ -487,6 +506,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !m.checkingAuthentication || typed.checkID != m.authenticationCheck {
 			return m, nil
 		}
+		m.cancelAuthentication()
 		m.checkingAuthentication = false
 		m.endOperation("authentication")
 		m.screen = typed.origin
@@ -496,7 +516,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.markAccountUnavailable(typed.err)
 				return m, nil
 			}
-			m.err = fmt.Errorf("check Azure CLI ARM authentication: %w", typed.err)
+			label := "Azure CLI ARM"
+			if isGraphSection(m.activeSection) {
+				label = "Microsoft Graph"
+			}
+			m.err = fmt.Errorf("check %s authentication: %w", label, typed.err)
+			return m, nil
+		}
+		if isGraphSection(m.activeSection) && (typed.authentication.AccessToken == "" || typed.authentication.PrincipalID == "") {
+			m.err = errors.New("Microsoft Graph authentication did not return a checked token and principal")
 			return m, nil
 		}
 		if typed.expectedPrincipalID != "" && !strings.EqualFold(typed.expectedPrincipalID, typed.authentication.PrincipalID) {
@@ -525,6 +553,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if typed.authentication.Satisfied {
 			m.recordActivity("Authentication preflight completed", false)
 			return m.startActivation(typed.selected, typed.authentication)
+		}
+		if isGraphSection(m.activeSection) {
+			m.err = errors.New("Microsoft Graph authentication did not satisfy the activation requirements; reconnect and retry")
+			return m, nil
 		}
 		if typed.afterStepUp {
 			m.recordActivity("Authentication requirements not satisfied", true)
@@ -586,6 +618,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if key.Type == tea.KeyCtrlC {
+		m.cancelPendingWork()
 		return m, tea.Quit
 	}
 	if m.helpVisible {
@@ -597,13 +630,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if !m.acceptingText() {
 		switch key.String() {
 		case "q":
+			m.cancelPendingWork()
 			return m, tea.Quit
 		case "?":
 			m.helpVisible = true
 			return m, nil
 		}
 	}
-	if key.String() == "r" && !m.acceptingText() && !m.checkingAuthentication && m.screen != ScreenTenants && m.screen != ScreenSummary && m.screen != ScreenProgress {
+	if key.String() == "r" && !m.acceptingText() && !m.checkingAuthentication && m.screen != ScreenGraphConnect && m.screen != ScreenTenants && m.screen != ScreenSummary && m.screen != ScreenProgress {
 		return m.refreshAccountAndWorkflow()
 	}
 
@@ -612,6 +646,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.updateTenants(key)
 	case ScreenHome:
 		return m.updateHome(key)
+	case ScreenGraphConnect:
+		return m.updateGraphConnect(key)
 	case ScreenAssignments:
 		return m.updateAssignments(key)
 	case ScreenDetails:
@@ -636,6 +672,8 @@ func (m Model) View() string {
 		content = m.viewTenants()
 	case ScreenHome:
 		content = m.viewHome()
+	case ScreenGraphConnect:
+		content = m.viewGraphConnect()
 	case ScreenAssignments:
 		content = m.viewAssignments()
 	case ScreenDetails:
@@ -863,6 +901,7 @@ func (m Model) updateConfirmation(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.checkingAuthentication = false
+		m.cancelAuthentication()
 		m.authenticationCheck++
 		m.endOperation("authentication")
 		m.recordActivity("Authentication check canceled", false)
@@ -909,6 +948,13 @@ func (m Model) beginAuthentication(selected []pim.EligibleAssignment) (tea.Model
 		m.recordActivity("Authentication requirements could not be combined", true)
 		return m, nil
 	}
+	if isGraphSection(m.activeSection) {
+		if m.runtime.GraphAuthentication == nil {
+			m.err = errors.New("Microsoft Graph authentication is unavailable")
+			return m, nil
+		}
+		return m.startAuthenticationCheck(selected, mfaRequired, authenticationContext, false, m.screen, "")
+	}
 	if m.runtime.ARMAuthentication != nil && m.activeSection == SectionAzureResources {
 		return m.startAuthenticationCheck(selected, mfaRequired, authenticationContext, false, m.screen, "")
 	}
@@ -944,18 +990,24 @@ func (m Model) startStepUp(selected []pim.EligibleAssignment, mfaRequired bool, 
 }
 
 func (m Model) startAuthenticationCheck(selected []pim.EligibleAssignment, mfaRequired bool, authenticationContext string, afterStepUp bool, origin Screen, expectedPrincipalID string) (tea.Model, tea.Cmd) {
+	m.cancelAuthentication()
+	ctx, cancel := context.WithCancel(m.tenantContext())
+	m.authenticationCancel = cancel
 	m.authenticationCheck++
 	m.checkingAuthentication = true
 	m.err = nil
 	m.beginOperation("authentication")
 	m.recordActivity("Checking authentication requirements", false)
-	return m, tea.Batch(m.checkAuthentication(selected, mfaRequired, authenticationContext, afterStepUp, m.authenticationCheck, origin, expectedPrincipalID), m.spinner.Tick)
+	return m, tea.Batch(m.checkAuthentication(ctx, selected, mfaRequired, authenticationContext, afterStepUp, m.authenticationCheck, origin, expectedPrincipalID), m.spinner.Tick)
 }
 
-func (m Model) checkAuthentication(selected []pim.EligibleAssignment, mfaRequired bool, authenticationContext string, afterStepUp bool, checkID int, origin Screen, expectedPrincipalID string) tea.Cmd {
-	ctx := m.tenantContext()
+func (m Model) checkAuthentication(ctx context.Context, selected []pim.EligibleAssignment, mfaRequired bool, authenticationContext string, afterStepUp bool, checkID int, origin Screen, expectedPrincipalID string) tea.Cmd {
+	check := m.runtime.ARMAuthentication
+	if isGraphSection(m.activeSection) {
+		check = m.runtime.GraphAuthentication
+	}
 	return func() tea.Msg {
-		authentication, err := m.runtime.ARMAuthentication(ctx, mfaRequired, authenticationContext)
+		authentication, err := check(ctx, mfaRequired, authenticationContext)
 		return authenticationCheckedMsg{
 			selected: selected, authentication: authentication,
 			mfaRequired: mfaRequired, authenticationContext: authenticationContext,
@@ -988,6 +1040,8 @@ func (m Model) startActivation(selected []pim.EligibleAssignment, authentication
 		return m, nil
 	}
 	m.cancelAccountCheck()
+	m.cancelActivation()
+	m.activationContext, m.activationCancel = context.WithCancel(m.tenantContext())
 	m.screen = ScreenProgress
 	m.loading = true
 	m.err = nil
@@ -1006,6 +1060,7 @@ func (m Model) updateSummary(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.checkingAuthentication {
 		if key.Type == tea.KeyEsc {
 			m.checkingAuthentication = false
+			m.cancelAuthentication()
 			m.authenticationCheck++
 			m.endOperation("authentication")
 			m.recordActivity("Authentication check canceled", false)
@@ -1044,6 +1099,20 @@ func (m Model) updateSummary(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m Model) beginDiscovery(section Section, refresh bool) (tea.Model, tea.Cmd) {
 	m.activeSection = section
+	if m.needsGraphConnection(section) {
+		// Fence any pending discovery or policy load so its late result cannot replace this screen.
+		m.cancelDiscovery(true)
+		m.discoveryCheck++
+		m.loading = false
+		m.preparingPolicies = false
+		m.waitingForPolicies = false
+		m.endOperation("discovery")
+		m.endOperation("policies")
+		m.screen = ScreenGraphConnect
+		m.err = nil
+		m.detailsViewport.GotoTop()
+		return m, nil
+	}
 	m.screen = ScreenAssignments
 	accountCheck := m.startAccountCheck(false)
 	key := discoveryKey{tenantID: m.selectedTenant.ID, section: section}
@@ -1180,6 +1249,9 @@ func (m *Model) selectTenant(index int) {
 }
 
 func (m *Model) clearTenantWorkflow() {
+	m.cancelGraphConnection(true)
+	m.cancelAuthentication()
+	m.cancelActivation()
 	m.cancelDiscovery(true)
 	m.discoveryCheck++
 	m.authenticationCheck++
@@ -1352,7 +1424,15 @@ func (m Model) prepareAssignments(ctx context.Context, preparer assignmentPrepar
 func (m Model) activateSelected(selected []pim.EligibleAssignment, authentication azureauth.ARMAuthentication) tea.Cmd {
 	provider := m.providerForSection(m.activeSection)
 	justification := strings.TrimSpace(m.form.justification)
-	ctx := arm.WithAccessToken(m.tenantContext(), authentication.AccessToken)
+	ctx := m.tenantContext()
+	if m.activationContext != nil {
+		ctx = m.activationContext
+	}
+	if isGraphSection(m.activeSection) {
+		ctx = graph.WithAccessToken(ctx, authentication.AccessToken)
+	} else {
+		ctx = arm.WithAccessToken(ctx, authentication.AccessToken)
+	}
 	tenantID, generation := m.selectedTenant.ID, m.activationGeneration
 	if len(selected) == 0 {
 		return func() tea.Msg { return activationCompletedMsg{tenantID: tenantID, generation: generation} }
@@ -1365,12 +1445,14 @@ func (m Model) activateSelected(selected []pim.EligibleAssignment, authenticatio
 				assignment: assignment, tenantID: tenantID, generation: generation, index: index,
 				activate: func() tea.Msg {
 					requestAssignment := assignment
-					if m.activeSection == SectionAzureResources && authentication.PrincipalID != "" {
+					if authentication.PrincipalID != "" {
 						requestAssignment.PrincipalID = authentication.PrincipalID
 					}
 					var result pim.ActivationResult
 					var err error
-					if provider == nil {
+					if ctx.Err() != nil {
+						err = ctx.Err()
+					} else if provider == nil {
 						err = fmt.Errorf("provider for %s is unavailable", m.activeSection)
 					} else {
 						result, err = provider.Activate(ctx, pim.ActivationRequest{

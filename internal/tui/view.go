@@ -85,7 +85,7 @@ func (m Model) viewHome() string {
 	}
 	b.WriteString(violetStyle.Render(truncateText("Choose where to request privileged access", m.contentWidth())))
 	b.WriteString("\n")
-	b.WriteString(mutedStyle.Width(m.contentWidth()).Render("Entra Roles and Groups are paused: Microsoft Graph PIM permissions are required."))
+	b.WriteString(mutedStyle.Width(m.contentWidth()).Render("Entra Roles and Groups connect through Microsoft Graph browser sign-in."))
 	b.WriteString("\n")
 	descriptions := map[Section]string{
 		SectionEntra:          "Directory roles across your Microsoft Entra tenant",
@@ -448,9 +448,13 @@ func (m Model) summaryHeading() string {
 }
 
 func (m Model) resultCounts() string {
-	return successStyle.Render(fmt.Sprintf("%d activated", len(m.summary.activated))) + " · " +
-		warningStyle.Render(fmt.Sprintf("%d pending", len(m.summary.pendingApproval))) + " · " +
+	counts := successStyle.Render(fmt.Sprintf("%d activated", len(m.summary.activated))) + " · " +
+		warningStyle.Render(fmt.Sprintf("%d pending approval", len(m.summary.pendingApproval))) + " · " +
 		dangerStyle.Render(fmt.Sprintf("%d failed", len(m.summary.failed)))
+	if len(m.summary.pendingProvisioning) > 0 {
+		counts += " · " + warningStyle.Render(fmt.Sprintf("%d provisioning", len(m.summary.pendingProvisioning)))
+	}
+	return lipgloss.NewStyle().Width(m.contentWidth()).Render(counts)
 }
 
 func (m Model) summaryViewportHeight() int {
@@ -617,7 +621,7 @@ func (m Model) summaryContent() string {
 		switch {
 		case result.Success():
 			statusText = successStyle.Render(status)
-		case result.PendingApproval():
+		case result.PendingApproval(), result.PendingProvisioning():
 			statusText = warningStyle.Render(status)
 		case result.Failure():
 			statusText = dangerStyle.Render(status)

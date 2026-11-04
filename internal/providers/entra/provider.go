@@ -2,9 +2,11 @@ package entra
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/mathwro/pim-manager/internal/activation"
+	"github.com/mathwro/pim-manager/internal/graph"
 	"github.com/mathwro/pim-manager/internal/pim"
 )
 
@@ -45,7 +47,7 @@ func (p Provider) Discover(ctx context.Context) ([]pim.EligibleAssignment, error
 	for path != "" {
 		var response roleEligibilityResponse
 		if err := p.graph.Get(ctx, path, &response); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("discover eligible Entra roles: %w", err)
 		}
 		for _, item := range response.Value {
 			assignments = append(assignments, normalizeEligibility(item))
@@ -55,17 +57,25 @@ func (p Provider) Discover(ctx context.Context) ([]pim.EligibleAssignment, error
 	return assignments, nil
 }
 
+func (p Provider) Prepare(ctx context.Context, assignments []pim.EligibleAssignment) ([]pim.EligibleAssignment, error) {
+	return graph.PrepareAssignments(ctx, p.graph, assignments)
+}
+
 func normalizeEligibility(item roleEligibilitySchedule) pim.EligibleAssignment {
 	scopeType := pim.ScopeTypeTenant
 	scopeName := "Tenant"
 	if item.DirectoryScopeID != "/" && item.DirectoryScopeID != "" {
 		scopeName = item.DirectoryScopeID
 	}
+	displayName := item.RoleDefinition.DisplayName
+	if displayName == "" {
+		displayName = item.RoleDefinitionID
+	}
 	return pim.EligibleAssignment{
 		ID:                    item.ID,
 		Source:                pim.AssignmentSourceEntra,
 		Kind:                  pim.AssignmentKindDirectoryRole,
-		DisplayName:           item.RoleDefinition.DisplayName,
+		DisplayName:           displayName,
 		PrincipalID:           item.PrincipalID,
 		RoleDefinitionID:      item.RoleDefinitionID,
 		DirectoryScopeID:      item.DirectoryScopeID,
@@ -107,9 +117,9 @@ func (p Provider) Activate(ctx context.Context, request pim.ActivationRequest) (
 	var response activationResponse
 	err := p.graph.Post(ctx, "/roleManagement/directory/roleAssignmentScheduleRequests", activationBody(request), &response)
 	if err != nil {
-		return pim.ActivationResult{}, activation.WrapRetryable(err)
+		return pim.ActivationResult{}, activation.WrapRetryable(fmt.Errorf("activate Entra role %s: %w", request.Assignment.DisplayName, err))
 	}
-	return p.mapStatus(request.Assignment, response.Status, ""), nil
+	return graph.ActivationResult(request.Assignment, response.Status), nil
 }
 
 func activationBody(request pim.ActivationRequest) activationRequestBody {
@@ -127,16 +137,5 @@ func activationBody(request pim.ActivationRequest) activationRequestBody {
 				Duration: request.DurationISO,
 			},
 		},
-	}
-}
-
-func (p Provider) mapStatus(assignment pim.EligibleAssignment, status string, message string) pim.ActivationResult {
-	switch status {
-	case "Granted", "Provisioned":
-		return pim.ActivationResult{Assignment: assignment, Status: pim.ActivationStatusActivated, Message: status}
-	case "PendingApproval", "PendingApprovalProvisioning", "PendingAdminDecision":
-		return pim.ActivationResult{Assignment: assignment, Status: pim.ActivationStatusPendingApproval, Message: status}
-	default:
-		return pim.ActivationResult{Assignment: assignment, Status: pim.ActivationStatusFailed, Message: status + " " + message, Retryable: false}
 	}
 }

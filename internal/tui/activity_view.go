@@ -25,7 +25,7 @@ func (m Model) withActivity(content string) string {
 
 func (m Model) activityHeight() int {
 	rows := len(m.activityEntries)
-	if m.checkingTenants || m.checkingAccount || m.loading || m.preparingPolicies || m.checkingAuthentication || m.screen == ScreenProgress {
+	if m.checkingTenants || m.checkingAccount || m.loading || m.preparingPolicies || m.checkingAuthentication || m.graphConnecting || m.screen == ScreenProgress {
 		rows++
 	}
 	if m.height < 28 {
@@ -70,6 +70,7 @@ func (m Model) currentOperation() string {
 		{"discovery", "Discovery", m.loading && m.screen != ScreenProgress},
 		{"policies", "Activation requirements", m.preparingPolicies},
 		{"authentication", "Authenticating", m.checkingAuthentication},
+		{"graph", "Microsoft Graph sign-in", m.graphConnecting},
 		{"activation", "Submitting activation requests", m.screen == ScreenProgress},
 	}
 	var labels []string
@@ -118,6 +119,14 @@ func (m Model) screenHints() []keyHint {
 			hints = append([]keyHint{{"esc", "change account"}}, hints...)
 		}
 		return hints
+	case ScreenGraphConnect:
+		if m.graphConnecting {
+			return []keyHint{{"esc", "cancel"}, {"ctrl+c", "quit"}}
+		}
+		if m.accountUnavailable() {
+			return []keyHint{{"r", "refresh account"}, {"esc", "back"}, {"q", "quit"}}
+		}
+		return []keyHint{{"enter", "open browser"}, {"up/down", "scroll"}, {"esc", "back"}, {"?", "help"}, {"q", "quit"}}
 	case ScreenAssignments:
 		if m.loading {
 			return []keyHint{{"esc", "back"}, {"q", "quit"}}

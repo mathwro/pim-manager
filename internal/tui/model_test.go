@@ -2235,34 +2235,6 @@ func TestAssignmentsValidationErrorFitsMinimumSupportedTerminal(t *testing.T) {
 	}
 }
 
-func TestNewModelPausesGraphPIMSections(t *testing.T) {
-	entra := &scriptedProvider{}
-	azureResources := &scriptedProvider{}
-	groups := &scriptedProvider{}
-	model := NewModel(Runtime{
-		Entra:          entra,
-		AzureResources: azureResources,
-		Groups:         groups,
-	})
-
-	if len(model.sections) != 1 || model.sections[0] != SectionAzureResources {
-		t.Fatalf("expected only Azure Resources, got %#v", model.sections)
-	}
-	if model.selectedSection != SectionAzureResources {
-		t.Fatalf("expected Azure Resources selected, got %s", model.selectedSection)
-	}
-	view := model.View()
-	if !strings.Contains(view, "Entra Roles and Groups are paused") || !strings.Contains(view, "Microsoft Graph PIM permissions") {
-		t.Fatalf("expected paused-section guidance, got %q", view)
-	}
-
-	next, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	_ = runCommand(next.(Model), cmd)
-	if azureResources.discoverCalls != 1 || entra.discoverCalls != 0 || groups.discoverCalls != 0 {
-		t.Fatalf("expected only Azure Resources discovery, got entra=%d azure=%d groups=%d", entra.discoverCalls, azureResources.discoverCalls, groups.discoverCalls)
-	}
-}
-
 func TestToggleAllFilteredSkipsActiveAssignmentsThroughUpdate(t *testing.T) {
 	model := NewModel(Runtime{})
 	model.screen = ScreenAssignments
