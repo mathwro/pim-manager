@@ -1100,7 +1100,14 @@ func (m Model) updateSummary(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m Model) beginDiscovery(section Section, refresh bool) (tea.Model, tea.Cmd) {
 	m.activeSection = section
 	if m.needsGraphConnection(section) {
+		// Fence any pending discovery or policy load so its late result cannot replace this screen.
 		m.cancelDiscovery(true)
+		m.discoveryCheck++
+		m.loading = false
+		m.preparingPolicies = false
+		m.waitingForPolicies = false
+		m.endOperation("discovery")
+		m.endOperation("policies")
 		m.screen = ScreenGraphConnect
 		m.err = nil
 		m.detailsViewport.GotoTop()

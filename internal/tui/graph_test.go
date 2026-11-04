@@ -98,6 +98,19 @@ func TestGraphConnectionMarksSignedOutAccountUnavailable(t *testing.T) {
 	}
 }
 
+// Leaving ARM discovery for a disconnected Graph section must not let its late result replace the connection screen.
+func TestGraphConnectScreenRejectsPendingARMDiscovery(t *testing.T) {
+	arm := &scriptedProvider{discoveries: [][]pim.EligibleAssignment{{{ID: "arm-1"}}}}
+	model := NewModel(Runtime{AzureResources: arm, Entra: &scriptedProvider{}, GraphConnected: func(context.Context) bool { return false }, GraphConnect: func(context.Context) error { return nil }})
+	next, armDiscovery := model.beginDiscovery(SectionAzureResources, false)
+	next, _ = next.(Model).Update(tea.KeyMsg{Type: tea.KeyEsc})
+	next, _ = next.(Model).beginDiscovery(SectionEntra, false)
+	model = driveGraphCommand(next.(Model), armDiscovery)
+	if model.screen != ScreenGraphConnect || model.err != nil || model.loading || len(model.assignmentList.items) != 0 {
+		t.Fatalf("late ARM discovery leaked into Graph connection: screen=%s loading=%t err=%v items=%d", model.screen, model.loading, model.err, len(model.assignmentList.items))
+	}
+}
+
 func TestGraphConnectionCancelRejectsLateSuccess(t *testing.T) {
 	var connectionContext context.Context
 	resets := 0
