@@ -53,6 +53,9 @@ type roleManagementPolicyRule struct {
 	EnabledRules    []string `json:"enabledRules"`
 	IsEnabled       bool     `json:"isEnabled"`
 	ClaimValue      string   `json:"claimValue"`
+	Setting         *struct {
+		IsRequestorJustificationRequired bool `json:"isRequestorJustificationRequired"`
+	} `json:"setting"`
 }
 
 func resourceName(id string) string {
@@ -115,7 +118,13 @@ func policyForAssignment(policies []roleManagementPolicyAssignment, roleDefiniti
 					policy.JustificationRequired = true
 				case strings.EqualFold(enabled, "MultiFactorAuthentication"):
 					policy.MFARequired = true
+				default:
+					return pim.ActivationPolicy{}, fmt.Errorf("Azure activation requires unsupported policy setting %q for role definition %s; activate it in the Azure portal", enabled, roleDefinitionID)
 				}
+			}
+		case strings.EqualFold(rule.ID, "Approval_EndUser_Assignment"):
+			if rule.Setting != nil && rule.Setting.IsRequestorJustificationRequired {
+				policy.JustificationRequired = true
 			}
 		}
 	}

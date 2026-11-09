@@ -25,6 +25,8 @@ The policy-assignment response exposes `effectiveRules`, including the end-user 
 
 - `Expiration_EndUser_Assignment.maximumDuration`
 - `Enablement_EndUser_Assignment.enabledRules`, where `Justification` means a justification is required
+- `Approval_EndUser_Assignment.setting.isRequestorJustificationRequired`, which independently requires requestor justification
+- `Enablement_EndUser_Assignment.enabledRules` supports `MultiFactorAuthentication`; enabled authentication-context rules retain their required claim
 
 ## Architecture
 
@@ -93,9 +95,11 @@ The provider records `endDateTime` when present. Active schedule instances that 
 For every eligibility:
 
 - `MaximumDurationISO` comes from `Expiration_EndUser_Assignment.maximumDuration` in the matching policy assignment's `effectiveRules`.
-- `JustificationRequired` is true only when `Enablement_EndUser_Assignment.enabledRules` contains `Justification`, compared case-insensitively.
+- `JustificationRequired` is true when `Enablement_EndUser_Assignment.enabledRules` contains `Justification` (case-insensitive), or when `Approval_EndUser_Assignment.setting.isRequestorJustificationRequired` is true. An optional or absent approval setting never clears an enablement requirement.
 
 Effective rules are authoritative because they include inherited/default settings. Raw policy `rules` are not used.
+
+Unsupported end-user enablement requirements, including `Ticketing` and unknown enabled settings, block policy preparation and submission with a diagnostic naming the requirement, role, scope, and Azure portal activation alternative. Ticket fields are not collected or submitted. Admin/eligibility enablement and informational notification rules do not add self-activation requirements. Supported duration, MFA, and authentication-context behavior is unchanged.
 
 A missing policy assignment, missing maximum-duration rule, malformed required metadata, active-instance lookup failure, or policy lookup failure fails Azure Resources discovery with an error that identifies the affected role and scope where possible. The app must not guess `PT1H`, assume justification is optional, or permit duplicate activation when active state is unknown.
 
