@@ -709,6 +709,10 @@ func (m Model) updateTenants(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.moveTenant(-1)
 	case tea.KeyDown:
 		m.moveTenant(1)
+	case tea.KeyEsc:
+		if m.tenantErr != nil && m.selectedTenant.ID != "" {
+			m.screen = ScreenHome
+		}
 	case tea.KeyEnter:
 		if m.tenantErr == nil && len(m.tenants) > 0 {
 			m.selectTenant(m.tenantIndex)

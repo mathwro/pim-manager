@@ -114,6 +114,16 @@ func TestTenantRefreshErrorPreservesActivationWorkflow(t *testing.T) {
 			}
 
 			model = sendRunes(model, "h")
+			next, _ = model.Update(tea.KeyMsg{Type: tea.KeyEsc})
+			model = next.(Model)
+			if model.screen != ScreenTenants || !hasHint(model.screenHints(), "esc", "back") {
+				t.Fatalf("tenant error details missing esc back: screen=%s hints=%v", model.screen, model.screenHints())
+			}
+			next, _ = model.Update(tea.KeyMsg{Type: tea.KeyEsc})
+			model = next.(Model)
+			if model.screen != ScreenHome || model.selectedTenant.ID != "tenant-1" || model.tenantErr != refreshErr || len(model.summary.results) != 2 || len(model.assignmentList.items) != 2 {
+				t.Fatalf("esc from tenant error did not return home with state intact: screen=%s tenant=%s error=%v", model.screen, model.selectedTenant.ID, model.tenantErr)
+			}
 			next, cmd = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
 			model = runAccountCommand(next.(Model), cmd)
 			if model.screen != ScreenHome || model.tenantErr != nil || tenantCalls != 2 || !strings.Contains(model.View(), "Recovered tenant") || strings.Contains(model.View(), refreshErr.Error()) {
@@ -137,6 +147,13 @@ func TestTenantRefreshStartupErrorRetainsRecovery(t *testing.T) {
 			model = runAccountCommand(model, model.Init())
 			if model.screen != ScreenTenants || !strings.Contains(model.View(), cause.Error()) || !strings.Contains(model.View(), "r to retry") {
 				t.Fatalf("startup error did not show tenant recovery: screen=%s view=%s", model.screen, model.View())
+			}
+			if hasHint(model.screenHints(), "esc", "back") {
+				t.Fatalf("startup error offered esc back: %v", model.screenHints())
+			}
+			next, _ := model.Update(tea.KeyMsg{Type: tea.KeyEsc})
+			if next.(Model).screen != ScreenTenants {
+				t.Fatalf("esc left startup tenant error: screen=%s", next.(Model).screen)
 			}
 			next, retry := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
 			model = runAccountCommand(next.(Model), retry)
@@ -213,4 +230,13 @@ func TestTenantRefreshErrorFitsPopulatedWorkflowFrames(t *testing.T) {
 			}
 		}
 	}
+}
+
+func hasHint(hints []keyHint, key, label string) bool {
+	for _, hint := range hints {
+		if hint.key == key && hint.label == label {
+			return true
+		}
+	}
+	return false
 }

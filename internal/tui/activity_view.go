@@ -120,6 +120,9 @@ func (m Model) screenHints() []keyHint {
 			return []keyHint{{"q", "quit"}}
 		}
 		if m.tenantErr != nil {
+			if m.selectedTenant.ID != "" {
+				return []keyHint{{"r", "retry"}, {"esc", "back"}, {"?", "help"}, {"q", "quit"}}
+			}
 			return []keyHint{{"r", "retry"}, {"?", "help"}, {"q", "quit"}}
 		}
 		return []keyHint{{"up/down", "move"}, {"enter", "select"}, {"r", "refresh"}, {"?", "help"}, {"q", "quit"}}
