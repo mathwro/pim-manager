@@ -574,8 +574,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.tenantErr = typed.err
 		if typed.err != nil {
 			m.recordActivity("Tenant loading failed", true)
+			if !m.refreshingTenants {
+				m.screen = ScreenTenants
+			}
 			m.refreshingTenants = false
-			m.screen = ScreenTenants
 			return m, nil
 		}
 		m.recordActivity("Tenants ready", false)
@@ -707,6 +709,10 @@ func (m Model) updateTenants(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.moveTenant(-1)
 	case tea.KeyDown:
 		m.moveTenant(1)
+	case tea.KeyEsc:
+		if m.tenantErr != nil && m.selectedTenant.ID != "" {
+			m.screen = ScreenHome
+		}
 	case tea.KeyEnter:
 		if m.tenantErr == nil && len(m.tenants) > 0 {
 			m.selectTenant(m.tenantIndex)
@@ -736,7 +742,7 @@ func (m Model) updateTenants(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m Model) updateHome(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch key.Type {
 	case tea.KeyEsc:
-		if len(m.tenants) > 1 {
+		if len(m.tenants) > 1 || m.tenantErr != nil {
 			m.screen = ScreenTenants
 		}
 	case tea.KeyUp:

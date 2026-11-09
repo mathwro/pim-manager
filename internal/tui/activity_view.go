@@ -28,6 +28,9 @@ func (m Model) activityHeight() int {
 	if m.checkingTenants || m.checkingAccount || m.loading || m.preparingPolicies || m.checkingAuthentication || m.graphConnecting || m.screen == ScreenProgress {
 		rows++
 	}
+	if m.tenantErr != nil && m.screen != ScreenTenants {
+		rows++
+	}
 	if m.height < 28 {
 		return min(1, rows)
 	}
@@ -39,6 +42,13 @@ func (m Model) activityView(rows int) string {
 		return ""
 	}
 	lines := make([]string, 0, rows)
+	if m.tenantErr != nil && m.screen != ScreenTenants {
+		lines = append(lines, warningStyle.Render(truncateText("Tenant refresh failed; home: Esc details, r to retry", m.contentWidth())))
+		rows--
+		if rows == 0 {
+			return lines[0]
+		}
+	}
 	operation := m.currentOperation()
 	historyRows := rows
 	if operation != "" {
@@ -110,12 +120,17 @@ func (m Model) screenHints() []keyHint {
 			return []keyHint{{"q", "quit"}}
 		}
 		if m.tenantErr != nil {
+			if m.selectedTenant.ID != "" {
+				return []keyHint{{"r", "retry"}, {"esc", "back"}, {"?", "help"}, {"q", "quit"}}
+			}
 			return []keyHint{{"r", "retry"}, {"?", "help"}, {"q", "quit"}}
 		}
 		return []keyHint{{"up/down", "move"}, {"enter", "select"}, {"r", "refresh"}, {"?", "help"}, {"q", "quit"}}
 	case ScreenHome:
 		hints := []keyHint{{"up/down", "move"}, {"enter", "open"}, {"r", "refresh"}, {"?", "help"}, {"q", "quit"}}
-		if len(m.tenants) > 1 {
+		if m.tenantErr != nil {
+			hints = append([]keyHint{{"esc", "tenant error details"}}, hints...)
+		} else if len(m.tenants) > 1 {
 			hints = append([]keyHint{{"esc", "change account"}}, hints...)
 		}
 		return hints
