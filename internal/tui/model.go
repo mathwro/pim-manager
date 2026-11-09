@@ -312,7 +312,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.graphConnected(typed)
 	case assignmentsDiscoveredMsg:
 		key := discoveryKey{tenantID: typed.tenantID, section: typed.section}
-		if typed.checkID != m.discoveryCheck || typed.tenantID != m.selectedTenant.ID {
+		if typed.checkID != m.discoveryCheck || typed.tenantID != m.selectedTenant.ID || typed.section != m.activeSection {
 			return m, nil
 		}
 		m.cancelDiscovery(false)
@@ -358,11 +358,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case assignmentsPreparedMsg:
 		entry, ok := m.discoveryCache[typed.key]
-		if !ok || entry.generation != typed.generation || typed.key.tenantID != m.selectedTenant.ID {
+		if !ok || entry.generation != typed.generation || typed.key.tenantID != m.selectedTenant.ID || typed.key.section != m.activeSection {
 			return m, nil
 		}
 		m.cancelDiscovery(false)
-		current := typed.key == (discoveryKey{tenantID: m.selectedTenant.ID, section: m.activeSection})
 		m.endOperation("policies")
 		if typed.err != nil {
 			m.recordActivity("Activation requirements failed", true)
@@ -371,20 +370,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			delete(m.discoveryCache, typed.key)
-			if current {
-				m.preparingPolicies = false
-				m.waitingForPolicies = false
-				m.err = typed.err
-			}
+			m.preparingPolicies = false
+			m.waitingForPolicies = false
+			m.err = typed.err
 			return m, nil
 		}
 		m.recordActivity("Activation requirements ready", false)
 		entry.assignments = typed.assignments
 		entry.policiesReady = true
 		m.discoveryCache[typed.key] = entry
-		if !current {
-			return m, nil
-		}
 		selected := m.assignmentList.selectedIDs
 		m.assignmentList = newAssignmentList(typed.assignments)
 		for id, enabled := range selected {
@@ -1129,6 +1123,10 @@ func (m Model) beginDiscovery(section Section, refresh bool) (tea.Model, tea.Cmd
 		delete(m.discoveryCache, key)
 	}
 	if entry, ok := m.discoveryCache[key]; ok {
+		if m.discoveryCancelKey != key {
+			m.cancelDiscovery(true)
+			m.discoveryCheck++
+		}
 		m.loading = false
 		m.err = nil
 		m.assignmentList = newAssignmentList(entry.assignments)
