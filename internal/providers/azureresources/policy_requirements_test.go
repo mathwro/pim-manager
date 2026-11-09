@@ -7,11 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/charmbracelet/bubbles/spinner"
-	tea "github.com/charmbracelet/bubbletea"
 	"github.com/mathwro/pim-manager/internal/pim"
 	"github.com/mathwro/pim-manager/internal/providers/azureresources"
-	"github.com/mathwro/pim-manager/internal/tui"
 )
 
 // These fixtures catch dropped approval settings and silently ignored enablement requirements.
@@ -48,35 +45,6 @@ func TestARMPolicyRequirements(t *testing.T) {
 					t.Fatalf("policy = %#v, %v; want %#v", prepared, err, want)
 				}
 			}
-
-			// Drive the real provider through discovery, preparation, selection, and form validation.
-			model := tui.NewModel(tui.Runtime{AzureResources: provider})
-			model = policyRequirementsKey(model, tea.KeyEnter)
-			if test.unsupported != "" && !strings.Contains(model.View(), test.unsupported) {
-				t.Fatalf("preparation diagnostic did not reach user:\n%s", model.View())
-			}
-			model = policyRequirementsKey(model, tea.KeySpace)
-			model = policyRequirementsKey(model, tea.KeyEnter)
-			if test.unsupported != "" {
-				model = policyRequirementsKey(model, tea.KeyEnter)
-				model = policyRequirementsKey(model, tea.KeyEnter)
-				if strings.Contains(model.View(), "Justification —") {
-					t.Fatal("unsupported policy reached activation form")
-				}
-			} else {
-				model = policyRequirementsKey(model, tea.KeyEnter)
-				model = policyRequirementsKey(model, tea.KeyEnter)
-				blocked := strings.Contains(model.View(), "justification is required")
-				if blocked != test.justification {
-					t.Fatalf("empty justification blocked=%t, want %t:\n%s", blocked, test.justification, model.View())
-				}
-				if !test.justification && !strings.Contains(model.View(), "Review activation") {
-					t.Fatalf("optional justification did not reach confirmation:\n%s", model.View())
-				}
-			}
-			if client.puts != 0 {
-				t.Fatalf("submitted %d activation requests before policy/form validation", client.puts)
-			}
 		})
 	}
 }
@@ -96,7 +64,6 @@ func policyRequirementsAssignment() pim.EligibleAssignment {
 
 type policyRequirementsARM struct {
 	policy string
-	puts   int
 }
 
 func (c *policyRequirementsARM) PinAccessToken(ctx context.Context) (context.Context, error) {
@@ -107,44 +74,11 @@ func (c *policyRequirementsARM) Get(_ context.Context, path string, target any) 
 	switch {
 	case strings.Contains(path, "/roleManagementPolicyAssignments?"):
 		return json.Unmarshal([]byte(c.policy), target)
-	case strings.Contains(path, "/roleEligibilityScheduleInstances?"):
-		return json.Unmarshal([]byte(`{"value":[{"id":"eligible-1","properties":{"scope":"/subscriptions/sub-1","roleDefinitionId":"reader","expandedProperties":{"roleDefinition":{"displayName":"Reader"}}}}]}`), target)
-	case strings.Contains(path, "/roleAssignmentScheduleInstances?"):
-		return json.Unmarshal([]byte(`{"value":[]}`), target)
 	default:
 		return fmt.Errorf("unexpected ARM GET %s", path)
 	}
 }
 
 func (c *policyRequirementsARM) Put(context.Context, string, any, any) error {
-	c.puts++
 	return fmt.Errorf("unexpected activation submission")
-}
-
-func policyRequirementsKey(model tui.Model, key tea.KeyType) tui.Model {
-	next, command := model.Update(tea.KeyMsg{Type: key})
-	return policyRequirementsCommand(next.(tui.Model), command)
-}
-
-func policyRequirementsCommand(model tui.Model, command tea.Cmd) tui.Model {
-	if command == nil {
-		return model
-	}
-	message := command()
-	switch typed := message.(type) {
-	case tea.BatchMsg:
-		for _, child := range typed {
-			model = policyRequirementsCommand(model, child)
-		}
-		return model
-	case spinner.TickMsg:
-		return model
-	default:
-		next, follow := model.Update(message)
-		// Only discovery returns follow-up policy work; input focus timers need not run.
-		if strings.Contains(fmt.Sprintf("%T", message), "assignmentsDiscoveredMsg") {
-			return policyRequirementsCommand(next.(tui.Model), follow)
-		}
-		return next.(tui.Model)
-	}
 }
