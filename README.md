@@ -76,6 +76,14 @@ Run tests:
 go test ./...
 ```
 
+CI checks formatting for every tracked Go file, runs `go vet ./...`, and runs uncached tests with the race detector:
+
+```bash
+go test -race ./... -count=1
+```
+
+Race detection requires a supported platform and, on Linux, a C compiler with cgo enabled.
+
 Run the CLI:
 
 ```bash
