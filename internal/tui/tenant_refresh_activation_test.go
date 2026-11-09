@@ -3,10 +3,12 @@ package tui
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/mathwro/pim-manager/internal/azureauth"
 	"github.com/mathwro/pim-manager/internal/pim"
 )
@@ -94,8 +96,8 @@ func TestTenantRefreshErrorPreservesActivationWorkflow(t *testing.T) {
 			if model.screen != tc.wantScreen {
 				t.Errorf("background tenant error replaced workflow: got %s, want %s", model.screen, tc.wantScreen)
 			}
-			if view := model.View(); !strings.Contains(view, refreshErr.Error()) || !strings.Contains(view, "r to retry") {
-				t.Errorf("tenant diagnostic or retry guidance is not visible: %s", view)
+			if view := model.View(); !strings.Contains(view, "Tenant refresh failed") || !strings.Contains(view, "r to retry") {
+				t.Errorf("tenant warning or retry guidance is not visible: %s", view)
 			}
 			model = runAccountCommand(model, pending)
 			if model.screen != ScreenSummary || len(model.summary.results) != 2 || len(model.summary.activated) != 1 || len(model.summary.pendingProvisioning) != 1 {
@@ -107,8 +109,8 @@ func TestTenantRefreshErrorPreservesActivationWorkflow(t *testing.T) {
 			if provider.tokens[0] != "checked-token" || provider.tokens[1] != "checked-token" || provider.activationTenants[0] != "tenant-1" || provider.activationTenants[1] != "tenant-1" {
 				t.Fatalf("tenant error changed checked activation identity: tokens=%v tenants=%v", provider.tokens, provider.activationTenants)
 			}
-			if !strings.Contains(model.View(), refreshErr.Error()) {
-				t.Fatal("summary hid the unresolved tenant diagnostic")
+			if !strings.Contains(model.View(), "Tenant refresh failed") {
+				t.Fatal("summary hid the unresolved tenant warning")
 			}
 
 			model = sendRunes(model, "h")
@@ -142,5 +144,73 @@ func TestTenantRefreshStartupErrorRetainsRecovery(t *testing.T) {
 				t.Fatalf("startup tenant retry failed: screen=%s tenant=%s error=%v calls=%d", model.screen, model.selectedTenant.ID, model.tenantErr, calls)
 			}
 		})
+	}
+}
+
+func TestTenantRefreshErrorFitsPopulatedWorkflowFrames(t *testing.T) {
+	for _, screen := range []Screen{ScreenAssignments, ScreenSummary} {
+		for _, size := range []struct{ width, height int }{{80, 26}, {96, 30}} {
+			for _, diagnostic := range []string{
+				"tenant endpoint unavailable",
+				"az rest failed\n" + strings.Repeat("long Azure CLI diagnostic detail ", 40) + "\ndiagnostic tail marker",
+			} {
+				t.Run(fmt.Sprintf("%s/%dx%d/multiline=%t", screen, size.width, size.height, strings.Contains(diagnostic, "\n")), func(t *testing.T) {
+					model := NewModel(Runtime{})
+					model.screen = screen
+					model.activeSection = SectionAzureResources
+					model.selectedTenant = azureauth.Tenant{ID: "tenant-1"}
+					model.tenants = []azureauth.Tenant{model.selectedTenant}
+					var assignments []pim.EligibleAssignment
+					var results []pim.ActivationResult
+					for index := range 30 {
+						assignment := pim.EligibleAssignment{ID: fmt.Sprint(index), DisplayName: fmt.Sprintf("Role-%02d", index)}
+						assignments = append(assignments, assignment)
+						results = append(results, pim.ActivationResult{Assignment: assignment, Status: pim.ActivationStatusActivated})
+					}
+					model.assignmentList = newAssignmentList(assignments)
+					model.listCursor = 29
+					model.summary = newSummary(results)
+					for index := range 9 {
+						model.recordActivity(fmt.Sprintf("event-%d", index), false)
+					}
+					next, _ := model.Update(tea.WindowSizeMsg{Width: size.width, Height: size.height})
+					model = next.(Model)
+					model.refreshingTenants = true
+					next, _ = model.Update(tenantsCheckedMsg{checkID: model.tenantCheck, err: errors.New(diagnostic)})
+					model = next.(Model)
+					view := model.View()
+					t.Logf("rendered frame: %dx%d", lipgloss.Width(view), lipgloss.Height(view))
+					assertActivityFrameFits(t, view, size.width, size.height)
+					for _, visible := range []string{"Tenant refresh failed", "r to retry", "esc"} {
+						if !strings.Contains(view, visible) {
+							t.Fatalf("tenant warning or workflow controls missing %q: %s", visible, view)
+						}
+					}
+					if screen == ScreenAssignments {
+						if !strings.Contains(view, "Role-29") || !strings.Contains(view, "space") || !strings.Contains(view, "enter") {
+							t.Fatalf("warning displaced focused assignment or selection controls: %s", view)
+						}
+						next, _ = model.Update(tea.KeyMsg{Type: tea.KeyEsc})
+					} else {
+						if !strings.Contains(view, "Role-00") || !strings.Contains(view, "up/down") || !strings.Contains(view, "home") {
+							t.Fatalf("warning displaced summary results or scroll controls: %s", view)
+						}
+						next, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'h'}})
+					}
+					model = next.(Model)
+					next, _ = model.Update(tea.KeyMsg{Type: tea.KeyEsc})
+					model = next.(Model)
+					if model.screen != ScreenTenants {
+						t.Fatalf("single-tenant session cannot open full refresh diagnostic: screen=%s", model.screen)
+					}
+					details := strings.Split(diagnostic, "\n")
+					for _, detail := range []string{details[0], details[len(details)-1]} {
+						if !strings.Contains(model.View(), detail) {
+							t.Fatalf("tenant recovery screen lost diagnostic detail %q", detail)
+						}
+					}
+				})
+			}
+		}
 	}
 }

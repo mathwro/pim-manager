@@ -128,7 +128,7 @@ A failed or canceled token check or step-up submits no activation requests. The 
 - If refresh removes the selected tenant, the model returns to tenant selection and clears tenant-specific workflow state.
 - Invalid JSON and records without tenant IDs produce an actionable parsing error when no usable tenant remains.
 - Initial tenant-list and tenant-name enrichment errors remain on the tenant screen with their Azure CLI details and can be retried with `r`.
-- Background tenant refresh errors preserve the selected tenant and current workflow, including authentication, queued activation requests, accepted results, and the final summary. A persistent warning retains the error details and directs the user to return home and press `r` to retry; a successful refresh clears it.
+- Background tenant refresh errors preserve the selected tenant and current workflow, including authentication, queued activation requests, accepted results, and the final summary. A compact persistent notice uses the existing activity dock so it cannot displace workflow content or keyboard controls. Return home and press `Esc` to view the full Azure CLI diagnostic on the tenant recovery screen, even for a single tenant, or press `r` to retry; a successful refresh clears the notice.
 - Assignment discovery errors remain inside the selected PIM area.
 - Authentication and activation errors retain the existing per-batch and per-assignment isolation.
 - Stale tenant-list or discovery messages are ignored by request generation.

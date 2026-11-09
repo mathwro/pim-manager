@@ -697,9 +697,6 @@ func (m Model) View() string {
 	if m.accountUnavailable() {
 		content = warningStyle.Width(m.contentWidth()-4).Render(fmt.Sprintf("Account unavailable\nRun az login --tenant %s, then press r to reload.\n%s", m.selectedTenant.ID, m.accountErr)) + "\n\n" + content
 	}
-	if m.tenantErr != nil && m.screen != ScreenTenants {
-		content = warningStyle.Width(m.contentWidth()-4).Render(fmt.Sprintf("Tenant refresh failed\nReturn home and press r to retry.\n%s", m.tenantErr)) + "\n\n" + content
-	}
 	return appFrameStyle.Width(m.frameWidth()).Render(m.withActivity(content))
 }
 
@@ -741,7 +738,7 @@ func (m Model) updateTenants(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m Model) updateHome(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch key.Type {
 	case tea.KeyEsc:
-		if len(m.tenants) > 1 {
+		if len(m.tenants) > 1 || m.tenantErr != nil {
 			m.screen = ScreenTenants
 		}
 	case tea.KeyUp:
