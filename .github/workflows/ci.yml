@@ -44,3 +44,16 @@ jobs:
           test "$(./pim-manager --version | wc -l)" -eq 1
           ./pim-manager --version | sed -n '/^pim-manager /q 0; q 1'
           ./pim-manager --help >/dev/null
+
+  windows-azure-cli:
+    runs-on: windows-2025
+    steps:
+      - name: Check out source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Test native Windows Azure CLI launchers
+        run: go test ./internal/azureauth -count=1
