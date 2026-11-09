@@ -6,8 +6,10 @@ import (
 )
 
 // batchCommandLine quotes for both cmd.exe and the launcher's %* forwarding to Python.
-// The result is expanded from one child-only environment variable: cmd doesn't
-// recursively expand percent expressions in its value. Delayed expansion must be off.
+// Double quotes are rejected: wrappers such as Scoop shims add further cmd parse
+// passes, so no fixed escaping depth is safe for them. The result is expanded from
+// one child-only environment variable: cmd doesn't recursively expand percent
+// expressions in its value. Delayed expansion must be off.
 func batchCommandLine(path string, args []string) (string, error) {
 	if strings.ContainsAny(path, "\x00\r\n\"") {
 		return "", errors.New("invalid Azure CLI batch path")
@@ -17,8 +19,8 @@ func batchCommandLine(path string, args []string) (string, error) {
 	line.WriteString(path)
 	line.WriteByte('"')
 	for _, arg := range args {
-		if strings.ContainsAny(arg, "\x00\r\n") {
-			return "", errors.New("Azure CLI batch arguments cannot contain NUL or newlines")
+		if strings.ContainsAny(arg, "\x00\r\n\"") {
+			return "", errors.New("Azure CLI batch arguments cannot contain NUL, newlines, or double quotes")
 		}
 		line.WriteByte(' ')
 		writeBatchCharacter(&line, '"')
@@ -27,11 +29,6 @@ func batchCommandLine(path string, args []string) (string, error) {
 			if c == '\\' {
 				backslashes++
 			} else {
-				if c == '"' {
-					for range backslashes + 1 {
-						line.WriteByte('\\')
-					}
-				}
 				backslashes = 0
 			}
 			writeBatchCharacter(&line, c)
