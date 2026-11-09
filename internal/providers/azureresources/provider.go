@@ -203,11 +203,16 @@ func (p Provider) Activate(ctx context.Context, request pim.ActivationRequest) (
 		return pim.ActivationResult{}, activation.WrapRetryable(err)
 	}
 	switch response.Properties.Status {
-	case "Granted", "Provisioned":
+	case "Granted", "Provisioned", "ScheduleCreated":
 		return pim.ActivationResult{Assignment: request.Assignment, Status: pim.ActivationStatusActivated, Message: response.Properties.Status}, nil
 	case "PendingApproval", "PendingApprovalProvisioning", "PendingAdminDecision":
 		return pim.ActivationResult{Assignment: request.Assignment, Status: pim.ActivationStatusPendingApproval, Message: response.Properties.Status}, nil
+	case "Accepted", "PendingEvaluation", "PendingProvisioning", "ProvisioningStarted", "PendingScheduleCreation", "PendingExternalProvisioning", "AdminApproved":
+		return pim.ActivationResult{Assignment: request.Assignment, Status: pim.ActivationStatusPendingProvisioning, Message: response.Properties.Status}, nil
 	default:
+		if response.Properties.Status == "" {
+			return pim.ActivationResult{Assignment: request.Assignment, Status: pim.ActivationStatusFailed, Message: "ARM activation response did not include a status; check PIM before resubmitting"}, nil
+		}
 		return pim.ActivationResult{Assignment: request.Assignment, Status: pim.ActivationStatusFailed, Message: response.Properties.Status}, nil
 	}
 }
