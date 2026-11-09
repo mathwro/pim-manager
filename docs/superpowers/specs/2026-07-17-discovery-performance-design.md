@@ -103,9 +103,10 @@ Behavior:
 - A successful list-ready result creates or replaces the entry for its tenant and section.
 - A successful policy result replaces the assignments and marks the entry ready.
 - Re-entering Azure Resources displays the cached assignments immediately.
-- If cached policies are incomplete, policy preparation continues.
+- Re-entering the same section while its cached policies are incomplete keeps the existing preparation running.
+- Opening another section, including a cache hit, cancels and fences the previous section's pending discovery or policy preparation. Discard its incomplete cache entry, but retain successful cached results.
 - Pressing `r` deletes the entry, increments its generation, and starts fresh discovery.
-- Messages carry tenant, section, and generation. A late message cannot overwrite a refreshed entry.
+- Messages carry tenant, section, and generation. Validate ownership before canceling work or changing foreground state; late inactive-section results and errors cannot overwrite the active list, interrupt policy preparation or activation, or discard accepted activation outcomes.
 - Completing an activation invalidates the current Azure Resources entry because active state may have changed.
 - Exiting the process discards all cache state.
 
