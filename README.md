@@ -40,7 +40,7 @@ Prebuilt release archives are also published for Windows, macOS, and Linux on x8
 
 ## Authentication
 
-The app uses your existing Azure CLI session. Sign in before running:
+The app requires Azure CLI on `PATH` and uses your existing session. Windows `az.cmd` installations are supported through the Windows command interpreter; macOS and Linux run Azure CLI directly. Sign in before running:
 
 ```bash
 az login

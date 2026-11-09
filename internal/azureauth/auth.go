@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"os/exec"
 	"strings"
 
@@ -290,17 +289,24 @@ func StepUpLoginCommand(tenantID string, mfaRequired bool, authenticationContext
 		return nil, fmt.Errorf("encode step-up claims: %w", err)
 	}
 	claims := base64.StdEncoding.EncodeToString(claimsJSON)
-	command := exec.Command(
-		"az", "login",
+	command, err := newCLICommand(
+		context.Background(), "az", "login",
 		"--tenant", tenantID,
 		"--scope", "https://management.core.windows.net//.default",
 		"--claims-challenge", claims,
 		"--output", "none",
 	)
-	command.Env = append(os.Environ(), "AZURE_CORE_LOGIN_EXPERIENCE_V2=off")
+	if err != nil {
+		return nil, fmt.Errorf("construct Azure CLI step-up command: %w", err)
+	}
+	command.Env = append(command.Environ(), "AZURE_CORE_LOGIN_EXPERIENCE_V2=off")
 	return command, nil
 }
 
 func execCommand(ctx context.Context, name string, args ...string) ([]byte, error) {
-	return exec.CommandContext(ctx, name, args...).Output()
+	command, err := newCLICommand(ctx, name, args...)
+	if err != nil {
+		return nil, err
+	}
+	return command.Output()
 }
