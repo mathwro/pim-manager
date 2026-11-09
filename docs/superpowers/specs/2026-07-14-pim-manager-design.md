@@ -141,6 +141,8 @@ Supported result states:
 | `pending_provisioning` | The request was accepted and awaits provisioning; do not retry it as a failure. |
 | `failed` | The request failed and includes an actionable error message when available. |
 
+For Azure Resources, ARM `Accepted`, `PendingEvaluation`, `PendingProvisioning`, `ProvisioningStarted`, `PendingScheduleCreation`, `PendingExternalProvisioning`, and `AdminApproved` mean `pending_provisioning`: the request is accepted, not a failed activation or a reason to resubmit. `Granted`, `Provisioned`, and `ScheduleCreated` mean `activated`; pending approval states remain `pending_approval`. Terminal failure, revocation, and unknown statuses remain nonretryable `failed` results with the ARM status preserved; a missing status includes guidance to check PIM before resubmitting. No status triggers automatic retry or polling.
+
 Failures do not stop the batch. The summary preserves individual messages for policy failures, API failures, and transient errors.
 
 Retry behavior is conservative. The MVP allows manual retry for failed activations classified as transient or input-related, but it does not automatically retry any activation. Failures that require user action, such as approval, incomplete MFA, permission changes, or policy changes, are shown with their message and are not offered as retry candidates.
