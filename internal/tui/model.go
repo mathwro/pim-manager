@@ -574,8 +574,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.tenantErr = typed.err
 		if typed.err != nil {
 			m.recordActivity("Tenant loading failed", true)
+			if !m.refreshingTenants {
+				m.screen = ScreenTenants
+			}
 			m.refreshingTenants = false
-			m.screen = ScreenTenants
 			return m, nil
 		}
 		m.recordActivity("Tenants ready", false)
@@ -694,6 +696,9 @@ func (m Model) View() string {
 	}
 	if m.accountUnavailable() {
 		content = warningStyle.Width(m.contentWidth()-4).Render(fmt.Sprintf("Account unavailable\nRun az login --tenant %s, then press r to reload.\n%s", m.selectedTenant.ID, m.accountErr)) + "\n\n" + content
+	}
+	if m.tenantErr != nil && m.screen != ScreenTenants {
+		content = warningStyle.Width(m.contentWidth()-4).Render(fmt.Sprintf("Tenant refresh failed\nReturn home and press r to retry.\n%s", m.tenantErr)) + "\n\n" + content
 	}
 	return appFrameStyle.Width(m.frameWidth()).Render(m.withActivity(content))
 }
