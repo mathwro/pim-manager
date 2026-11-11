@@ -197,7 +197,7 @@ type activationResponse struct {
 
 func (p Provider) Activate(ctx context.Context, request pim.ActivationRequest) (pim.ActivationResult, error) {
 	requestID := uuid.NewString()
-	path := fmt.Sprintf("%s/providers/Microsoft.Authorization/roleAssignmentScheduleRequests/%s?api-version=%s", request.Assignment.AzureScope, requestID, arm.AuthorizationAPIVersion)
+	path := fmt.Sprintf("%s/providers/Microsoft.Authorization/roleAssignmentScheduleRequests/%s?api-version=%s", scopePathPrefix(request.Assignment.AzureScope), requestID, arm.AuthorizationAPIVersion)
 	var response activationResponse
 	if err := p.arm.Put(ctx, path, activationBody(request), &response); err != nil {
 		return pim.ActivationResult{}, activation.WrapRetryable(err)
@@ -236,4 +236,12 @@ func activationBody(request pim.ActivationRequest) activationRequestBody {
 			},
 		},
 	}
+}
+
+func scopePathPrefix(scope string) string {
+	scope = strings.TrimRight(strings.TrimSpace(scope), "/")
+	if scope != "" && !strings.HasPrefix(scope, "/") {
+		return "/" + scope
+	}
+	return scope
 }
