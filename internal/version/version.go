@@ -13,6 +13,7 @@ var (
 	semanticVersion string
 	commit          string
 	buildDate       string
+	readBuildInfo   = debug.ReadBuildInfo
 )
 
 // String returns the non-mutating CLI version line.
@@ -31,12 +32,35 @@ func Tag() string {
 	return "v" + strings.TrimPrefix(version, "v")
 }
 
+// IsPrebuiltRelease reports whether the running binary has release version
+// metadata injected via linker flags (prebuilt release archives and package
+// manager formulas).
+func IsPrebuiltRelease() bool {
+	return strings.TrimSpace(semanticVersion) != ""
+}
+
+// IsGoInstall reports whether the running binary was built from a tagged Go
+// module version (such as `go install ...@latest`) rather than a prebuilt
+// ldflag-injected release archive or a local development build.
+func IsGoInstall() bool {
+	if IsPrebuiltRelease() {
+		return false
+	}
+	info, ok := readBuildInfo()
+	if !ok {
+		return false
+	}
+	return strings.HasPrefix(info.Main.Version, "v") &&
+		!strings.Contains(info.Main.Version, "-") &&
+		!strings.Contains(info.Main.Version, "+")
+}
+
 func buildMetadata() (string, string, string) {
 	version := strings.TrimPrefix(strings.TrimSpace(semanticVersion), "v")
 	revision := strings.TrimSpace(commit)
 	date := strings.TrimSpace(buildDate)
 
-	if info, ok := debug.ReadBuildInfo(); ok {
+	if info, ok := readBuildInfo(); ok {
 		if version == "" && strings.HasPrefix(info.Main.Version, "v") {
 			version = strings.TrimPrefix(info.Main.Version, "v")
 		}
