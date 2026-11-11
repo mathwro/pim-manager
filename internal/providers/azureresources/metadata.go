@@ -3,6 +3,7 @@ package azureresources
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -57,6 +58,11 @@ type roleManagementPolicyRule struct {
 		IsApprovalRequired               bool `json:"isApprovalRequired"`
 		IsRequestorJustificationRequired bool `json:"isRequestorJustificationRequired"`
 	} `json:"setting"`
+	Target struct {
+		Caller     string   `json:"caller"`
+		Level      string   `json:"level"`
+		Operations []string `json:"operations"`
+	} `json:"target"`
 }
 
 func resourceName(id string) string {
@@ -101,18 +107,32 @@ func policyForAssignment(policies []roleManagementPolicyAssignment, roleDefiniti
 
 	assignment := policies[matchingIndex]
 	var policy pim.ActivationPolicy
-	var enablementFound bool
+	seen := make(map[string]bool)
 	for _, rule := range assignment.Properties.EffectiveRules {
-		switch {
-		case strings.EqualFold(rule.ID, "Expiration_EndUser_Assignment"):
-			policy.MaximumDurationISO = strings.TrimSpace(rule.MaximumDuration)
-		case strings.EqualFold(rule.ID, "AuthenticationContext_EndUser_Assignment") && rule.IsEnabled:
-			policy.AuthenticationContext = strings.TrimSpace(rule.ClaimValue)
-			if policy.AuthenticationContext == "" {
-				return pim.ActivationPolicy{}, fmt.Errorf("empty authentication context for role definition %s", roleDefinitionID)
+		if !isEndUserActivationRule(rule) {
+			continue
+		}
+		id := strings.ToLower(strings.TrimSpace(rule.ID))
+		switch id {
+		case "expiration_enduser_assignment", "enablement_enduser_assignment", "authenticationcontext_enduser_assignment", "approval_enduser_assignment":
+			if seen[id] {
+				return pim.ActivationPolicy{}, fmt.Errorf("duplicate Azure activation policy rule %q for role definition %s", rule.ID, roleDefinitionID)
 			}
-		case strings.EqualFold(rule.ID, "Enablement_EndUser_Assignment"):
-			enablementFound = true
+			seen[id] = true
+		default:
+			return pim.ActivationPolicy{}, fmt.Errorf("Azure activation requires unsupported policy rule %q for role definition %s; activate it in the Azure portal", rule.ID, roleDefinitionID)
+		}
+		switch id {
+		case "expiration_enduser_assignment":
+			policy.MaximumDurationISO = strings.TrimSpace(rule.MaximumDuration)
+		case "authenticationcontext_enduser_assignment":
+			if rule.IsEnabled {
+				policy.AuthenticationContext = strings.TrimSpace(rule.ClaimValue)
+				if policy.AuthenticationContext == "" {
+					return pim.ActivationPolicy{}, fmt.Errorf("empty authentication context for role definition %s", roleDefinitionID)
+				}
+			}
+		case "enablement_enduser_assignment":
 			for _, enabled := range rule.EnabledRules {
 				switch {
 				case strings.EqualFold(enabled, "Justification"):
@@ -123,17 +143,42 @@ func policyForAssignment(policies []roleManagementPolicyAssignment, roleDefiniti
 					return pim.ActivationPolicy{}, fmt.Errorf("Azure activation requires unsupported policy setting %q for role definition %s; activate it in the Azure portal", enabled, roleDefinitionID)
 				}
 			}
-		case strings.EqualFold(rule.ID, "Approval_EndUser_Assignment"):
+		case "approval_enduser_assignment":
 			// Default policies set isRequestorJustificationRequired even with approval off; it only applies to approval requests.
 			if rule.Setting != nil && rule.Setting.IsApprovalRequired && rule.Setting.IsRequestorJustificationRequired {
 				policy.JustificationRequired = true
 			}
 		}
 	}
-	if policy.MaximumDurationISO == "" || !enablementFound {
+	if policy.MaximumDurationISO == "" || !seen["enablement_enduser_assignment"] {
 		return pim.ActivationPolicy{}, fmt.Errorf("incomplete end-user activation policy for role definition %s", roleDefinitionID)
 	}
 	return policy, nil
+}
+
+func isEndUserActivationRule(rule roleManagementPolicyRule) bool {
+	idLower := strings.ToLower(strings.TrimSpace(rule.ID))
+	if strings.HasPrefix(idLower, "notification_") || strings.EqualFold(rule.RuleType, "RoleManagementPolicyNotificationRule") {
+		return false
+	}
+	if rule.Target.Caller != "" && !strings.EqualFold(rule.Target.Caller, "EndUser") {
+		return false
+	}
+	if rule.Target.Level != "" && !strings.EqualFold(rule.Target.Level, "Assignment") {
+		return false
+	}
+	if len(rule.Target.Operations) > 0 && !slices.ContainsFunc(rule.Target.Operations, func(op string) bool {
+		return strings.EqualFold(op, "All") || strings.EqualFold(op, "Activate")
+	}) {
+		return false
+	}
+	if rule.Target.Caller == "" && strings.Contains(idLower, "_admin_") {
+		return false
+	}
+	if rule.Target.Level == "" && strings.HasSuffix(idLower, "_eligibility") {
+		return false
+	}
+	return true
 }
 
 func assignmentScopes(assignments []pim.EligibleAssignment) []string {
