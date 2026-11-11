@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 )
 
@@ -51,7 +52,25 @@ func NewClient(httpClient *http.Client, tokenSource TokenSource) Client {
 	if httpClient == nil {
 		httpClient = http.DefaultClient
 	}
-	return Client{httpClient: httpClient, tokenSource: tokenSource, baseURL: BaseURL}
+	client := *httpClient
+	checkRedirect := client.CheckRedirect
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		// A redirected PUT can replay a real activation without fresh confirmation.
+		if len(via) == 0 || via[0].Method != http.MethodGet {
+			return http.ErrUseLastResponse
+		}
+		if !sameOrigin(req.URL, via[0].URL) {
+			return fmt.Errorf("refusing ARM redirect outside ARM origin")
+		}
+		if checkRedirect != nil {
+			return checkRedirect(req, via)
+		}
+		if len(via) >= 10 {
+			return fmt.Errorf("stopped after 10 ARM redirects")
+		}
+		return nil
+	}
+	return Client{httpClient: &client, tokenSource: tokenSource, baseURL: BaseURL}
 }
 
 func (c Client) PinAccessToken(ctx context.Context) (context.Context, error) {
@@ -74,15 +93,15 @@ func (c Client) Put(ctx context.Context, path string, body any, out any) error {
 }
 
 func (c Client) do(ctx context.Context, method string, path string, body any, out any) error {
-	ctx, err := c.PinAccessToken(ctx)
+	u, err := c.requestURL(path)
+	if err != nil {
+		return err
+	}
+	ctx, err = c.PinAccessToken(ctx)
 	if err != nil {
 		return err
 	}
 	token := PinnedAccessToken(ctx)
-	u := c.baseURL + path
-	if strings.HasPrefix(path, "https://") {
-		u = path
-	}
 	var reader io.Reader
 	if body != nil {
 		buf := &bytes.Buffer{}
@@ -117,4 +136,30 @@ func (c Client) do(ctx context.Context, method string, path string, body any, ou
 		return nil
 	}
 	return json.NewDecoder(resp.Body).Decode(out)
+}
+
+func (c Client) requestURL(path string) (string, error) {
+	base, err := url.Parse(c.baseURL)
+	if err != nil {
+		return "", fmt.Errorf("invalid ARM base URL: %w", err)
+	}
+	target, err := url.Parse(path)
+	if err != nil {
+		return "", fmt.Errorf("invalid ARM request URL: %w", err)
+	}
+	if target.IsAbs() {
+		if !sameOrigin(target, base) {
+			return "", fmt.Errorf("refusing ARM URL outside ARM origin: %s", path)
+		}
+		return target.String(), nil
+	}
+	if !strings.HasPrefix(path, "/") || strings.HasPrefix(path, "//") || target.Host != "" || target.User != nil || target.Fragment != "" {
+		return "", fmt.Errorf("invalid relative ARM request URL: %s", path)
+	}
+	return c.baseURL + path, nil
+}
+
+func sameOrigin(target, base *url.URL) bool {
+	return target.User == nil && target.Opaque == "" && target.Fragment == "" &&
+		strings.EqualFold(target.Scheme, base.Scheme) && strings.EqualFold(target.Host, base.Host)
 }

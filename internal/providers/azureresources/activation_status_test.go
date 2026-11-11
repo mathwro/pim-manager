@@ -71,6 +71,34 @@ func TestActivateNormalizesARMStatus(t *testing.T) {
 	}
 }
 
+func TestActivateSupportsTenantRootAndUnprefixedScopesWithARMClient(t *testing.T) {
+	for _, test := range []struct {
+		name, scope, wantPrefix string
+	}{
+		{"tenant root slash", "/", "/providers/Microsoft.Authorization/roleAssignmentScheduleRequests/"},
+		{"trailing slash subscription", "/subscriptions/sub-1/", "/subscriptions/sub-1/providers/Microsoft.Authorization/roleAssignmentScheduleRequests/"},
+		{"unprefixed subscription", "subscriptions/sub-1", "/subscriptions/sub-1/providers/Microsoft.Authorization/roleAssignmentScheduleRequests/"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var gotPath string
+			client := arm.NewClient(&http.Client{Transport: activationStatusTransport(func(req *http.Request) (*http.Response, error) {
+				gotPath = req.URL.Path
+				return &http.Response{StatusCode: http.StatusCreated, Body: io.NopCloser(strings.NewReader(`{"properties":{"status":"Provisioned"}}`)), Header: make(http.Header)}, nil
+			})}, nil)
+			result, err := NewProvider(client).Activate(
+				arm.WithAccessToken(context.Background(), "checked-token"),
+				pim.ActivationRequest{Assignment: pim.EligibleAssignment{ID: "eligible-role", AzureScope: test.scope}, DurationISO: "PT1H"},
+			)
+			if err != nil {
+				t.Fatalf("Activate(%q) returned error: %v", test.scope, err)
+			}
+			if !result.Success() || !strings.HasPrefix(gotPath, test.wantPrefix) {
+				t.Fatalf("unexpected path/result: path=%q wantPrefix=%q result=%#v", gotPath, test.wantPrefix, result)
+			}
+		})
+	}
+}
+
 type activationStatusTransport func(*http.Request) (*http.Response, error)
 
 func (f activationStatusTransport) RoundTrip(req *http.Request) (*http.Response, error) {

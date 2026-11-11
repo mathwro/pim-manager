@@ -199,7 +199,7 @@ func forEachScope(ctx context.Context, scopes []string, fn func(context.Context,
 }
 
 func (p Provider) discoverActiveAssignments(ctx context.Context, scope string) ([]roleAssignmentScheduleInstance, error) {
-	path := fmt.Sprintf("%s/providers/Microsoft.Authorization/roleAssignmentScheduleInstances?$filter=asTarget%%28%%29&api-version=%s", strings.TrimRight(scope, "/"), arm.AuthorizationAPIVersion)
+	path := fmt.Sprintf("%s/providers/Microsoft.Authorization/roleAssignmentScheduleInstances?$filter=asTarget%%28%%29&api-version=%s", scopePathPrefix(scope), arm.AuthorizationAPIVersion)
 	var out []roleAssignmentScheduleInstance
 	for path != "" {
 		var response activeAssignmentResponse
@@ -213,7 +213,7 @@ func (p Provider) discoverActiveAssignments(ctx context.Context, scope string) (
 }
 
 func (p Provider) policiesForScope(ctx context.Context, scope string) ([]roleManagementPolicyAssignment, error) {
-	path := fmt.Sprintf("%s/providers/Microsoft.Authorization/roleManagementPolicyAssignments?api-version=%s", strings.TrimRight(scope, "/"), arm.AuthorizationAPIVersion)
+	path := fmt.Sprintf("%s/providers/Microsoft.Authorization/roleManagementPolicyAssignments?api-version=%s", scopePathPrefix(scope), arm.AuthorizationAPIVersion)
 	var out []roleManagementPolicyAssignment
 	for path != "" {
 		var response policyAssignmentResponse
