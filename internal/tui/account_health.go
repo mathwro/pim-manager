@@ -155,6 +155,7 @@ func (m Model) refreshAccountAndWorkflow() (tea.Model, tea.Cmd) {
 		commands = append(commands, cmd)
 	}
 	if m.runtime.Tenants != nil {
+		m.cancelTenantCheck()
 		m.tenantCheck++
 		m.checkingTenants = true
 		m.refreshingTenants = true
@@ -162,7 +163,7 @@ func (m Model) refreshAccountAndWorkflow() (tea.Model, tea.Cmd) {
 		m.endOperation("tenants")
 		m.beginOperation("tenants")
 		m.recordActivity("Refreshing tenants", false)
-		commands = append(commands, m.checkTenants(m.tenantCheck), m.spinner.Tick)
+		commands = append(commands, m.startTenantCheck(m.tenantCheck), m.spinner.Tick)
 	}
 	section := m.activeSection
 	if m.screen == ScreenHome && m.accountRecoverySection == "" {

@@ -2338,3 +2338,245 @@ func TestHomeUpdateNoticeFitsMinimumTerminal(t *testing.T) {
 		t.Fatalf("expected home footer to remain visible, got %q", view)
 	}
 }
+
+func TestSummaryRetryPreservesSubmittedInputsAfterFormChanges(t *testing.T) {
+	provider := &scriptedProvider{
+		discoveries: [][]pim.EligibleAssignment{{
+			{ID: "one", DisplayName: "Contributor", ActivationPolicy: pim.ActivationPolicy{MaximumDurationISO: "PT8H"}},
+			{ID: "two", DisplayName: "Owner", ActivationPolicy: pim.ActivationPolicy{MaximumDurationISO: "PT4H"}},
+		}},
+		activateErr: []error{nil, activation.NewRetryableError(errors.New("temporary Azure error")), nil},
+		results: []pim.ActivationResult{
+			{Status: pim.ActivationStatusActivated},
+			{Status: pim.ActivationStatusActivated},
+		},
+	}
+	model := NewModel(Runtime{AzureResources: provider})
+
+	next, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = runCommand(next.(Model), cmd)
+	model.assignmentList.toggle("one")
+	model.assignmentList.toggle("two")
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = next.(Model)
+	model.justification.SetValue("Incident #42")
+	model.syncForm()
+	model.form.durations["one"] = "PT1H"
+	model.form.durations["two"] = "PT3H"
+	model.screen = ScreenConfirmation
+
+	next, cmd = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = runCommand(next.(Model), cmd)
+	if model.screen != ScreenSummary || len(model.summary.retryableFailures()) != 1 || len(provider.activated) != 2 {
+		t.Fatalf("expected summary with one retryable failure, screen=%s summary=%#v requests=%#v", model.screen, model.summary, provider.activated)
+	}
+
+	// Mutate and clear m.form before pressing retry on ScreenSummary.
+	model.form = activationForm{
+		justification: "overwritten justification",
+		durations:     map[string]string{},
+	}
+	model.justification.SetValue("overwritten justification")
+
+	next, cmd = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	model = runCommand(next.(Model), cmd)
+	if len(provider.activated) != 3 {
+		t.Fatalf("expected retry activation call, got %#v", provider.activated)
+	}
+	retried := provider.activated[2]
+	if retried.Assignment.ID != "two" || retried.Justification != "Incident #42" || retried.DurationISO != "PT3H" {
+		t.Fatalf("expected retry to preserve snapshotted inputs (Incident #42 / PT3H), got %#v", retried)
+	}
+}
+
+func TestSummaryRetryPreservesEmptyJustificationAfterFormChanges(t *testing.T) {
+	provider := &scriptedProvider{
+		discoveries: [][]pim.EligibleAssignment{{
+			{ID: "one", DisplayName: "Reader", ActivationPolicy: pim.ActivationPolicy{MaximumDurationISO: "PT8H"}},
+		}},
+		activateErr: []error{activation.NewRetryableError(errors.New("temporary Azure error")), nil},
+		results:     []pim.ActivationResult{{Status: pim.ActivationStatusActivated}},
+	}
+	model := NewModel(Runtime{AzureResources: provider})
+
+	next, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = runCommand(next.(Model), cmd)
+	model.assignmentList.toggle("one")
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = next.(Model)
+	model.form.durations["one"] = "PT2H"
+	model.screen = ScreenConfirmation
+
+	next, cmd = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = runCommand(next.(Model), cmd)
+	if model.screen != ScreenSummary || len(model.summary.retryableFailures()) != 1 {
+		t.Fatalf("expected summary with one retryable failure, screen=%s summary=%#v", model.screen, model.summary)
+	}
+
+	model.form = activationForm{
+		justification: "stale form justification",
+		durations:     map[string]string{"one": "PT6H"},
+	}
+	next, cmd = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	model = runCommand(next.(Model), cmd)
+	if len(provider.activated) != 2 || provider.activated[1].Justification != "" || provider.activated[1].DurationISO != "PT2H" {
+		t.Fatalf("expected retry to preserve empty justification and PT2H duration, got %#v", provider.activated)
+	}
+}
+
+func TestSummaryRetryFallsBackToPolicyMaxDurationWithoutFormSnapshot(t *testing.T) {
+	provider := &scriptedProvider{
+		results: []pim.ActivationResult{{Status: pim.ActivationStatusActivated}},
+	}
+	model := NewModel(Runtime{AzureResources: provider})
+	model.activeSection = SectionAzureResources
+	model.screen = ScreenSummary
+	model.summary = newSummary([]pim.ActivationResult{{
+		Assignment: pim.EligibleAssignment{
+			ID:               "owner",
+			DisplayName:      "Owner",
+			ActivationPolicy: pim.ActivationPolicy{MaximumDurationISO: "PT4H"},
+		},
+		Status:    pim.ActivationStatusFailed,
+		Retryable: true,
+	}})
+
+	next, cmd := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	model = runCommand(next.(Model), cmd)
+	if len(provider.activated) != 1 || provider.activated[0].DurationISO != "PT4H" {
+		t.Fatalf("expected direct summary retry to fall back to policy MaximumDurationISO PT4H, got %#v", provider.activated)
+	}
+}
+
+func TestInitBoundsAndQuitCancelsTenantAndUpdateChecks(t *testing.T) {
+	for _, quitKey := range []tea.KeyMsg{
+		{Type: tea.KeyRunes, Runes: []rune{'q'}},
+		{Type: tea.KeyCtrlC},
+	} {
+		t.Run(quitKey.String(), func(t *testing.T) {
+			tenantCtxCh := make(chan context.Context, 1)
+			updateCtxCh := make(chan context.Context, 1)
+			model := NewModel(Runtime{
+				Tenants: tenantProviderFunc(func(ctx context.Context) ([]azureauth.Tenant, error) {
+					tenantCtxCh <- ctx
+					<-ctx.Done()
+					return nil, ctx.Err()
+				}),
+				CheckUpdate: func(ctx context.Context) (string, error) {
+					updateCtxCh <- ctx
+					<-ctx.Done()
+					return "", ctx.Err()
+				},
+			})
+
+			initCmd := model.Init()
+			batch, ok := initCmd().(tea.BatchMsg)
+			if !ok {
+				t.Fatalf("expected Init batch")
+			}
+			for _, command := range batch {
+				go func(c tea.Cmd) { _ = c() }(command)
+			}
+
+			tenantCtx := <-tenantCtxCh
+			updateCtx := <-updateCtxCh
+
+			tenantDeadline, ok := tenantCtx.Deadline()
+			if !ok {
+				t.Fatal("expected tenant check context to carry a deadline")
+			}
+			if remaining := time.Until(tenantDeadline); remaining <= 15*time.Second || remaining > 35*time.Second {
+				t.Fatalf("expected ~30s tenant deadline, got %v", remaining)
+			}
+
+			updateDeadline, ok := updateCtx.Deadline()
+			if !ok {
+				t.Fatal("expected update check context to carry a deadline")
+			}
+			if remaining := time.Until(updateDeadline); remaining <= 2*time.Second || remaining > 15*time.Second {
+				t.Fatalf("expected ~10s update deadline, got %v", remaining)
+			}
+
+			_, quitCmd := model.Update(quitKey)
+			if quitCmd == nil {
+				t.Fatal("expected quit command")
+			}
+			select {
+			case <-tenantCtx.Done():
+			case <-time.After(time.Second):
+				t.Fatal("expected quit to cancel in-flight tenant check")
+			}
+			select {
+			case <-updateCtx.Done():
+			case <-time.After(time.Second):
+				t.Fatal("expected quit to cancel in-flight update check")
+			}
+		})
+	}
+}
+
+func TestTenantRetryAndRefreshCancelPreviousTenantCheck(t *testing.T) {
+	t.Run("retry on ScreenTenants", func(t *testing.T) {
+		contexts := make(chan context.Context, 2)
+		model := NewModel(Runtime{
+			Tenants: tenantProviderFunc(func(ctx context.Context) ([]azureauth.Tenant, error) {
+				contexts <- ctx
+				<-ctx.Done()
+				return nil, ctx.Err()
+			}),
+		})
+		batch := model.Init()().(tea.BatchMsg)
+		for _, command := range batch {
+			go func(c tea.Cmd) { _ = c() }(command)
+		}
+		first := <-contexts
+		model.checkingTenants = false
+		model.tenantErr = errors.New("temporary failure")
+
+		next, cmd := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+		model = next.(Model)
+		select {
+		case <-first.Done():
+		case <-time.After(time.Second):
+			t.Fatal("expected retry on ScreenTenants to cancel earlier tenant check")
+		}
+		for _, command := range cmd().(tea.BatchMsg) {
+			go func(c tea.Cmd) { _ = c() }(command)
+		}
+		second := <-contexts
+		model.cancelPendingWork()
+		<-second.Done()
+	})
+
+	t.Run("refresh workflow", func(t *testing.T) {
+		contexts := make(chan context.Context, 2)
+		model := NewModel(Runtime{
+			Tenants: tenantProviderFunc(func(ctx context.Context) ([]azureauth.Tenant, error) {
+				contexts <- ctx
+				<-ctx.Done()
+				return nil, ctx.Err()
+			}),
+		})
+		batch := model.Init()().(tea.BatchMsg)
+		for _, command := range batch {
+			go func(c tea.Cmd) { _ = c() }(command)
+		}
+		first := <-contexts
+		model.screen = ScreenHome
+		model.selectedTenant = azureauth.Tenant{ID: "tenant-1"}
+
+		next, cmd := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+		model = next.(Model)
+		select {
+		case <-first.Done():
+		case <-time.After(time.Second):
+			t.Fatal("expected workflow refresh to cancel earlier tenant check")
+		}
+		for _, command := range cmd().(tea.BatchMsg) {
+			go func(c tea.Cmd) { _ = c() }(command)
+		}
+		second := <-contexts
+		model.cancelPendingWork()
+		<-second.Done()
+	})
+}

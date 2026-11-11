@@ -3,13 +3,17 @@ package app
 import (
 	"context"
 	"errors"
+	"net/http"
 	"reflect"
 	"slices"
 	"sync"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/mathwro/pim-manager/internal/arm"
 	"github.com/mathwro/pim-manager/internal/azureauth"
+	"github.com/mathwro/pim-manager/internal/graph"
 )
 
 func TestRunDefersAzureCliLookupUntilTuiInteraction(t *testing.T) {
@@ -110,5 +114,42 @@ func TestRunInitListsTenantsWithoutSectionDiscovery(t *testing.T) {
 	}
 	if checkCalls != 1 {
 		t.Fatalf("expected one background update check, got %d", checkCalls)
+	}
+}
+
+func TestRunConfiguresBoundedHTTPClientTimeout(t *testing.T) {
+	oldNewCLI := newCLI
+	oldNewARMClient := newARMClient
+	oldNewGraphClient := newGraphClient
+	oldRunProgram := runProgram
+	t.Cleanup(func() {
+		newCLI = oldNewCLI
+		newARMClient = oldNewARMClient
+		newGraphClient = oldNewGraphClient
+		runProgram = oldRunProgram
+	})
+
+	newCLI = func(azureauth.Runner) azureauth.CLI {
+		return azureauth.NewCLI(nil)
+	}
+	var armHTTPClient, graphHTTPClient *http.Client
+	newARMClient = func(client *http.Client, tokenSource arm.TokenSource) arm.Client {
+		armHTTPClient = client
+		return oldNewARMClient(client, tokenSource)
+	}
+	newGraphClient = func(client *http.Client, tokenSource graph.TokenSource) graph.Client {
+		graphHTTPClient = client
+		return oldNewGraphClient(client, tokenSource)
+	}
+	runProgram = func(tea.Model) error { return nil }
+
+	if err := Run(); err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if armHTTPClient == nil || armHTTPClient == http.DefaultClient || armHTTPClient.Timeout != 60*time.Second {
+		t.Fatalf("expected ARM HTTP client with 60s timeout, got %#v", armHTTPClient)
+	}
+	if graphHTTPClient == nil || graphHTTPClient == http.DefaultClient || graphHTTPClient.Timeout != 60*time.Second {
+		t.Fatalf("expected Graph HTTP client with 60s timeout, got %#v", graphHTTPClient)
 	}
 }
