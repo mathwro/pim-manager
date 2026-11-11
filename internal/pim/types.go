@@ -1,9 +1,6 @@
 package pim
 
-import (
-	"fmt"
-	"time"
-)
+import "time"
 
 type AssignmentSource string
 
@@ -64,13 +61,6 @@ type EligibleAssignment struct {
 	Active                bool
 	ActiveUntil           *time.Time
 	ActivationPolicy      ActivationPolicy
-}
-
-func (a EligibleAssignment) DisplayScope() string {
-	if a.Scope.DisplayName == "" {
-		return string(a.Scope.Type)
-	}
-	return fmt.Sprintf("%s: %s", a.Scope.Type, a.Scope.DisplayName)
 }
 
 type ActivationRequest struct {

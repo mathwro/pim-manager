@@ -52,10 +52,6 @@ func (l assignmentList) toggle(id string) {
 	}
 }
 
-func (l assignmentList) selectedAssignments() []pim.EligibleAssignment {
-	return l.selected()
-}
-
 func (l assignmentList) selected() []pim.EligibleAssignment {
 	var out []pim.EligibleAssignment
 	for _, item := range l.items {

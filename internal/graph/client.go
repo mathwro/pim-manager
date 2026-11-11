@@ -168,7 +168,3 @@ func sameOrigin(target, base *url.URL) bool {
 	return target.User == nil && target.Opaque == "" && target.Fragment == "" &&
 		strings.EqualFold(target.Scheme, base.Scheme) && strings.EqualFold(target.Host, base.Host)
 }
-
-func EscapeFilterValue(value string) string {
-	return url.QueryEscape(strings.ReplaceAll(value, "'", "''"))
-}
