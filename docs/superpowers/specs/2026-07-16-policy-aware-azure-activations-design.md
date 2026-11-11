@@ -25,7 +25,7 @@ The policy-assignment response exposes `effectiveRules`, including the end-user 
 
 - `Expiration_EndUser_Assignment.maximumDuration`
 - `Enablement_EndUser_Assignment.enabledRules`, where `Justification` means a justification is required
-- `Approval_EndUser_Assignment.setting.isRequestorJustificationRequired`, which independently requires requestor justification
+- `Approval_EndUser_Assignment.setting.isRequestorJustificationRequired`, which requires requestor justification only when `isApprovalRequired` is also true (default policies set it with approval off)
 - `Enablement_EndUser_Assignment.enabledRules` supports `MultiFactorAuthentication`; enabled authentication-context rules retain their required claim
 
 ## Architecture
@@ -95,7 +95,7 @@ The provider records `endDateTime` when present. Active schedule instances that 
 For every eligibility:
 
 - `MaximumDurationISO` comes from `Expiration_EndUser_Assignment.maximumDuration` in the matching policy assignment's `effectiveRules`.
-- `JustificationRequired` is true when `Enablement_EndUser_Assignment.enabledRules` contains `Justification` (case-insensitive), or when `Approval_EndUser_Assignment.setting.isRequestorJustificationRequired` is true. An optional or absent approval setting never clears an enablement requirement.
+- `JustificationRequired` is true when `Enablement_EndUser_Assignment.enabledRules` contains `Justification` (case-insensitive), or when `Approval_EndUser_Assignment.setting` has both `isApprovalRequired` and `isRequestorJustificationRequired` true. An optional, disabled, or absent approval setting never clears an enablement requirement.
 
 Effective rules are authoritative because they include inherited/default settings. Raw policy `rules` are not used.
 

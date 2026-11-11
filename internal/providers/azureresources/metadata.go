@@ -54,6 +54,7 @@ type roleManagementPolicyRule struct {
 	IsEnabled       bool     `json:"isEnabled"`
 	ClaimValue      string   `json:"claimValue"`
 	Setting         *struct {
+		IsApprovalRequired               bool `json:"isApprovalRequired"`
 		IsRequestorJustificationRequired bool `json:"isRequestorJustificationRequired"`
 	} `json:"setting"`
 }
@@ -123,7 +124,8 @@ func policyForAssignment(policies []roleManagementPolicyAssignment, roleDefiniti
 				}
 			}
 		case strings.EqualFold(rule.ID, "Approval_EndUser_Assignment"):
-			if rule.Setting != nil && rule.Setting.IsRequestorJustificationRequired {
+			// Default policies set isRequestorJustificationRequired even with approval off; it only applies to approval requests.
+			if rule.Setting != nil && rule.Setting.IsApprovalRequired && rule.Setting.IsRequestorJustificationRequired {
 				policy.JustificationRequired = true
 			}
 		}
