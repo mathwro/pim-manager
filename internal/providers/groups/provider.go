@@ -3,11 +3,11 @@ package groups
 import (
 	"context"
 	"fmt"
-	"time"
-
 	"github.com/mathwro/pim-manager/internal/activation"
 	"github.com/mathwro/pim-manager/internal/graph"
 	"github.com/mathwro/pim-manager/internal/pim"
+	"strings"
+	"time"
 )
 
 type GraphClient interface {
@@ -39,6 +39,24 @@ type eligibilityScheduleInstance struct {
 	} `json:"group"`
 }
 
+type assignmentInstanceResponse struct {
+	Value    []assignmentScheduleInstance `json:"value"`
+	NextLink string                       `json:"@odata.nextLink"`
+}
+
+type assignmentScheduleInstance struct {
+	GroupID        string     `json:"groupId"`
+	AccessID       string     `json:"accessId"`
+	AssignmentType string     `json:"assignmentType"`
+	StartDateTime  *time.Time `json:"startDateTime"`
+	EndDateTime    *time.Time `json:"endDateTime"`
+}
+
+type groupAssignmentKey struct {
+	groupID  string
+	accessID string
+}
+
 func (p Provider) Discover(ctx context.Context) ([]pim.EligibleAssignment, error) {
 	path := "/identityGovernance/privilegedAccess/group/eligibilityScheduleInstances/filterByCurrentUser(on='principal')?$expand=group"
 	assignments := make([]pim.EligibleAssignment, 0)
@@ -52,7 +70,81 @@ func (p Provider) Discover(ctx context.Context) ([]pim.EligibleAssignment, error
 		}
 		path = response.NextLink
 	}
+	if len(assignments) == 0 {
+		return assignments, nil
+	}
+	active, err := p.discoverActiveAssignments(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("discover active PIM groups: %w", err)
+	}
+	applyActiveState(assignments, active, time.Now().UTC())
 	return assignments, nil
+}
+
+func (p Provider) discoverActiveAssignments(ctx context.Context) ([]assignmentScheduleInstance, error) {
+	path := "/identityGovernance/privilegedAccess/group/assignmentScheduleInstances/filterByCurrentUser(on='principal')"
+	var instances []assignmentScheduleInstance
+	for path != "" {
+		var response assignmentInstanceResponse
+		if err := p.graph.Get(ctx, path, &response); err != nil {
+			return nil, err
+		}
+		instances = append(instances, response.Value...)
+		path = response.NextLink
+	}
+	return instances, nil
+}
+
+func applyActiveState(assignments []pim.EligibleAssignment, instances []assignmentScheduleInstance, now time.Time) {
+	byKey := make(map[groupAssignmentKey]assignmentScheduleInstance, len(instances))
+	for _, instance := range instances {
+		if !isCurrentInstance(instance, now) {
+			continue
+		}
+		key := makeGroupKey(instance.GroupID, instance.AccessID)
+		if key.groupID == "" || key.accessID == "" {
+			continue
+		}
+		if existing, ok := byKey[key]; !ok || preferInstanceEnd(existing.EndDateTime, instance.EndDateTime) {
+			byKey[key] = instance
+		}
+	}
+	for index := range assignments {
+		key := makeGroupKey(assignments[index].GroupID, assignments[index].AccessID)
+		instance, ok := byKey[key]
+		if !ok {
+			continue
+		}
+		assignments[index].Active = true
+		assignments[index].ActiveUntil = instance.EndDateTime
+	}
+}
+
+func isCurrentInstance(instance assignmentScheduleInstance, now time.Time) bool {
+	if !strings.EqualFold(instance.AssignmentType, "activated") && !strings.EqualFold(instance.AssignmentType, "assigned") {
+		return false
+	}
+	if instance.StartDateTime != nil && instance.StartDateTime.After(now) {
+		return false
+	}
+	return instance.EndDateTime == nil || instance.EndDateTime.After(now)
+}
+
+func preferInstanceEnd(existing, candidate *time.Time) bool {
+	if existing == nil {
+		return false
+	}
+	if candidate == nil {
+		return true
+	}
+	return candidate.After(*existing)
+}
+
+func makeGroupKey(groupID, accessID string) groupAssignmentKey {
+	return groupAssignmentKey{
+		groupID:  strings.ToLower(strings.TrimSpace(groupID)),
+		accessID: strings.ToLower(strings.TrimSpace(accessID)),
+	}
 }
 
 func (p Provider) Prepare(ctx context.Context, assignments []pim.EligibleAssignment) ([]pim.EligibleAssignment, error) {
@@ -86,30 +178,16 @@ func normalizeEligibility(item eligibilityScheduleInstance) pim.EligibleAssignme
 }
 
 type activationRequestBody struct {
-	AccessID      string       `json:"accessId"`
-	PrincipalID   string       `json:"principalId"`
-	GroupID       string       `json:"groupId"`
-	Action        string       `json:"action"`
-	ScheduleInfo  scheduleInfo `json:"scheduleInfo"`
-	Justification string       `json:"justification"`
-}
-
-type scheduleInfo struct {
-	StartDateTime string     `json:"startDateTime"`
-	Expiration    expiration `json:"expiration"`
-}
-
-type expiration struct {
-	Type     string `json:"type"`
-	Duration string `json:"duration"`
-}
-
-type activationResponse struct {
-	Status string `json:"status"`
+	AccessID      string             `json:"accessId"`
+	PrincipalID   string             `json:"principalId"`
+	GroupID       string             `json:"groupId"`
+	Action        string             `json:"action"`
+	ScheduleInfo  graph.ScheduleInfo `json:"scheduleInfo"`
+	Justification string             `json:"justification"`
 }
 
 func (p Provider) Activate(ctx context.Context, request pim.ActivationRequest) (pim.ActivationResult, error) {
-	var response activationResponse
+	var response graph.ActivationResponse
 	err := p.graph.Post(ctx, "/identityGovernance/privilegedAccess/group/assignmentScheduleRequests", activationBody(request), &response)
 	if err != nil {
 		return pim.ActivationResult{}, activation.WrapRetryable(fmt.Errorf("activate PIM group %s: %w", request.Assignment.DisplayName, err))
@@ -124,12 +202,6 @@ func activationBody(request pim.ActivationRequest) activationRequestBody {
 		GroupID:       request.Assignment.GroupID,
 		Action:        "selfActivate",
 		Justification: request.Justification,
-		ScheduleInfo: scheduleInfo{
-			StartDateTime: time.Now().UTC().Format(time.RFC3339),
-			Expiration: expiration{
-				Type:     "afterDuration",
-				Duration: request.DurationISO,
-			},
-		},
+		ScheduleInfo:  graph.AfterDurationSchedule(time.Now(), request.DurationISO),
 	}
 }

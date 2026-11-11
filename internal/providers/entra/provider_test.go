@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mathwro/pim-manager/internal/activation"
 	"github.com/mathwro/pim-manager/internal/graph"
@@ -67,7 +68,7 @@ func TestActivationRequestBody(t *testing.T) {
 
 func TestDiscoverFetchesAllPages(t *testing.T) {
 	graph := &pagingFakeGraph{
-		responses: []roleEligibilityResponse{
+		eligibilityPages: []roleEligibilityResponse{
 			{
 				Value: []roleEligibilitySchedule{{
 					ID:               "eligibility-1",
@@ -86,6 +87,7 @@ func TestDiscoverFetchesAllPages(t *testing.T) {
 				}},
 			},
 		},
+		activePages: []roleAssignmentInstanceResponse{{}},
 	}
 	provider := NewProvider(graph)
 
@@ -99,8 +101,8 @@ func TestDiscoverFetchesAllPages(t *testing.T) {
 	if got[0].ID != "eligibility-1" || got[1].ID != "eligibility-2" {
 		t.Fatalf("unexpected assignments: %#v", got)
 	}
-	if len(graph.paths) != 2 {
-		t.Fatalf("expected 2 graph requests, got %d (%v)", len(graph.paths), graph.paths)
+	if len(graph.paths) != 3 {
+		t.Fatalf("expected 3 graph requests, got %d (%v)", len(graph.paths), graph.paths)
 	}
 	if graph.paths[0] != "/roleManagement/directory/roleEligibilitySchedules/filterByCurrentUser(on='principal')?$expand=roleDefinition" {
 		t.Fatalf("unexpected first path: %q", graph.paths[0])
@@ -108,27 +110,134 @@ func TestDiscoverFetchesAllPages(t *testing.T) {
 	if graph.paths[1] != "https://graph.microsoft.com/v1.0/next" {
 		t.Fatalf("unexpected second path: %q", graph.paths[1])
 	}
+	if graph.paths[2] != "/roleManagement/directory/roleAssignmentScheduleInstances/filterByCurrentUser(on='principal')" {
+		t.Fatalf("unexpected active path: %q", graph.paths[2])
+	}
 }
 
-type fakeGraph struct{}
+func TestDiscoverSkipsActiveLookupWhenNoEligibilities(t *testing.T) {
+	graph := &pagingFakeGraph{
+		eligibilityPages: []roleEligibilityResponse{{}},
+	}
+	got, err := NewProvider(graph).Discover(context.Background())
+	if err != nil {
+		t.Fatalf("Discover returned error: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("expected 0 assignments, got %d", len(got))
+	}
+	if len(graph.paths) != 1 {
+		t.Fatalf("expected only eligibility request, got %v", graph.paths)
+	}
+}
 
-func (fakeGraph) Get(context.Context, string, any) error       { return nil }
-func (fakeGraph) Post(context.Context, string, any, any) error { return nil }
+func TestDiscoverMarksActiveEntraRolesAcrossPaginatedInstances(t *testing.T) {
+	now := time.Now().UTC()
+	past := now.Add(-15 * time.Minute)
+	future := now.Add(45 * time.Minute)
+	laterFuture := now.Add(2 * time.Hour)
+
+	graph := &pagingFakeGraph{
+		eligibilityPages: []roleEligibilityResponse{{
+			Value: []roleEligibilitySchedule{
+				{ID: "elig-activated-tenant", RoleDefinitionID: "role-1", DirectoryScopeID: "/", RoleDefinition: roleDefinition{DisplayName: "Global Reader"}},
+				{ID: "elig-assigned-au", RoleDefinitionID: "ROLE-2", DirectoryScopeID: "/administrativeUnits/au-1/", RoleDefinition: roleDefinition{DisplayName: "User Admin"}},
+				{ID: "elig-app-scope", RoleDefinitionID: "role-3", DirectoryScopeID: "/", AppScopeID: "/applications/app-1", RoleDefinition: roleDefinition{DisplayName: "App Admin"}},
+				{ID: "elig-different-scope", RoleDefinitionID: "role-2", DirectoryScopeID: "/", RoleDefinition: roleDefinition{DisplayName: "Tenant User Admin"}},
+				{ID: "elig-expired", RoleDefinitionID: "role-4", DirectoryScopeID: "/", RoleDefinition: roleDefinition{DisplayName: "Expired Role"}},
+				{ID: "elig-upcoming", RoleDefinitionID: "role-5", DirectoryScopeID: "/", RoleDefinition: roleDefinition{DisplayName: "Upcoming Role"}},
+				{ID: "elig-empty-type", RoleDefinitionID: "role-6", DirectoryScopeID: "/", RoleDefinition: roleDefinition{DisplayName: "Unknown Type Role"}},
+			},
+		}},
+		activePages: []roleAssignmentInstanceResponse{
+			{
+				Value: []roleAssignmentScheduleInstance{
+					{RoleDefinitionID: "ROLE-1", DirectoryScopeID: "", AssignmentType: "Activated", StartDateTime: &past, EndDateTime: &future},
+					{RoleDefinitionID: "role-1", DirectoryScopeID: "/", AssignmentType: "Activated", StartDateTime: &past, EndDateTime: &laterFuture},
+					{RoleDefinitionID: "role-4", DirectoryScopeID: "/", AssignmentType: "Activated", StartDateTime: &past, EndDateTime: &past},
+					{RoleDefinitionID: "role-5", DirectoryScopeID: "/", AssignmentType: "Activated", StartDateTime: &future, EndDateTime: &laterFuture},
+					{RoleDefinitionID: "role-6", DirectoryScopeID: "/", AssignmentType: "", StartDateTime: &past, EndDateTime: &future},
+				},
+				NextLink: "https://graph.microsoft.com/v1.0/active-next",
+			},
+			{
+				Value: []roleAssignmentScheduleInstance{
+					{RoleDefinitionID: "role-2", DirectoryScopeID: " /ADMINISTRATIVEUNITS/AU-1 ", AssignmentType: "Assigned", StartDateTime: &past},
+					{RoleDefinitionID: "role-3", DirectoryScopeID: "/", AppScopeID: "/APPLICATIONS/APP-1/", AssignmentType: "activated", EndDateTime: &future},
+				},
+			},
+		},
+	}
+
+	got, err := NewProvider(graph).Discover(context.Background())
+	if err != nil {
+		t.Fatalf("Discover returned error: %v", err)
+	}
+	if len(got) != 7 {
+		t.Fatalf("expected 7 assignments, got %d", len(got))
+	}
+	if !got[0].Active || got[0].ActiveUntil == nil || !got[0].ActiveUntil.Equal(laterFuture) {
+		t.Fatalf("expected elig-activated-tenant active with later ActiveUntil %v, got %#v", laterFuture, got[0])
+	}
+	if !got[1].Active || got[1].ActiveUntil != nil {
+		t.Fatalf("expected elig-assigned-au active with nil ActiveUntil, got %#v", got[1])
+	}
+	if !got[2].Active || got[2].ActiveUntil == nil || !got[2].ActiveUntil.Equal(future) {
+		t.Fatalf("expected elig-app-scope active until %v, got %#v", future, got[2])
+	}
+	for _, inactiveIdx := range []int{3, 4, 5, 6} {
+		if got[inactiveIdx].Active || got[inactiveIdx].ActiveUntil != nil {
+			t.Fatalf("expected assignment %q inactive, got %#v", got[inactiveIdx].ID, got[inactiveIdx])
+		}
+	}
+	if len(graph.paths) != 3 || graph.paths[2] != "https://graph.microsoft.com/v1.0/active-next" {
+		t.Fatalf("expected paginated active instance requests, got %v", graph.paths)
+	}
+}
+
+func TestDiscoverPropagatesActiveEntraLookupError(t *testing.T) {
+	graph := &pagingFakeGraph{
+		eligibilityPages: []roleEligibilityResponse{{
+			Value: []roleEligibilitySchedule{{ID: "elig-1", RoleDefinitionID: "role-1", DirectoryScopeID: "/"}},
+		}},
+		activeErr: errors.New("insufficient privileges"),
+	}
+
+	_, err := NewProvider(graph).Discover(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "discover active Entra roles:") || !strings.Contains(err.Error(), "insufficient privileges") {
+		t.Fatalf("expected wrapped active Entra lookup error, got %v", err)
+	}
+}
 
 type pagingFakeGraph struct {
-	paths     []string
-	responses []roleEligibilityResponse
+	paths            []string
+	eligibilityPages []roleEligibilityResponse
+	eligibilityIdx   int
+	activePages      []roleAssignmentInstanceResponse
+	activeIdx        int
+	activeErr        error
 }
 
 func (f *pagingFakeGraph) Get(_ context.Context, path string, out any) error {
 	f.paths = append(f.paths, path)
-	response := out.(*roleEligibilityResponse)
-	*response = f.responses[len(f.paths)-1]
-	return nil
+	switch target := out.(type) {
+	case *roleEligibilityResponse:
+		*target = f.eligibilityPages[f.eligibilityIdx]
+		f.eligibilityIdx++
+		return nil
+	case *roleAssignmentInstanceResponse:
+		if f.activeErr != nil {
+			return f.activeErr
+		}
+		*target = f.activePages[f.activeIdx]
+		f.activeIdx++
+		return nil
+	default:
+		return errors.New("unexpected response type")
+	}
 }
 
 func (f *pagingFakeGraph) Post(context.Context, string, any, any) error { return nil }
-
 func TestActivateWrapsTransientGraphErrorsAsRetryable(t *testing.T) {
 	client := graph.NewClient(
 		&http.Client{

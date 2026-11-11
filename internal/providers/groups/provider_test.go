@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mathwro/pim-manager/internal/activation"
 	"github.com/mathwro/pim-manager/internal/graph"
@@ -29,8 +30,9 @@ func TestDiscoverFetchesEligibilitiesForCurrentUser(t *testing.T) {
 		t.Fatalf("Discover returned error: %v", err)
 	}
 	const expectedPath = "/identityGovernance/privilegedAccess/group/eligibilityScheduleInstances/filterByCurrentUser(on='principal')?$expand=group"
-	if graph.getPath != expectedPath {
-		t.Fatalf("expected Get path %q, got %q", expectedPath, graph.getPath)
+	const expectedActivePath = "/identityGovernance/privilegedAccess/group/assignmentScheduleInstances/filterByCurrentUser(on='principal')"
+	if len(graph.paths) != 2 || graph.paths[0] != expectedPath || graph.paths[1] != expectedActivePath {
+		t.Fatalf("expected Get paths [%q, %q], got %v", expectedPath, expectedActivePath, graph.paths)
 	}
 	if len(got) != 1 {
 		t.Fatalf("expected 1 assignment, got %d", len(got))
@@ -45,7 +47,7 @@ func TestDiscoverFetchesEligibilitiesForCurrentUser(t *testing.T) {
 
 func TestDiscoverFetchesAllPages(t *testing.T) {
 	graph := &pagingFakeGraph{
-		responses: []eligibilityResponse{
+		eligibilityPages: []eligibilityResponse{
 			{
 				Value: []eligibilityScheduleInstance{{
 					ID:          "group-1_member_sched-1",
@@ -64,6 +66,7 @@ func TestDiscoverFetchesAllPages(t *testing.T) {
 				}},
 			},
 		},
+		activePages: []assignmentInstanceResponse{{}},
 	}
 	provider := NewProvider(graph)
 
@@ -77,8 +80,8 @@ func TestDiscoverFetchesAllPages(t *testing.T) {
 	if got[0].ID != "group-1_member_sched-1" || got[1].ID != "group-2_owner_sched-1" {
 		t.Fatalf("unexpected assignments: %#v", got)
 	}
-	if len(graph.paths) != 2 {
-		t.Fatalf("expected 2 graph requests, got %d (%v)", len(graph.paths), graph.paths)
+	if len(graph.paths) != 3 {
+		t.Fatalf("expected 3 graph requests, got %d (%v)", len(graph.paths), graph.paths)
 	}
 	if graph.paths[0] != "/identityGovernance/privilegedAccess/group/eligibilityScheduleInstances/filterByCurrentUser(on='principal')?$expand=group" {
 		t.Fatalf("unexpected first path: %q", graph.paths[0])
@@ -86,8 +89,102 @@ func TestDiscoverFetchesAllPages(t *testing.T) {
 	if graph.paths[1] != "https://graph.microsoft.com/v1.0/next" {
 		t.Fatalf("unexpected second path: %q", graph.paths[1])
 	}
+	if graph.paths[2] != "/identityGovernance/privilegedAccess/group/assignmentScheduleInstances/filterByCurrentUser(on='principal')" {
+		t.Fatalf("unexpected active path: %q", graph.paths[2])
+	}
 }
 
+func TestDiscoverSkipsActiveLookupWhenNoGroupEligibilities(t *testing.T) {
+	graph := &pagingFakeGraph{
+		eligibilityPages: []eligibilityResponse{{}},
+	}
+	got, err := NewProvider(graph).Discover(context.Background())
+	if err != nil {
+		t.Fatalf("Discover returned error: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("expected 0 assignments, got %d", len(got))
+	}
+	if len(graph.paths) != 1 {
+		t.Fatalf("expected only eligibility request, got %v", graph.paths)
+	}
+}
+
+func TestDiscoverMarksActiveGroupsAcrossPaginatedInstances(t *testing.T) {
+	now := time.Now().UTC()
+	past := now.Add(-10 * time.Minute)
+	future := now.Add(50 * time.Minute)
+	laterFuture := now.Add(3 * time.Hour)
+
+	graph := &pagingFakeGraph{
+		eligibilityPages: []eligibilityResponse{{
+			Value: []eligibilityScheduleInstance{
+				{ID: "g1-member", GroupID: "group-1", AccessID: "member"},
+				{ID: "g1-owner", GroupID: "group-1", AccessID: "owner"},
+				{ID: "g2-owner", GroupID: "GROUP-2", AccessID: "owner"},
+				{ID: "g3-expired", GroupID: "group-3", AccessID: "member"},
+				{ID: "g4-upcoming", GroupID: "group-4", AccessID: "member"},
+				{ID: "g5-empty-type", GroupID: "group-5", AccessID: "member"},
+			},
+		}},
+		activePages: []assignmentInstanceResponse{
+			{
+				Value: []assignmentScheduleInstance{
+					{GroupID: "GROUP-1", AccessID: "MEMBER", AssignmentType: "activated", StartDateTime: &past, EndDateTime: &future},
+					{GroupID: "group-1", AccessID: "member", AssignmentType: "Activated", StartDateTime: &past, EndDateTime: &laterFuture},
+					{GroupID: "group-3", AccessID: "member", AssignmentType: "activated", StartDateTime: &past, EndDateTime: &past},
+					{GroupID: "group-4", AccessID: "member", AssignmentType: "activated", StartDateTime: &future, EndDateTime: &laterFuture},
+					{GroupID: "group-5", AccessID: "member", AssignmentType: "", StartDateTime: &past, EndDateTime: &future},
+				},
+				NextLink: "https://graph.microsoft.com/v1.0/group-active-next",
+			},
+			{
+				Value: []assignmentScheduleInstance{
+					{GroupID: "group-2", AccessID: "OWNER", AssignmentType: "Assigned", StartDateTime: &past},
+				},
+			},
+		},
+	}
+
+	got, err := NewProvider(graph).Discover(context.Background())
+	if err != nil {
+		t.Fatalf("Discover returned error: %v", err)
+	}
+	if len(got) != 6 {
+		t.Fatalf("expected 6 assignments, got %d", len(got))
+	}
+	if !got[0].Active || got[0].ActiveUntil == nil || !got[0].ActiveUntil.Equal(laterFuture) {
+		t.Fatalf("expected g1-member active until %v, got %#v", laterFuture, got[0])
+	}
+	if got[1].Active || got[1].ActiveUntil != nil {
+		t.Fatalf("expected g1-owner inactive, got %#v", got[1])
+	}
+	if !got[2].Active || got[2].ActiveUntil != nil {
+		t.Fatalf("expected g2-owner active with nil ActiveUntil, got %#v", got[2])
+	}
+	for _, inactiveIdx := range []int{3, 4, 5} {
+		if got[inactiveIdx].Active || got[inactiveIdx].ActiveUntil != nil {
+			t.Fatalf("expected assignment %q inactive, got %#v", got[inactiveIdx].ID, got[inactiveIdx])
+		}
+	}
+	if len(graph.paths) != 3 || graph.paths[2] != "https://graph.microsoft.com/v1.0/group-active-next" {
+		t.Fatalf("expected paginated active group requests, got %v", graph.paths)
+	}
+}
+
+func TestDiscoverPropagatesActiveGroupLookupError(t *testing.T) {
+	graph := &pagingFakeGraph{
+		eligibilityPages: []eligibilityResponse{{
+			Value: []eligibilityScheduleInstance{{ID: "g1-member", GroupID: "group-1", AccessID: "member"}},
+		}},
+		activeErr: errors.New("forbidden"),
+	}
+
+	_, err := NewProvider(graph).Discover(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "discover active PIM groups:") || !strings.Contains(err.Error(), "forbidden") {
+		t.Fatalf("expected wrapped active group lookup error, got %v", err)
+	}
+}
 func TestNormalizeMemberEligibility(t *testing.T) {
 	item := eligibilityScheduleInstance{
 		ID:          "group-1_member_sched-1",
@@ -124,39 +221,58 @@ func TestActivationRequestBody(t *testing.T) {
 		DurationISO:   "PT1H",
 	})
 
-	if body.Action != "selfActivate" || body.AccessID != "owner" || body.ScheduleInfo.Expiration.Duration != "PT1H" {
+	if body.Action != "selfActivate" || body.AccessID != "owner" || body.ScheduleInfo.Expiration.Type != "AfterDuration" || body.ScheduleInfo.Expiration.Duration != "PT1H" {
 		t.Fatalf("unexpected body: %#v", body)
 	}
 }
 
 type fakeGraph struct {
-	getPath  string
+	paths    []string
 	response eligibilityResponse
 }
 
 func (f *fakeGraph) Get(_ context.Context, path string, out any) error {
-	f.getPath = path
-	response := out.(*eligibilityResponse)
-	*response = f.response
+	f.paths = append(f.paths, path)
+	switch target := out.(type) {
+	case *eligibilityResponse:
+		*target = f.response
+	case *assignmentInstanceResponse:
+		*target = assignmentInstanceResponse{}
+	}
 	return nil
 }
 
 func (f *fakeGraph) Post(context.Context, string, any, any) error { return nil }
 
 type pagingFakeGraph struct {
-	paths     []string
-	responses []eligibilityResponse
+	paths            []string
+	eligibilityPages []eligibilityResponse
+	eligibilityIdx   int
+	activePages      []assignmentInstanceResponse
+	activeIdx        int
+	activeErr        error
 }
 
 func (f *pagingFakeGraph) Get(_ context.Context, path string, out any) error {
 	f.paths = append(f.paths, path)
-	response := out.(*eligibilityResponse)
-	*response = f.responses[len(f.paths)-1]
-	return nil
+	switch target := out.(type) {
+	case *eligibilityResponse:
+		*target = f.eligibilityPages[f.eligibilityIdx]
+		f.eligibilityIdx++
+		return nil
+	case *assignmentInstanceResponse:
+		if f.activeErr != nil {
+			return f.activeErr
+		}
+		*target = f.activePages[f.activeIdx]
+		f.activeIdx++
+		return nil
+	default:
+		return errors.New("unexpected response type")
+	}
 }
 
 func (f *pagingFakeGraph) Post(context.Context, string, any, any) error { return nil }
-
 func TestNormalizeUsesExpandedGroupNameAndScheduleID(t *testing.T) {
 	var item eligibilityScheduleInstance
 	if err := json.Unmarshal([]byte(`{"id":"instance-1","eligibilityScheduleId":"schedule-1","accessId":"owner","groupId":"g1","principalId":"u1","group":{"id":"g1","displayName":"Production Operators"}}`), &item); err != nil {
