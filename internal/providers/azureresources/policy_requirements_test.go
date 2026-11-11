@@ -20,7 +20,7 @@ func TestARMPolicyRequirements(t *testing.T) {
 		{name: "ticketing", enabled: `["Ticketing"]`, unsupported: "Ticketing"},
 		{name: "unknown enabled requirement", enabled: `["FutureRequirement"]`, unsupported: "FutureRequirement"},
 		{name: "approval requires justification", enabled: `[]`, extra: `,{"id":"Approval_EndUser_Assignment","setting":{"isApprovalRequired":true,"isRequestorJustificationRequired":true}}`, justification: true},
-		{name: "approval justification independent of approval gate", enabled: `[]`, extra: `,{"id":"Approval_EndUser_Assignment","setting":{"isApprovalRequired":false,"isRequestorJustificationRequired":true}}`, justification: true},
+		{name: "approval justification ignored without approval gate", enabled: `[]`, extra: `,{"id":"Approval_EndUser_Assignment","setting":{"isApprovalRequired":false,"isRequestorJustificationRequired":true}}`},
 		{name: "approval optional", enabled: `[]`, extra: `,{"id":"Approval_EndUser_Assignment","setting":{"isRequestorJustificationRequired":false}}`},
 		{name: "approval cannot clear enablement justification", enabled: `["jUsTiFiCaTiOn"]`, extra: `,{"id":"Approval_EndUser_Assignment","setting":{"isRequestorJustificationRequired":false}}`, justification: true},
 		{name: "missing approval optional", enabled: `[]`},

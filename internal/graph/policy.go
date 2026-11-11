@@ -45,6 +45,7 @@ type policyRule struct {
 	IsEnabled       *bool    `json:"isEnabled"`
 	ClaimValue      string   `json:"claimValue"`
 	Setting         *struct {
+		IsApprovalRequired               bool `json:"isApprovalRequired"`
 		IsRequestorJustificationRequired bool `json:"isRequestorJustificationRequired"`
 	} `json:"setting"`
 	Target struct {
@@ -189,7 +190,8 @@ func normalizeActivationPolicy(rules []policyRule) (pim.ActivationPolicy, error)
 				}
 			}
 		case "approval_enduser_assignment":
-			if rule.Setting != nil && rule.Setting.IsRequestorJustificationRequired {
+			// Default policies set isRequestorJustificationRequired even with approval off; it only applies to approval requests.
+			if rule.Setting != nil && rule.Setting.IsApprovalRequired && rule.Setting.IsRequestorJustificationRequired {
 				policy.JustificationRequired = true
 			}
 		}
