@@ -92,6 +92,8 @@ type Model struct {
 	summary                summary
 	activityEntries        []activityEntry
 	operationStarted       map[string]time.Time
+	batchJustification     string
+	batchDurations         map[string]string
 	activationTotal        int
 	activationDone         int
 	activationCurrent      string
@@ -104,6 +106,8 @@ type Model struct {
 	authenticationCheck    int
 	checkingTenants        bool
 	tenantCheck            int
+	tenantCheckCtx         context.Context
+	tenantCancel           context.CancelFunc
 	tenants                []azureauth.Tenant
 	tenantIndex            int
 	selectedTenant         azureauth.Tenant
@@ -118,6 +122,8 @@ type Model struct {
 	accountRecoverySection Section
 	refreshingTenants      bool
 	availableUpdate        string
+	updateContext          context.Context
+	updateCancel           context.CancelFunc
 	discoveryCheck         int
 	discoveryCancel        context.CancelFunc
 	graphConnecting        bool
@@ -265,8 +271,12 @@ func NewModel(runtime Runtime) Model {
 		model.screen = ScreenTenants
 		model.checkingTenants = true
 		model.tenantCheck = 1
+		model.tenantCheckCtx, model.tenantCancel = context.WithTimeout(context.Background(), 30*time.Second)
 		model.beginOperation("tenants")
 		model.recordActivity("Loading tenants", false)
+	}
+	if runtime.CheckUpdate != nil {
+		model.updateContext, model.updateCancel = context.WithTimeout(context.Background(), 10*time.Second)
 	}
 	model.resizeComponents()
 	return model
@@ -302,6 +312,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.syncSummaryViewportSize()
 		return m, cmd
 	case updateCheckedMsg:
+		m.cancelUpdateCheck()
 		if typed.err == nil {
 			m.availableUpdate = strings.TrimSpace(typed.version)
 		}
@@ -461,7 +472,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.loading = false
 		m.cancelDiscovery(true)
 		delete(m.discoveryCache, discoveryKey{tenantID: m.selectedTenant.ID, section: m.activeSection})
-		m.summary = newSummary(typed.results)
+		m.summary = newSummaryWithInputs(typed.results, m.summary.justification, m.summary.durations)
 		m.screen = ScreenSummary
 		m.syncSummaryViewportSize()
 		m.refreshSummaryViewport()
@@ -563,6 +574,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if typed.checkID != m.tenantCheck {
 			return m, nil
 		}
+		m.cancelTenantCheck()
 		m.checkingTenants = false
 		m.endOperation("tenants")
 		m.tenantErr = typed.err
@@ -722,12 +734,13 @@ func (m Model) updateTenants(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "r":
 			m.cancelAccountCheck()
 			m.accountCheckedAt = time.Time{}
+			m.cancelTenantCheck()
 			m.tenantCheck++
 			m.checkingTenants = true
 			m.tenantErr = nil
 			m.beginOperation("tenants")
 			m.recordActivity("Retrying tenant loading", false)
-			return m, tea.Batch(m.checkTenants(m.tenantCheck), m.spinner.Tick)
+			return m, tea.Batch(m.startTenantCheck(m.tenantCheck), m.spinner.Tick)
 		}
 	}
 	return m, nil
@@ -923,6 +936,7 @@ func (m Model) updateConfirmation(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.err = fmt.Errorf("select at least one assignment to continue")
 			return m, nil
 		}
+		m.snapshotBatchInputs(selected, m.form.justification, m.form.durations)
 		return m.beginAuthentication(selected)
 	case tea.KeyRunes:
 		switch string(key.Runes) {
@@ -1050,7 +1064,7 @@ func (m Model) startActivation(selected []pim.EligibleAssignment, authentication
 	m.activationDone = 0
 	m.activationCurrent = ""
 	m.activationAccountErr = nil
-	m.summary = newSummary(nil)
+	m.summary = newSummaryWithInputs(nil, m.batchJustification, m.batchDurations)
 	m.beginOperation("activation")
 	m.recordActivity(fmt.Sprintf("Starting activation batch: %d", len(selected)), false)
 	return m, tea.Batch(m.activateSelected(selected, authentication), m.spinner.Tick)
@@ -1088,6 +1102,7 @@ func (m Model) updateSummary(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 			for _, result := range retryable {
 				assignments = append(assignments, result.Assignment)
 			}
+			m.snapshotBatchInputs(assignments, m.summary.justification, m.summary.durations)
 			m.recordActivity(fmt.Sprintf("Retrying failed activations: %d", len(assignments)), false)
 			return m.beginAuthentication(assignments)
 		}
@@ -1278,6 +1293,8 @@ func (m *Model) clearTenantWorkflow() {
 	m.detailsViewport.SetContent("")
 	m.detailsViewport.GotoTop()
 	m.form = activationForm{durations: map[string]string{}}
+	m.batchJustification = ""
+	m.batchDurations = nil
 	m.justification.SetValue("")
 	m.duration.SetValue("")
 	m.durationIndex = 0
@@ -1425,9 +1442,35 @@ func (m Model) prepareAssignments(ctx context.Context, preparer assignmentPrepar
 	}
 }
 
+func (m *Model) snapshotBatchInputs(selected []pim.EligibleAssignment, justification string, durations map[string]string) {
+	m.batchJustification = strings.TrimSpace(justification)
+	m.batchDurations = make(map[string]string, len(selected))
+	for _, assignment := range selected {
+		duration := strings.TrimSpace(durations[assignment.ID])
+		if duration == "" {
+			duration = strings.TrimSpace(assignment.ActivationPolicy.MaximumDurationISO)
+		}
+		m.batchDurations[assignment.ID] = duration
+	}
+}
+
 func (m Model) activateSelected(selected []pim.EligibleAssignment, authentication azureauth.ARMAuthentication) tea.Cmd {
 	provider := m.providerForSection(m.activeSection)
-	justification := strings.TrimSpace(m.form.justification)
+	justification := strings.TrimSpace(m.summary.justification)
+	durations := make(map[string]string, len(selected))
+	for _, assignment := range selected {
+		duration := strings.TrimSpace(m.summary.durations[assignment.ID])
+		if duration == "" {
+			duration = strings.TrimSpace(m.form.durations[assignment.ID])
+		}
+		if duration == "" {
+			duration = strings.TrimSpace(assignment.ActivationPolicy.MaximumDurationISO)
+		}
+		durations[assignment.ID] = duration
+	}
+	if justification == "" && len(m.summary.durations) == 0 {
+		justification = strings.TrimSpace(m.form.justification)
+	}
 	ctx := m.tenantContext()
 	if m.activationContext != nil {
 		ctx = m.activationContext
@@ -1460,8 +1503,9 @@ func (m Model) activateSelected(selected []pim.EligibleAssignment, authenticatio
 						err = fmt.Errorf("provider for %s is unavailable", m.activeSection)
 					} else {
 						result, err = provider.Activate(ctx, pim.ActivationRequest{
-							Assignment: requestAssignment, Justification: justification,
-							DurationISO: strings.TrimSpace(m.form.durations[assignment.ID]),
+							Assignment:    requestAssignment,
+							Justification: justification,
+							DurationISO:   durations[assignment.ID],
 						})
 					}
 					msg := activationItemResultMsg{tenantID: tenantID, generation: generation, index: index}
@@ -1485,20 +1529,63 @@ func (m Model) activateSelected(selected []pim.EligibleAssignment, authenticatio
 	return start(0)
 }
 
+func (m *Model) cancelTenantCheck() {
+	if m.tenantCancel != nil {
+		m.tenantCancel()
+		m.tenantCancel = nil
+	}
+	m.tenantCheckCtx = nil
+}
+
+func (m *Model) cancelUpdateCheck() {
+	if m.updateCancel != nil {
+		m.updateCancel()
+		m.updateCancel = nil
+	}
+	m.updateContext = nil
+}
+
+func (m *Model) startTenantCheck(checkID int) tea.Cmd {
+	if m.runtime.Tenants == nil {
+		return nil
+	}
+	m.cancelTenantCheck()
+	m.tenantCheckCtx, m.tenantCancel = context.WithTimeout(context.Background(), 30*time.Second)
+	return m.checkTenants(checkID)
+}
+
 func (m Model) checkTenants(checkID int) tea.Cmd {
 	provider := m.runtime.Tenants
 	if provider == nil {
 		return nil
 	}
+	ctx := m.tenantCheckCtx
 	return func() tea.Msg {
-		tenants, err := provider.Tenants(context.Background())
+		callCtx := ctx
+		var cancel context.CancelFunc
+		if callCtx == nil {
+			callCtx, cancel = context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+		}
+		tenants, err := provider.Tenants(callCtx)
 		return tenantsCheckedMsg{tenants: tenants, checkID: checkID, err: err}
 	}
 }
 
 func (m Model) checkUpdate() tea.Cmd {
+	check := m.runtime.CheckUpdate
+	if check == nil {
+		return nil
+	}
+	ctx := m.updateContext
 	return func() tea.Msg {
-		version, err := m.runtime.CheckUpdate(context.Background())
+		callCtx := ctx
+		var cancel context.CancelFunc
+		if callCtx == nil {
+			callCtx, cancel = context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+		}
+		version, err := check(callCtx)
 		return updateCheckedMsg{version: version, err: err}
 	}
 }

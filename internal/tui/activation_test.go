@@ -68,3 +68,16 @@ func TestSummaryKeepsAcceptedProvisioningSeparateFromFailuresAndApproval(t *test
 		t.Fatal("accepted provisioning was offered for resubmission")
 	}
 }
+
+func TestNewSummaryWithInputsClonesAndTrimsInputs(t *testing.T) {
+	durations := map[string]string{"one": " PT2H "}
+	s := newSummaryWithInputs(
+		[]pim.ActivationResult{{Assignment: pim.EligibleAssignment{ID: "one"}, Status: pim.ActivationStatusFailed, Retryable: true}},
+		"  Need access  ",
+		durations,
+	)
+	durations["one"] = "PT8H"
+	if s.justification != "Need access" || s.durations["one"] != "PT2H" {
+		t.Fatalf("expected summary to snapshot trimmed justification and cloned durations, got %#v", s)
+	}
+}

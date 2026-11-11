@@ -2,6 +2,7 @@ package app
 
 import (
 	"net/http"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/mathwro/pim-manager/internal/arm"
@@ -16,6 +17,8 @@ import (
 )
 
 var newCLI = azureauth.NewCLI
+var newARMClient = arm.NewClient
+var newGraphClient = graph.NewClient
 var checkLatest = selfupdate.CheckLatest
 
 var runProgram = func(model tea.Model) error {
@@ -25,10 +28,11 @@ var runProgram = func(model tea.Model) error {
 
 func Run() error {
 	auth := newCLI(nil)
-	armClient := arm.NewClient(http.DefaultClient, auth)
+	httpClient := &http.Client{Timeout: 60 * time.Second}
+	armClient := newARMClient(httpClient, auth)
 	graphSession := graphauth.NewSession(auth)
 	defer graphSession.Reset()
-	graphClient := graph.NewClient(http.DefaultClient, graphSession)
+	graphClient := newGraphClient(httpClient, graphSession)
 	runtime := tui.Runtime{
 		Entra:               entra.NewProvider(graphClient),
 		Groups:              groups.NewProvider(graphClient),

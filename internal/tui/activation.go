@@ -41,10 +41,24 @@ type summary struct {
 	pendingApproval     []pim.ActivationResult
 	pendingProvisioning []pim.ActivationResult
 	failed              []pim.ActivationResult
+	justification       string
+	durations           map[string]string
 }
 
 func newSummary(results []pim.ActivationResult) summary {
-	var s summary
+	return newSummaryWithInputs(results, "", nil)
+}
+
+func newSummaryWithInputs(results []pim.ActivationResult, justification string, durations map[string]string) summary {
+	s := summary{
+		justification: strings.TrimSpace(justification),
+	}
+	if len(durations) > 0 {
+		s.durations = make(map[string]string, len(durations))
+		for id, duration := range durations {
+			s.durations[id] = strings.TrimSpace(duration)
+		}
+	}
 	for _, result := range results {
 		s.results = append(s.results, result)
 		switch {

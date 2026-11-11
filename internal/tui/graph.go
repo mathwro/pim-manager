@@ -108,6 +108,8 @@ func (m *Model) cancelActivation() {
 }
 
 func (m *Model) cancelPendingWork() {
+	m.cancelTenantCheck()
+	m.cancelUpdateCheck()
 	m.cancelGraphConnection(true)
 	m.cancelAuthentication()
 	m.cancelActivation()
