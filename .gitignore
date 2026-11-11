@@ -32,10 +32,5 @@ go.work.sum
 Thumbs.db
 
 # Graphify local and machine-specific state
-graphify-out/cost.json
-graphify-out/.graphify_python
-graphify-out/.graphify_root
-graphify-out/.graphify_*.json
-graphify-out/.needs_update
+/graphify-out/
 dist/
-pim-manager
