@@ -256,18 +256,6 @@ func contains(values []string, want string) bool {
 	return false
 }
 
-func (c CLI) PrincipalID(ctx context.Context) (string, error) {
-	out, err := c.run(ctx, "az", "ad", "signed-in-user", "show", "--query", "id", "--output", "tsv")
-	if err != nil {
-		return "", fmt.Errorf("get signed-in user principal ID: %w", err)
-	}
-	principalID := strings.TrimSpace(string(out))
-	if principalID == "" {
-		return "", errors.New("Azure CLI returned empty signed-in user principal ID")
-	}
-	return principalID, nil
-}
-
 func StepUpLoginCommand(tenantID string, mfaRequired bool, authenticationContext string) (*exec.Cmd, error) {
 	tenantID = strings.TrimSpace(tenantID)
 	if tenantID == "" {

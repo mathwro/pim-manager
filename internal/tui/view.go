@@ -782,13 +782,6 @@ func displayScope(assignment pim.EligibleAssignment) string {
 	}
 }
 
-func valueOrUnknown(value string) string {
-	if strings.TrimSpace(value) == "" {
-		return "unknown"
-	}
-	return value
-}
-
 func truncateText(value string, width int) string {
 	return ansi.Truncate(value, max(0, width), "...")
 }

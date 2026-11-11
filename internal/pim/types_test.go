@@ -31,30 +31,3 @@ func TestActivationResultStatusHelpers(t *testing.T) {
 		}
 	}
 }
-
-func TestEligibleAssignmentDisplayScope(t *testing.T) {
-	assignment := EligibleAssignment{
-		DisplayName: "Contributor",
-		Scope: Scope{
-			DisplayName: "rg-prod",
-			Type:        ScopeTypeResourceGroup,
-		},
-	}
-
-	if got := assignment.DisplayScope(); got != "Resource Group: rg-prod" {
-		t.Fatalf("expected display scope, got %q", got)
-	}
-}
-
-func TestEligibleAssignmentDisplayScopeWithoutDisplayName(t *testing.T) {
-	assignment := EligibleAssignment{
-		DisplayName: "Contributor",
-		Scope: Scope{
-			Type: ScopeTypeSubscription,
-		},
-	}
-
-	if got := assignment.DisplayScope(); got != string(ScopeTypeSubscription) {
-		t.Fatalf("expected scope type, got %q", got)
-	}
-}

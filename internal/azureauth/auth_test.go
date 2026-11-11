@@ -261,21 +261,6 @@ func TestARMAuthenticationUsesExistingTokenClaims(t *testing.T) {
 	}
 }
 
-func TestPrincipalIDUsesSignedInUser(t *testing.T) {
-	runner := fakeRunner{outputs: map[string][]byte{
-		"az ad signed-in-user show --query id --output tsv": []byte("principal-1\n"),
-	}}
-	client := NewCLI(runner.Run)
-
-	principalID, err := client.PrincipalID(context.Background())
-	if err != nil {
-		t.Fatalf("PrincipalID returned error: %v", err)
-	}
-	if principalID != "principal-1" {
-		t.Fatalf("expected principal-1, got %q", principalID)
-	}
-}
-
 func TestExecCommandSeparatesStdoutFromSuccessfulStderr(t *testing.T) {
 	if os.Args[len(os.Args)-1] == "helper-success" {
 		_, _ = os.Stdout.WriteString(`{"tenantId":"tenant-1"}`)

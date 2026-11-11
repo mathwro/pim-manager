@@ -52,7 +52,7 @@ Keep packages small and purpose-specific:
 | `internal/providers/entra` | Discovery and activation for eligible Microsoft Entra directory roles. |
 | `internal/providers/azureresources` | Discovery, effective-policy normalization, and activation for eligible Azure Resource roles. |
 | `internal/providers/groups` | Discovery and activation for eligible Privileged Access Group member and owner assignments. |
-| `internal/activation` | Batch activation orchestration, partial success handling, and retry classification. |
+| `internal/activation` | Activation error wrapping and retry classification. |
 | `internal/tui` | Bubble Tea tenant and PIM-area selection, screens, navigation, selection state, forms, policy-driven step-up gating, progress, and summaries. |
 
 The TUI should depend on interfaces rather than concrete Azure clients. Provider packages should translate Azure API responses into shared `pim.EligibleAssignment` values.
