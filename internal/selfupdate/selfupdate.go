@@ -12,19 +12,28 @@ import (
 
 const module = "github.com/mathwro/pim-manager"
 const latestModule = module + "@latest"
+const latestReleaseURL = "https://github.com/mathwro/pim-manager/releases/latest"
 
 type outputRunner func(context.Context, string, ...string) ([]byte, error)
 
-func currentVersion() string {
-	return version.Tag()
-}
+var (
+	currentVersion    = version.Tag
+	isGoInstall       = version.IsGoInstall
+	isPrebuiltRelease = version.IsPrebuiltRelease
+	runInstall        = func(ctx context.Context, stdout, stderr io.Writer) error {
+		command := exec.CommandContext(ctx, "go", "install", latestModule)
+		command.Stdout = stdout
+		command.Stderr = stderr
+		return command.Run()
+	}
+)
 
 func stableTag(version string) bool {
-	return strings.HasPrefix(version, "v") && !strings.Contains(version, "-")
+	return strings.HasPrefix(version, "v") && !strings.Contains(version, "-") && !strings.Contains(version, "+")
 }
 
-func checkLatest(ctx context.Context, current string, run outputRunner) (string, error) {
-	if !stableTag(current) {
+func checkLatest(ctx context.Context, current string, goInstall bool, run outputRunner) (string, error) {
+	if !goInstall || !stableTag(current) {
 		return "", nil
 	}
 	out, err := run(ctx, "go", "list", "-m", "-f={{.Version}}", latestModule)
@@ -42,16 +51,16 @@ func checkLatest(ctx context.Context, current string, run outputRunner) (string,
 }
 
 func CheckLatest(ctx context.Context) (string, error) {
-	return checkLatest(ctx, currentVersion(), func(ctx context.Context, name string, args ...string) ([]byte, error) {
+	return checkLatest(ctx, currentVersion(), isGoInstall(), func(ctx context.Context, name string, args ...string) ([]byte, error) {
 		return exec.CommandContext(ctx, name, args...).Output()
 	})
 }
 
 func InstallLatest(ctx context.Context, stdout, stderr io.Writer) error {
-	command := exec.CommandContext(ctx, "go", "install", latestModule)
-	command.Stdout = stdout
-	command.Stderr = stderr
-	if err := command.Run(); err != nil {
+	if isPrebuiltRelease() || (!isGoInstall() && stableTag(currentVersion())) {
+		return fmt.Errorf("update pim-manager: this binary was installed from a prebuilt release archive or package manager rather than go install; update via your package manager or %s", latestReleaseURL)
+	}
+	if err := runInstall(ctx, stdout, stderr); err != nil {
 		if errors.Is(err, exec.ErrNotFound) {
 			return fmt.Errorf("update pim-manager: the Go toolchain is required: %w", err)
 		}

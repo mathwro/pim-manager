@@ -28,15 +28,15 @@ go install github.com/mathwro/pim-manager@latest
 pim-manager
 ```
 
-Update to the latest tagged release without opening the TUI:
+For `go install` module builds, update to the latest tagged release without opening the TUI:
 
 ```bash
 pim-manager update
 ```
 
-The command requires the Go toolchain and follows Go's `@latest` module version. Tagged builds also check once in the background and show the external update command on the home screen when a newer tag is available.
+The command requires the Go toolchain and follows Go's `@latest` module version. Tagged `go install` builds also check once in the background and show the external update command on the home screen when a newer tag is available.
 
-Prebuilt release archives are also published for Windows, macOS, and Linux on x86-64 and ARM64. They contain only the root `pim-manager` executable (`pim-manager.exe` on Windows) and require no Go runtime. macOS archives are ad-hoc signed; they are not Developer ID signed or notarized. Linux archives use static pure-Go binaries with `CGO_ENABLED=0`, so they have no libc dependency.
+Prebuilt release archives are also published for Windows, macOS, and Linux on x86-64 and ARM64. They contain only the root `pim-manager` executable (`pim-manager.exe` on Windows) and require no Go runtime. Prebuilt release and package-manager builds skip the background `go list` check; running `pim-manager update` from one directs you to update via your package manager or GitHub Releases (`https://github.com/mathwro/pim-manager/releases/latest`) instead of writing a second binary to `GOBIN`. macOS archives are ad-hoc signed; they are not Developer ID signed or notarized. Linux archives use static pure-Go binaries with `CGO_ENABLED=0`, so they have no libc dependency.
 
 ## Authentication
 

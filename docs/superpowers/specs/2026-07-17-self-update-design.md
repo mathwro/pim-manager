@@ -28,7 +28,7 @@ Add a non-interactive `pim-manager update` Cobra subcommand for users who instal
 
 `pim-manager update` is registered directly under the root command. Cobra routes it without invoking `internal/app.Run` or starting Bubble Tea.
 
-The command accepts no positional arguments and defines no flags. It runs:
+The command accepts no positional arguments and defines no flags. For module-installed (`go install`) and local development builds, it runs:
 
 ```bash
 go install github.com/mathwro/pim-manager@latest
@@ -44,11 +44,13 @@ Installed the latest tagged pim-manager version. Restart pim-manager to use it.
 
 The command does not claim that the currently running process changed. Go installs the executable to `GOBIN`, or to `GOPATH/bin` when `GOBIN` is unset.
 
+Prebuilt release archives and package-manager formulas inject `internal/version.semanticVersion` via linker flags rather than relying on `go install` module metadata. Running `pim-manager update` from a prebuilt release binary fails fast without invoking `go install` (preventing a duplicate binary in `GOBIN`) and directs the user to update via their package manager or `https://github.com/mathwro/pim-manager/releases/latest`.
+
 ## TUI Update Notification
 
-The application reads its current module version with `runtime/debug.ReadBuildInfo`. Only canonical stable tag builds such as `v0.1.1` are checked. Development builds (`(devel)`), pseudo-versions, and prereleases skip the lookup and show no notice.
+The application inspects build metadata via `internal/version` (`runtime/debug.ReadBuildInfo` and linker-injected release symbols). Only canonical stable `go install` module builds such as `v0.1.1` (where `semanticVersion` is unset and `Main.Version` is a stable tag) are checked. Prebuilt release archives, package-manager builds, development builds (`(devel)`), dirty builds, pseudo-versions, and prereleases skip the lookup without spawning `go` and show no notice.
 
-For a stable tagged build, startup runs this command in the background alongside tenant loading:
+For a stable `go install` build, startup runs this command in the background alongside tenant loading:
 
 ```bash
 go list -m -f={{.Version}} github.com/mathwro/pim-manager@latest
@@ -64,6 +66,7 @@ The notice appears only on the home screen. The check runs once per process and 
 
 ## Error Handling
 
+- If the running binary is a prebuilt release or package-manager build, `pim-manager update` returns an actionable error pointing to the user's package manager or `https://github.com/mathwro/pim-manager/releases/latest` without running `go install`.
 - If `go` is unavailable during `pim-manager update`, return an error stating that the Go toolchain is required and preserve the underlying executable-not-found error.
 - If `go install` exits unsuccessfully, return `update pim-manager: <underlying error>` after streaming the child process output.
 - Context cancellation terminates the child process through `exec.CommandContext` and returns the wrapped cancellation/process error.
@@ -72,8 +75,9 @@ The notice appears only on the home screen. The check runs once per process and 
 
 ## Code Structure
 
-- `internal/selfupdate/selfupdate.go` owns the fixed module target, running-version inspection, `go list` check, and `go install` implementation.
-- `internal/selfupdate/selfupdate_test.go` covers stable/development build gating, version equality/difference, malformed output, missing Go, and install errors without network access.
+- `internal/version/version.go` distinguishes `go install` module builds (`IsGoInstall`) from linker-injected prebuilt release binaries (`IsPrebuiltRelease`) and local development builds.
+- `internal/selfupdate/selfupdate.go` owns the fixed module target, `go install` build gating, `go list` check, and `go install` implementation.
+- `internal/selfupdate/selfupdate_test.go` covers `go install` vs. prebuilt release and development build gating, version equality/difference, malformed output, missing Go, and install errors without network access.
 - `cmd/root.go` registers the update subcommand and receives the updater function as a dependency for command-routing tests.
 - `cmd/root_test.go` proves root execution still opens the TUI and update execution bypasses it.
 - `internal/app/app.go` wires the shared update checker into the TUI runtime.
