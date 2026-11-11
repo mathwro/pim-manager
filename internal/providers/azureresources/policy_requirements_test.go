@@ -24,7 +24,11 @@ func TestARMPolicyRequirements(t *testing.T) {
 		{name: "approval optional", enabled: `[]`, extra: `,{"id":"Approval_EndUser_Assignment","setting":{"isRequestorJustificationRequired":false}}`},
 		{name: "approval cannot clear enablement justification", enabled: `["jUsTiFiCaTiOn"]`, extra: `,{"id":"Approval_EndUser_Assignment","setting":{"isRequestorJustificationRequired":false}}`, justification: true},
 		{name: "missing approval optional", enabled: `[]`},
-		{name: "informational and admin requirements ignored", enabled: `[]`, extra: `,{"id":"Enablement_Admin_Assignment","enabledRules":["Ticketing"]},{"id":"Notification_Requestor_EndUser_Assignment","notificationType":"Email"}`},
+		{name: "informational and admin requirements ignored", enabled: `[]`, extra: `,{"id":"Enablement_Admin_Assignment","enabledRules":["Ticketing"]},{"id":"Expiration_Admin_Eligibility","maximumDuration":"P365D"},{"id":"CustomRule","ruleType":"RoleManagementPolicyNotificationRule"},{"id":"Notification_Requestor_EndUser_Assignment","notificationType":"Email"},{"id":"AdminTargetRule","target":{"caller":"Admin","level":"Assignment","operations":["All"]}},{"id":"EligibilityTargetRule","target":{"caller":"EndUser","level":"Eligibility","operations":["All"]}},{"id":"DeactivateTargetRule","target":{"caller":"EndUser","level":"Assignment","operations":["Deactivate"]}}`},
+		{name: "unknown end-user assignment rule ID", enabled: `[]`, extra: `,{"id":"Ticketing_EndUser_Assignment"}`, unsupported: "Ticketing_EndUser_Assignment"},
+		{name: "unknown end-user target rule", enabled: `[]`, extra: `,{"id":"FutureRule","target":{"caller":"EndUser","level":"Assignment","operations":["All"]}}`, unsupported: "FutureRule"},
+		{name: "unknown activate target rule", enabled: `[]`, extra: `,{"id":"FutureActivateRule","target":{"caller":"EndUser","level":"Assignment","operations":["Activate"]}}`, unsupported: "FutureActivateRule"},
+		{name: "unknown rule without target or suffix", enabled: `[]`, extra: `,{"id":"FutureMysteryRule"}`, unsupported: "FutureMysteryRule"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			client := &policyRequirementsARM{policy: fmt.Sprintf(`{"value":[{"properties":{"scope":"/subscriptions/sub-1","roleDefinitionId":"reader","effectiveRules":[{"id":"Expiration_EndUser_Assignment","maximumDuration":"PT4H"},{"id":"Enablement_EndUser_Assignment","enabledRules":%s},{"id":"AuthenticationContext_EndUser_Assignment","isEnabled":false}%s]}}]}`, test.enabled, test.extra)}
@@ -34,7 +38,7 @@ func TestARMPolicyRequirements(t *testing.T) {
 				if err == nil || prepared != nil {
 					t.Fatalf("unsupported requirement returned usable assignments: %#v, %v", prepared, err)
 				}
-				for _, detail := range []string{test.unsupported, "Reader", "/subscriptions/sub-1", "Azure portal"} {
+				for _, detail := range []string{test.unsupported, "Reader", "reader", "/subscriptions/sub-1", "Azure portal"} {
 					if !strings.Contains(err.Error(), detail) {
 						t.Fatalf("diagnostic omits %q: %v", detail, err)
 					}
@@ -43,6 +47,28 @@ func TestARMPolicyRequirements(t *testing.T) {
 				want := pim.ActivationPolicy{MaximumDurationISO: "PT4H", JustificationRequired: test.justification}
 				if err != nil || len(prepared) != 1 || prepared[0].ActivationPolicy != want {
 					t.Fatalf("policy = %#v, %v; want %#v", prepared, err, want)
+				}
+			}
+		})
+	}
+}
+
+func TestARMPolicyRejectsDuplicateEndUserRules(t *testing.T) {
+	for _, duplicate := range []string{
+		`{"id":"Expiration_EndUser_Assignment","maximumDuration":"PT1H"}`,
+		`{"id":"Enablement_EndUser_Assignment","enabledRules":[]}`,
+		`{"id":"AuthenticationContext_EndUser_Assignment","isEnabled":false}`,
+		`{"id":"Approval_EndUser_Assignment","setting":{"isRequestorJustificationRequired":false}}`,
+	} {
+		t.Run(duplicate, func(t *testing.T) {
+			policy := fmt.Sprintf(`{"value":[{"properties":{"scope":"/subscriptions/sub-1","roleDefinitionId":"reader","effectiveRules":[{"id":"Expiration_EndUser_Assignment","maximumDuration":"PT4H"},{"id":"Enablement_EndUser_Assignment","enabledRules":[]},{"id":"AuthenticationContext_EndUser_Assignment","isEnabled":false},{"id":"Approval_EndUser_Assignment","setting":{"isRequestorJustificationRequired":false}},%s]}}]}`, duplicate)
+			prepared, err := azureresources.NewProvider(&policyRequirementsARM{policy: policy}).Prepare(context.Background(), []pim.EligibleAssignment{policyRequirementsAssignment()})
+			if err == nil || prepared != nil {
+				t.Fatalf("duplicate end-user rule allowed activation: %#v, %v", prepared, err)
+			}
+			for _, detail := range []string{"duplicate", "Reader", "reader", "/subscriptions/sub-1"} {
+				if !strings.Contains(err.Error(), detail) {
+					t.Fatalf("duplicate diagnostic omits %q: %v", detail, err)
 				}
 			}
 		})
