@@ -16,7 +16,23 @@ Activity is bounded and kept only in memory for the current session, not written
 
 ## Installation
 
-Install the latest version directly from the Go module repository:
+Install the prebuilt executable with Scoop on Windows:
+
+```powershell
+scoop bucket add mathwro https://github.com/mathwro/homebrew-tools
+scoop install mathwro/pim-manager
+scoop update pim-manager
+```
+
+Install with Homebrew on macOS or Linux:
+
+```bash
+brew tap mathwro/tools
+brew install mathwro/tools/pim-manager
+brew upgrade mathwro/tools/pim-manager
+```
+
+Or install the latest version directly from the Go module repository:
 
 ```bash
 go install github.com/mathwro/pim-manager@latest
@@ -36,7 +52,7 @@ pim-manager update
 
 The command requires the Go toolchain and follows Go's `@latest` module version. Tagged `go install` builds also check once in the background and show the external update command on the home screen when a newer tag is available.
 
-Prebuilt release archives are also published for Windows, macOS, and Linux on x86-64 and ARM64. They contain only the root `pim-manager` executable (`pim-manager.exe` on Windows) and require no Go runtime. Prebuilt release and package-manager builds skip the background `go list` check; running `pim-manager update` from one directs you to update via your package manager or GitHub Releases (`https://github.com/mathwro/pim-manager/releases/latest`) instead of writing a second binary to `GOBIN`. macOS archives are ad-hoc signed; they are not Developer ID signed or notarized. Linux archives use static pure-Go binaries with `CGO_ENABLED=0`, so they have no libc dependency.
+Prebuilt release archives are published for Windows, macOS, and Linux on x86-64 and ARM64. They contain only the root `pim-manager` executable (`pim-manager.exe` on Windows) and require no Go runtime. Prebuilt release and package-manager builds skip the background `go list` check; running `pim-manager update` from one directs you to update via your package manager or GitHub Releases (`https://github.com/mathwro/pim-manager/releases/latest`) instead of writing a second binary to `GOBIN`. macOS archives are ad-hoc signed; they are not Developer ID signed or notarized. Linux archives use static pure-Go binaries with `CGO_ENABLED=0`, so they have no libc dependency.
 
 ## Authentication
 
@@ -94,7 +110,7 @@ go run .
 
 `release.json` contains only the typed Go adapter settings: package and binary identity, ad-hoc macOS signing, and the linker symbols used for version provenance. The shared `mathwro/homebrew-tools/.github/workflows/release-tool.yml@main` workflow owns the release implementation.
 
-Before the first release, merge the shared workflow into `mathwro/homebrew-tools`, require the `CI` and `Workflow Lint` checks in `main` branch protection, create the protected `release` environment with required reviewers, and configure the `DISTRIBUTION_DISPATCH_TOKEN` repository secret. The token must be limited to sending repository dispatches to `mathwro/homebrew-tools`.
+Repository setup requires the shared workflow on `mathwro/homebrew-tools`, `CI` and `Workflow Lint` checks required in `main` branch protection, the protected `release` environment with required reviewers, and the `DISTRIBUTION_DISPATCH_TOKEN` repository secret limited to sending repository dispatches to `mathwro/homebrew-tools`.
 
 Push an annotated prerelease tag such as `v0.1.0-rc.1` for a complete automatic dry run, or dispatch the **Release** workflow with `dry_run: true` for an existing tag. The central workflow validates tag ancestry, runs the Go tests, builds on all six native runners, injects reproducible version metadata, ad-hoc signs macOS binaries, executes version/help smoke tests, creates deterministic root-only archives, and verifies the complete checksum set. A dry run creates workflow artifacts but no GitHub Release or package update.
 
