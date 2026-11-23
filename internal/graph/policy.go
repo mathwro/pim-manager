@@ -39,12 +39,14 @@ type policyRuleResponse struct {
 }
 
 type policyRule struct {
-	ID              string   `json:"id"`
-	MaximumDuration string   `json:"maximumDuration"`
-	EnabledRules    []string `json:"enabledRules"`
-	IsEnabled       *bool    `json:"isEnabled"`
-	ClaimValue      string   `json:"claimValue"`
-	Setting         *struct {
+	ID                string   `json:"id"`
+	MaximumDuration   string   `json:"maximumDuration"`
+	EnabledRules      []string `json:"enabledRules"`
+	IsEnabled         *bool    `json:"isEnabled"`
+	ClaimValue        string   `json:"claimValue"`
+	CustomExtensionID string   `json:"customExtensionId"`
+	CustomAttributes  []string `json:"customAttributes"`
+	Setting           *struct {
 		IsApprovalRequired               bool `json:"isApprovalRequired"`
 		IsRequestorJustificationRequired bool `json:"isRequestorJustificationRequired"`
 	} `json:"setting"`
@@ -150,7 +152,7 @@ func normalizeActivationPolicy(rules []policyRule) (pim.ActivationPolicy, error)
 		}
 		id := strings.ToLower(rule.ID)
 		switch id {
-		case "expiration_enduser_assignment", "enablement_enduser_assignment", "authenticationcontext_enduser_assignment", "approval_enduser_assignment":
+		case "expiration_enduser_assignment", "enablement_enduser_assignment", "authenticationcontext_enduser_assignment", "approval_enduser_assignment", "customextension_preapproval_enduser_assignment", "customextension_postapproval_enduser_assignment":
 			if seen[id] {
 				return pim.ActivationPolicy{}, fmt.Errorf("duplicate Graph activation policy rule %s", rule.ID)
 			}
@@ -193,6 +195,14 @@ func normalizeActivationPolicy(rules []policyRule) (pim.ActivationPolicy, error)
 			// Default policies set isRequestorJustificationRequired even with approval off; it only applies to approval requests.
 			if rule.Setting != nil && rule.Setting.IsApprovalRequired && rule.Setting.IsRequestorJustificationRequired {
 				policy.JustificationRequired = true
+			}
+		case "customextension_preapproval_enduser_assignment", "customextension_postapproval_enduser_assignment":
+			if rule.IsEnabled == nil {
+				return pim.ActivationPolicy{}, fmt.Errorf("Graph activation policy custom extension state is missing for %s", rule.ID)
+			}
+			// Audit mode leaves isEnabled false while linking customExtensionId and still evaluates customAttributes.
+			if (*rule.IsEnabled || strings.TrimSpace(rule.CustomExtensionID) != "") && len(rule.CustomAttributes) > 0 {
+				return pim.ActivationPolicy{}, fmt.Errorf("Graph activation requires unsupported custom extension attributes (%s); activate it in the Microsoft Entra admin center", strings.Join(rule.CustomAttributes, ", "))
 			}
 		}
 	}

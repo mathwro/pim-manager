@@ -207,7 +207,7 @@ func (p Provider) Activate(ctx context.Context, request pim.ActivationRequest) (
 		return pim.ActivationResult{Assignment: request.Assignment, Status: pim.ActivationStatusActivated, Message: response.Properties.Status}, nil
 	case "PendingApproval", "PendingApprovalProvisioning", "PendingAdminDecision":
 		return pim.ActivationResult{Assignment: request.Assignment, Status: pim.ActivationStatusPendingApproval, Message: response.Properties.Status}, nil
-	case "Accepted", "PendingEvaluation", "PendingProvisioning", "ProvisioningStarted", "PendingScheduleCreation", "PendingExternalProvisioning", "AdminApproved":
+	case "Accepted", "PendingEvaluation", "PendingProvisioning", "ProvisioningStarted", "PendingScheduleCreation", "PendingExternalProvisioning", "AdminApproved", "PostApprovalExtensionPendingEvaluation", "PostApprovalExtensionAdminApproved":
 		return pim.ActivationResult{Assignment: request.Assignment, Status: pim.ActivationStatusPendingProvisioning, Message: response.Properties.Status}, nil
 	default:
 		if response.Properties.Status == "" {

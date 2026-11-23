@@ -105,6 +105,65 @@ func TestPrepareAssignmentsAcceptsNotificationRules(t *testing.T) {
 	}
 }
 
+func TestPrepareAssignmentsHandlesCustomExtensionRules(t *testing.T) {
+	for _, test := range []struct {
+		name, extra, wantErr string
+	}{
+		{
+			name:  "default unlinked custom extension slots allowed",
+			extra: `{"@odata.type":"#microsoft.graph.unifiedRoleManagementPolicyCustomExtensionRule","id":"CustomExtension_PreApproval_EndUser_Assignment","isEnabled":false,"customExtensionId":"","customAttributes":[],"target":{"caller":"EndUser","level":"Assignment","operations":["All"]}},{"@odata.type":"#microsoft.graph.unifiedRoleManagementPolicyCustomExtensionRule","id":"CustomExtension_PostApproval_EndUser_Assignment","isEnabled":false,"customExtensionId":"","target":{"caller":"EndUser","level":"Assignment","operations":["All"]}}`,
+		},
+		{
+			name:  "audit mode without custom attributes allowed",
+			extra: `{"@odata.type":"#microsoft.graph.unifiedRoleManagementPolicyCustomExtensionRule","id":"CustomExtension_PreApproval_EndUser_Assignment","isEnabled":false,"customExtensionId":"ext-1","customAttributes":[],"target":{"caller":"EndUser","level":"Assignment","operations":["All"]}}`,
+		},
+		{
+			name:  "enabled server-side custom extension without attributes allowed",
+			extra: `{"@odata.type":"#microsoft.graph.unifiedRoleManagementPolicyCustomExtensionRule","id":"CustomExtension_PreApproval_EndUser_Assignment","isEnabled":true,"customExtensionId":"ext-1","customAttributes":[],"target":{"caller":"EndUser","level":"Assignment","operations":["All"]}},{"@odata.type":"#microsoft.graph.unifiedRoleManagementPolicyCustomExtensionRule","id":"CustomExtension_PostApproval_EndUser_Assignment","isEnabled":true,"customExtensionId":"ext-2","target":{"caller":"EndUser","level":"Assignment","operations":["All"]}}`,
+		},
+		{
+			name:  "disabled unlinked custom extension with stale attributes allowed",
+			extra: `{"@odata.type":"#microsoft.graph.unifiedRoleManagementPolicyCustomExtensionRule","id":"CustomExtension_PreApproval_EndUser_Assignment","isEnabled":false,"customExtensionId":"","customAttributes":["costCenter"],"target":{"caller":"EndUser","level":"Assignment","operations":["All"]}}`,
+		},
+		{
+			name:    "enabled custom extension with custom attributes rejected",
+			extra:   `{"@odata.type":"#microsoft.graph.unifiedRoleManagementPolicyCustomExtensionRule","id":"CustomExtension_PreApproval_EndUser_Assignment","isEnabled":true,"customExtensionId":"ext-1","customAttributes":["costCenter"],"target":{"caller":"EndUser","level":"Assignment","operations":["All"]}}`,
+			wantErr: "costCenter",
+		},
+		{
+			name:    "audit mode custom extension with custom attributes rejected",
+			extra:   `{"@odata.type":"#microsoft.graph.unifiedRoleManagementPolicyCustomExtensionRule","id":"CustomExtension_PreApproval_EndUser_Assignment","isEnabled":false,"customExtensionId":"ext-1","customAttributes":["costCenter"],"target":{"caller":"EndUser","level":"Assignment","operations":["All"]}}`,
+			wantErr: "costCenter",
+		},
+		{
+			name:    "missing custom extension state rejected",
+			extra:   `{"@odata.type":"#microsoft.graph.unifiedRoleManagementPolicyCustomExtensionRule","id":"CustomExtension_PreApproval_EndUser_Assignment","customExtensionId":"ext-1","target":{"caller":"EndUser","level":"Assignment","operations":["All"]}}`,
+			wantErr: "custom extension state is missing",
+		},
+		{
+			name:    "duplicate custom extension rule rejected",
+			extra:   `{"@odata.type":"#microsoft.graph.unifiedRoleManagementPolicyCustomExtensionRule","id":"CustomExtension_PreApproval_EndUser_Assignment","isEnabled":false,"customExtensionId":"","target":{"caller":"EndUser","level":"Assignment","operations":["All"]}},{"@odata.type":"#microsoft.graph.unifiedRoleManagementPolicyCustomExtensionRule","id":"CustomExtension_PreApproval_EndUser_Assignment","isEnabled":false,"customExtensionId":"","target":{"caller":"EndUser","level":"Assignment","operations":["All"]}}`,
+			wantErr: "duplicate",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			const anchor = `{"@odata.type":"#microsoft.graph.unifiedRoleManagementPolicyAuthenticationContextRule"`
+			fixture := strings.Replace(policyFixture("/", "DirectoryRole", "role-1", "PT8H", ``, false, ""), anchor, test.extra+","+anchor, 1)
+			client := &policyFake{get: func(string) (string, error) { return fixture, nil }}
+			prepared, err := PrepareAssignments(context.Background(), client, []pim.EligibleAssignment{{DisplayName: "Reader", Source: pim.AssignmentSourceEntra, RoleDefinitionID: "role-1"}})
+			if test.wantErr != "" {
+				if err == nil || prepared != nil || !strings.Contains(err.Error(), test.wantErr) {
+					t.Fatalf("got %#v, %v; want error containing %q", prepared, err, test.wantErr)
+				}
+				return
+			}
+			if err != nil || len(prepared) != 1 || prepared[0].ActivationPolicy.MaximumDurationISO != "PT8H" {
+				t.Fatalf("custom extension rule failed unexpectedly: %#v, %v", prepared, err)
+			}
+		})
+	}
+}
+
 func withEndUserRule(fixture, id string) string {
 	const anchor = `{"@odata.type":"#microsoft.graph.unifiedRoleManagementPolicyAuthenticationContextRule"`
 	rule := fmt.Sprintf(`{"id":%q,"target":{"caller":"EndUser","level":"Assignment","operations":["All"]}},`, id)

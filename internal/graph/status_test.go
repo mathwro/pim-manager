@@ -15,7 +15,8 @@ func TestActivationResultPreservesProvisioningAndApprovalOutcomes(t *testing.T) 
 		{"Granted", pim.ActivationStatusActivated}, {"Provisioned", pim.ActivationStatusActivated}, {"ScheduleCreated", pim.ActivationStatusActivated},
 		{"PendingApproval", pim.ActivationStatusPendingApproval}, {"PendingAdminDecision", pim.ActivationStatusPendingApproval},
 		{"PendingProvisioning", pim.ActivationStatusPendingProvisioning}, {"PendingScheduleCreation", pim.ActivationStatusPendingProvisioning},
-		{"Failed", pim.ActivationStatusFailed}, {"Denied", pim.ActivationStatusFailed}, {"unexpected", pim.ActivationStatusFailed},
+		{"PostApprovalExtensionPendingEvaluation", pim.ActivationStatusPendingProvisioning}, {"PostApprovalExtensionAdminApproved", pim.ActivationStatusPendingProvisioning},
+		{"Failed", pim.ActivationStatusFailed}, {"Denied", pim.ActivationStatusFailed}, {"PostApprovalExtensionAdminDenied", pim.ActivationStatusFailed}, {"unexpected", pim.ActivationStatusFailed},
 	} {
 		t.Run(test.status, func(t *testing.T) {
 			result := ActivationResult(pim.EligibleAssignment{ID: "one"}, test.status)

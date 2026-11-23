@@ -15,7 +15,7 @@ func ActivationResult(assignment pim.EligibleAssignment, status string) pim.Acti
 		result.Status = pim.ActivationStatusActivated
 	case "pendingapproval", "pendingapprovalprovisioning", "pendingadmindecision":
 		result.Status = pim.ActivationStatusPendingApproval
-	case "pendingprovisioning", "pendingschedulecreation":
+	case "pendingprovisioning", "pendingschedulecreation", "postapprovalextensionpendingevaluation", "postapprovalextensionadminapproved":
 		result.Status = pim.ActivationStatusPendingProvisioning
 	default:
 		result.Status = pim.ActivationStatusFailed

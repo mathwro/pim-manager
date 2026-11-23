@@ -48,13 +48,16 @@ type roleManagementPolicyAssignmentProperties struct {
 }
 
 type roleManagementPolicyRule struct {
-	ID              string   `json:"id"`
-	RuleType        string   `json:"ruleType"`
-	MaximumDuration string   `json:"maximumDuration"`
-	EnabledRules    []string `json:"enabledRules"`
-	IsEnabled       bool     `json:"isEnabled"`
-	ClaimValue      string   `json:"claimValue"`
-	Setting         *struct {
+	ID                string   `json:"id"`
+	RuleType          string   `json:"ruleType"`
+	MaximumDuration   string   `json:"maximumDuration"`
+	EnabledRules      []string `json:"enabledRules"`
+	IsEnabled         bool     `json:"isEnabled"`
+	Enabled           bool     `json:"enabled"`
+	ClaimValue        string   `json:"claimValue"`
+	CustomExtensionID string   `json:"customExtensionId"`
+	CustomAttributes  []string `json:"customAttributes"`
+	Setting           *struct {
 		IsApprovalRequired               bool `json:"isApprovalRequired"`
 		IsRequestorJustificationRequired bool `json:"isRequestorJustificationRequired"`
 	} `json:"setting"`
@@ -114,7 +117,7 @@ func policyForAssignment(policies []roleManagementPolicyAssignment, roleDefiniti
 		}
 		id := strings.ToLower(strings.TrimSpace(rule.ID))
 		switch id {
-		case "expiration_enduser_assignment", "enablement_enduser_assignment", "authenticationcontext_enduser_assignment", "approval_enduser_assignment":
+		case "expiration_enduser_assignment", "enablement_enduser_assignment", "authenticationcontext_enduser_assignment", "approval_enduser_assignment", "customextension_preapproval_enduser_assignment", "customextension_postapproval_enduser_assignment":
 			if seen[id] {
 				return pim.ActivationPolicy{}, fmt.Errorf("duplicate Azure activation policy rule %q for role definition %s", rule.ID, roleDefinitionID)
 			}
@@ -147,6 +150,11 @@ func policyForAssignment(policies []roleManagementPolicyAssignment, roleDefiniti
 			// Default policies set isRequestorJustificationRequired even with approval off; it only applies to approval requests.
 			if rule.Setting != nil && rule.Setting.IsApprovalRequired && rule.Setting.IsRequestorJustificationRequired {
 				policy.JustificationRequired = true
+			}
+		case "customextension_preapproval_enduser_assignment", "customextension_postapproval_enduser_assignment":
+			// ARM uses "enabled" while Graph uses "isEnabled"; audit mode keeps enabled false with a linked customExtensionId.
+			if (rule.Enabled || rule.IsEnabled || strings.TrimSpace(rule.CustomExtensionID) != "") && len(rule.CustomAttributes) > 0 {
+				return pim.ActivationPolicy{}, fmt.Errorf("Azure activation requires unsupported custom extension attributes (%s) for role definition %s; activate it in the Azure portal", strings.Join(rule.CustomAttributes, ", "), roleDefinitionID)
 			}
 		}
 	}
