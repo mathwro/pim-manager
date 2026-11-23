@@ -99,7 +99,7 @@ For every eligibility:
 
 Effective rules are authoritative because they include inherited/default settings. Raw policy `rules` are not used.
 
-Unsupported end-user enablement requirements, including `Ticketing` and unknown enabled settings, block policy preparation and submission with a diagnostic naming the requirement, role, scope, and Azure portal activation alternative. Ticket fields are not collected or submitted. Admin/eligibility enablement and informational notification rules do not add self-activation requirements. Supported duration, MFA, and authentication-context behavior is unchanged.
+Unsupported end-user enablement requirements, including `Ticketing` and unknown enabled settings, and enabled or audit-linked custom extension rules that require `customAttributes`, block policy preparation and submission with a diagnostic naming the requirement, role, scope, and Azure portal activation alternative. Unlinked or server-only custom extension rules (`CustomExtension_PreApproval_EndUser_Assignment`, `CustomExtension_PostApproval_EndUser_Assignment` without required `customAttributes`), admin/eligibility enablement, and informational notification rules do not add client-side self-activation requirements. Ticket and custom-attribute fields are not collected or submitted. Supported duration, MFA, and authentication-context behavior is unchanged.
 
 A missing policy assignment, missing maximum-duration rule, malformed required metadata, active-instance lookup failure, or policy lookup failure fails Azure Resources discovery with an error that identifies the affected role and scope where possible. The app must not guess `PT1H`, assume justification is optional, or permit duplicate activation when active state is unknown.
 
