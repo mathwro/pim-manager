@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -14,7 +13,7 @@ import (
 	"github.com/mathwro/pim-manager/internal/arm"
 )
 
-// AccountHealth identifies the account found by a live Microsoft Graph self lookup.
+// AccountHealth identifies the account found by a live Graph or ARM lookup.
 // Finding the account does not establish that its roles or sign-in are active.
 type AccountHealth struct {
 	TenantID          string
@@ -27,8 +26,8 @@ type AccountHealth struct {
 // Other probe errors leave account health unverified.
 var ErrAccountUnavailable = errors.New("account unavailable")
 
-// CheckAccount performs a non-interactive, tenant-scoped live self lookup. Its
-// fifteen-second background deadline covers Azure CLI startup, token acquisition and Graph HTTP.
+// CheckAccount performs a non-interactive, tenant-scoped live account lookup.
+// Its fifteen-second deadline covers Azure CLI, Graph and the optional ARM fallback.
 func (c CLI) CheckAccount(ctx context.Context) (AccountHealth, error) {
 	return c.checkAccount(ctx, &http.Client{})
 }
@@ -78,10 +77,11 @@ func (c CLI) checkAccount(ctx context.Context, client *http.Client) (AccountHeal
 		_ = json.NewDecoder(response.Body).Decode(&payload)
 		graphErr := fmt.Errorf("Graph self lookup: HTTP %d: %s: %s", response.StatusCode, payload.Error.Code, payload.Error.Message)
 		if graphInteractionChallenge(response.Header.Get("Www-Authenticate"), payload.Error.Message) {
-			if health, ok := c.checkARMAccountFallback(ctx, client, tenantID, claims.PrincipalID); ok {
-				return health, nil
+			health, err := c.checkARMAccountFallback(ctx, client, tenantID, claims.PrincipalID)
+			if err != nil {
+				return AccountHealth{}, fmt.Errorf("%w; ARM fallback: %w", graphErr, err)
 			}
-			return AccountHealth{}, graphErr
+			return health, nil
 		}
 		if response.StatusCode == http.StatusNotFound ||
 			(response.StatusCode == http.StatusUnauthorized && strings.EqualFold(payload.Error.Code, "InvalidAuthenticationToken")) ||
@@ -161,9 +161,7 @@ func accountSignInUnavailable(message string) bool {
 // graphInteractionChallenge detects Graph Conditional Access / Continuous Access
 // Evaluation (CAE) challenges on the Azure CLI Graph token (for example,
 // InteractionRequired / TokenCreatedWithOutdatedPolicies after PIM role changes).
-// Because Azure CLI may still hold a valid ARM token and Entra/Groups use their
-// own MSAL browser session, a Graph CAE challenge leaves the account probe
-// unverified rather than wiping the user's ARM workflow.
+// A Graph challenge alone cannot establish whether the ARM sign-in is usable.
 func graphInteractionChallenge(wwwAuthenticate string, message string) bool {
 	lowerAuth := strings.ToLower(wwwAuthenticate)
 	if strings.Contains(lowerAuth, "insufficient_claims") || strings.Contains(lowerAuth, "claims=") {
@@ -194,11 +192,12 @@ func (i armIdentity) userPrincipalName() string {
 }
 
 func armIdentityClaims(token string) armIdentity {
-	parts := strings.Split(token, ".")
-	if len(parts) < 2 {
+	header, rest, _ := strings.Cut(token, ".")
+	encoded, signature, _ := strings.Cut(rest, ".")
+	if header == "" || signature == "" || strings.Contains(signature, ".") {
 		return armIdentity{}
 	}
-	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	payload, err := base64.RawURLEncoding.DecodeString(encoded)
 	if err != nil {
 		return armIdentity{}
 	}
@@ -212,40 +211,46 @@ func armIdentityClaims(token string) armIdentity {
 // checkARMAccountFallback verifies live sign-in against ARM when Microsoft Graph
 // rejects Azure CLI's cached Graph token with a CAE claims challenge (which `az`
 // cannot answer non-interactively) while the ARM session remains valid.
-func (c CLI) checkARMAccountFallback(ctx context.Context, client *http.Client, tenantID string, graphPrincipalID string) (AccountHealth, bool) {
+func (c CLI) checkARMAccountFallback(ctx context.Context, client *http.Client, tenantID string, graphPrincipalID string) (AccountHealth, error) {
 	token, err := c.AccessToken(ctx, arm.Resource)
 	if err != nil {
-		return AccountHealth{}, false
+		return AccountHealth{}, fmt.Errorf("ARM token acquisition: %w", err)
 	}
 	claims := armIdentityClaims(token)
 	principalID := strings.TrimSpace(claims.PrincipalID)
 	if principalID == "" {
-		return AccountHealth{}, false
+		return AccountHealth{}, errors.New("ARM token has no principal ID")
 	}
-	if claims.TenantID != "" && !strings.EqualFold(claims.TenantID, tenantID) {
-		return AccountHealth{}, false
+	if !strings.EqualFold(claims.TenantID, tenantID) {
+		return AccountHealth{}, errors.New("ARM token tenant does not match the selected tenant")
 	}
 	if graphPrincipalID != "" && !strings.EqualFold(graphPrincipalID, principalID) {
-		return AccountHealth{}, false
+		return AccountHealth{}, errors.New("ARM token principal does not match the Graph token principal")
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, tenantListURL, nil)
-	if err != nil {
-		return AccountHealth{}, false
+
+	armClient := arm.NewClient(client, c)
+	ctx = arm.WithAccessToken(ctx, token)
+	for path := tenantListURL; path != ""; {
+		var page struct {
+			Value []struct {
+				TenantID string `json:"tenantId"`
+			} `json:"value"`
+			NextLink string `json:"nextLink"`
+		}
+		if err := armClient.Get(ctx, path, &page); err != nil {
+			return AccountHealth{}, fmt.Errorf("ARM tenant listing: %w", err)
+		}
+		for _, tenant := range page.Value {
+			if strings.EqualFold(tenant.TenantID, tenantID) {
+				return AccountHealth{
+					TenantID:          tenantID,
+					PrincipalID:       principalID,
+					DisplayName:       strings.TrimSpace(claims.DisplayName),
+					UserPrincipalName: claims.userPrincipalName(),
+				}, nil
+			}
+		}
+		path = page.NextLink
 	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	resp, err := client.Do(req)
-	if err != nil {
-		return AccountHealth{}, false
-	}
-	defer resp.Body.Close()
-	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
-	if resp.StatusCode != http.StatusOK {
-		return AccountHealth{}, false
-	}
-	return AccountHealth{
-		TenantID:          tenantID,
-		PrincipalID:       principalID,
-		DisplayName:       strings.TrimSpace(claims.DisplayName),
-		UserPrincipalName: claims.userPrincipalName(),
-	}, true
+	return AccountHealth{}, errors.New("ARM tenant listing did not include the selected tenant")
 }
