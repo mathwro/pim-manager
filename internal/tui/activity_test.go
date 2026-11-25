@@ -280,7 +280,7 @@ func TestStaleBackgroundResultsCannotAppendActivity(t *testing.T) {
 
 func TestDiscoveryAndPolicyClocksFollowActualStages(t *testing.T) {
 	model, provider := progressiveTestModel(pim.EligibleAssignment{ID: "reader", DisplayName: "Reader"})
-	next, cmd := model.beginDiscovery(SectionAzureResources, false)
+	next, cmd := model.beginDiscovery(SectionEntra, false)
 	model = next.(Model)
 	if model.operationStarted["discovery"].IsZero() || !model.operationStarted["policies"].IsZero() {
 		t.Fatalf("policy clock started before discovery finished: %#v", model.operationStarted)

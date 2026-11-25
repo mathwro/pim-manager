@@ -38,6 +38,29 @@ func TestPutReturnsResponseErrorWithStatusCode(t *testing.T) {
 	}
 }
 
+func TestPostSendsJSONAndDecodesResponse(t *testing.T) {
+	var gotMethod, gotPath string
+	client := NewClient(
+		&http.Client{Transport: armRoundTrip(func(req *http.Request) (*http.Response, error) {
+			gotMethod = req.Method
+			gotPath = req.URL.RequestURI()
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(`{"count":2}`)),
+				Header:     make(http.Header),
+			}, nil
+		})},
+		staticTokenSource{},
+	)
+	var out struct {
+		Count int `json:"count"`
+	}
+	err := client.Post(context.Background(), "/providers/Microsoft.ResourceGraph/resources?api-version=2022-10-01", map[string]string{"query": "ResourceContainers"}, &out)
+	if err != nil || gotMethod != http.MethodPost || !strings.Contains(gotPath, "Microsoft.ResourceGraph") || out.Count != 2 {
+		t.Fatalf("Post = (%v, %s, %s, %#v)", err, gotMethod, gotPath, out)
+	}
+}
+
 func TestClientRequestsMFAChallengeARMResource(t *testing.T) {
 	tokenSource := &recordingTokenSource{}
 	client := NewClient(

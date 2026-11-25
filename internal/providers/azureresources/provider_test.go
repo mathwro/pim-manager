@@ -169,7 +169,7 @@ func TestMetadataLookupsFollowPagination(t *testing.T) {
 	})
 	provider := NewProvider(armClient)
 	active, activeErr := provider.discoverActiveAssignments(context.Background(), scope)
-	policies, policyErr := provider.policiesForScope(context.Background(), scope)
+	policies, policyErr := provider.policiesForScope(context.Background(), scope, "")
 	if activeErr != nil || policyErr != nil || len(active) != 2 || len(policies) != 2 {
 		t.Fatalf("expected paginated metadata, active=%d policies=%d errors=%v/%v", len(active), len(policies), activeErr, policyErr)
 	}
@@ -210,10 +210,11 @@ func TestPreparePropagatesPolicyLookupError(t *testing.T) {
 
 func TestPrepareRejectsMissingPolicyForEligibility(t *testing.T) {
 	scope := "/subscriptions/sub-1"
-	policyPath := scope + "/providers/Microsoft.Authorization/roleManagementPolicyAssignments?api-version=2020-10-01"
+	roleDefinitionID := scope + "/providers/Microsoft.Authorization/roleDefinitions/reader"
+	policyPath := scope + "/providers/Microsoft.Authorization/roleManagementPolicyAssignments?$filter=roleDefinitionId+eq+%27%2Fsubscriptions%2Fsub-1%2Fproviders%2FMicrosoft.Authorization%2FroleDefinitions%2Freader%27&api-version=2020-10-01"
 	armClient := newProviderFakeARM(map[string]any{policyPath: policyAssignmentResponse{}})
 	assignments := []pim.EligibleAssignment{{
-		AzureScope: scope, RoleDefinitionID: scope + "/providers/Microsoft.Authorization/roleDefinitions/reader", DisplayName: "Reader",
+		AzureScope: scope, RoleDefinitionID: roleDefinitionID, DisplayName: "Reader",
 	}}
 	_, err := NewProvider(armClient).Prepare(context.Background(), assignments)
 	if err == nil || !strings.Contains(err.Error(), "activation policy for Reader at "+scope) || !strings.Contains(err.Error(), "no activation policy") {
@@ -224,7 +225,7 @@ func TestPrepareRejectsMissingPolicyForEligibility(t *testing.T) {
 func TestPrepareRejectsMalformedPolicyForEligibility(t *testing.T) {
 	scope := "/subscriptions/sub-1"
 	roleDefinitionID := scope + "/providers/Microsoft.Authorization/roleDefinitions/reader"
-	policyPath := scope + "/providers/Microsoft.Authorization/roleManagementPolicyAssignments?api-version=2020-10-01"
+	policyPath := scope + "/providers/Microsoft.Authorization/roleManagementPolicyAssignments?$filter=roleDefinitionId+eq+%27%2Fsubscriptions%2Fsub-1%2Fproviders%2FMicrosoft.Authorization%2FroleDefinitions%2Freader%27&api-version=2020-10-01"
 	armClient := newProviderFakeARM(map[string]any{policyPath: policyAssignmentResponse{Value: []roleManagementPolicyAssignment{{Properties: roleManagementPolicyAssignmentProperties{
 		RoleDefinitionID: roleDefinitionID,
 		EffectiveRules:   []roleManagementPolicyRule{{ID: "Enablement_EndUser_Assignment"}},
@@ -418,14 +419,15 @@ func TestDiscoverChildScopesFiltersAndFollowsPagination(t *testing.T) {
 	}
 
 	subChildren, err := provider.DiscoverChildScopes(context.Background(), pim.Scope{
-		ID:   subScope,
-		Type: pim.ScopeTypeSubscription,
+		ID:          subScope,
+		DisplayName: "Prod Subscription",
+		Type:        pim.ScopeTypeSubscription,
 	})
 	if err != nil {
 		t.Fatalf("DiscoverChildScopes(Subscription) returned error: %v", err)
 	}
 	wantSub := []pim.Scope{
-		{ID: "/subscriptions/sub-1/resourceGroups/rg-app", DisplayName: "rg-app", Type: pim.ScopeTypeResourceGroup},
+		{ID: "/subscriptions/sub-1/resourceGroups/rg-app", DisplayName: "rg-app", Type: pim.ScopeTypeResourceGroup, SubscriptionName: "Prod Subscription"},
 	}
 	if !slices.Equal(subChildren, wantSub) {
 		t.Fatalf("unexpected Subscription children: got %#v, want %#v", subChildren, wantSub)
@@ -467,15 +469,137 @@ func TestDiscoverChildScopesSkipsIndividualResourcesAndPropagatesErrors(t *testi
 	}
 }
 
+func TestPrepareUsesSingleRoleFilterWhenScopeHasOneRole(t *testing.T) {
+	scope := "/subscriptions/sub-1"
+	roleID := "/providers/Microsoft.Authorization/roleDefinitions/owner-guid"
+	filteredPath := scope + "/providers/Microsoft.Authorization/roleManagementPolicyAssignments?$filter=roleDefinitionId+eq+%27%2Fsubscriptions%2Fsub-1%2Fproviders%2FMicrosoft.Authorization%2FroleDefinitions%2Fowner-guid%27&api-version=2020-10-01"
+	armClient := newProviderFakeARM(map[string]any{
+		filteredPath: policyAssignmentResponse{Value: []roleManagementPolicyAssignment{
+			testPolicy(scope, "owner-guid", "PT2H", "Justification"),
+		}},
+	})
+
+	prepared, err := NewProvider(armClient).Prepare(context.Background(), []pim.EligibleAssignment{{
+		ID:               "owner-1",
+		DisplayName:      "Owner",
+		AzureScope:       scope,
+		RoleDefinitionID: roleID,
+	}})
+	if err != nil {
+		t.Fatalf("Prepare returned error: %v", err)
+	}
+	if len(prepared) != 1 || prepared[0].ActivationPolicy.MaximumDurationISO != "PT2H" || !prepared[0].ActivationPolicy.JustificationRequired {
+		t.Fatalf("unexpected prepared assignment: %#v", prepared)
+	}
+	if countPath(armClient.recordedPaths(), filteredPath) != 1 {
+		t.Fatalf("expected filtered policy path %s, got %#v", filteredPath, armClient.recordedPaths())
+	}
+}
+
+func TestDiscoverDescendantScopesMergesResourceGraphAndRecursiveEligibleFallback(t *testing.T) {
+	mgRoot := "/providers/Microsoft.Management/managementGroups/mg-root"
+	mgPlatform := "/providers/Microsoft.Management/managementGroups/mg-platform"
+	subStanding := "/subscriptions/sub-standing"
+	subEligibleOnly := "/subscriptions/sub-eligible-only"
+	rgStanding := "/subscriptions/sub-standing/resourceGroups/rg-standing"
+	rgEligibleOnly := "/subscriptions/sub-eligible-only/resourceGroups/rg-secret"
+
+	armClient := newProviderFakeARM(map[string]any{
+		mgRoot + "/providers/Microsoft.Authorization/eligibleChildResources?api-version=2020-10-01": childResourceResponse{
+			Value: []eligibleChildResource{{ID: mgPlatform, Name: "Platform MG", Type: "managementgroup"}},
+		},
+		mgPlatform + "/providers/Microsoft.Authorization/eligibleChildResources?api-version=2020-10-01": childResourceResponse{
+			Value: []eligibleChildResource{
+				{ID: subStanding, Name: "Standing Sub", Type: "subscription"},
+				{ID: subEligibleOnly, Name: "Secret Sub", Type: "subscription"},
+			},
+		},
+		subStanding + "/providers/Microsoft.Authorization/eligibleChildResources?$filter=resourceType+eq+%27resourcegroup%27&api-version=2020-10-01": childResourceResponse{
+			Value: []eligibleChildResource{{ID: rgStanding, Name: "rg-standing", Type: "resourcegroup"}},
+		},
+		subEligibleOnly + "/providers/Microsoft.Authorization/eligibleChildResources?$filter=resourceType+eq+%27resourcegroup%27&api-version=2020-10-01": childResourceResponse{
+			Value: []eligibleChildResource{{ID: rgEligibleOnly, Name: "rg-secret", Type: "resourcegroup"}},
+		},
+	})
+	armClient.postResponses = map[string][]resourceGraphResponse{
+		"/providers/Microsoft.ResourceGraph/resources?api-version=2022-10-01": {{
+			Data: []resourceGraphRow{
+				{ID: mgPlatform, Name: "mg-platform", DisplayName: "Platform MG", Type: "microsoft.management/managementgroups"},
+				{ID: subStanding, Name: "Standing Sub", Type: "microsoft.resources/subscriptions"},
+				{ID: rgStanding, Name: "rg-standing", Type: "microsoft.resources/subscriptions/resourcegroups"},
+			},
+		}},
+	}
+
+	descendants, err := NewProvider(armClient).DiscoverDescendantScopes(context.Background(), pim.Scope{
+		ID:          mgRoot,
+		DisplayName: "Root MG",
+		Type:        pim.ScopeTypeManagementGroup,
+	})
+	if err != nil {
+		t.Fatalf("DiscoverDescendantScopes returned error: %v", err)
+	}
+	gotIDs := make([]string, 0, len(descendants))
+	for _, scope := range descendants {
+		gotIDs = append(gotIDs, scope.ID)
+	}
+	byID := make(map[string]pim.Scope, len(descendants))
+	for _, scope := range descendants {
+		byID[scope.ID] = scope
+	}
+	for _, want := range []string{mgPlatform, subStanding, subEligibleOnly, rgStanding, rgEligibleOnly} {
+		if !slices.Contains(gotIDs, want) {
+			t.Fatalf("missing descendant scope %s in %#v", want, descendants)
+		}
+	}
+	if byID[rgStanding].SubscriptionName != "Standing Sub" {
+		t.Fatalf("expected rgStanding SubscriptionName %q, got %q", "Standing Sub", byID[rgStanding].SubscriptionName)
+	}
+	if byID[rgEligibleOnly].SubscriptionName != "Secret Sub" {
+		t.Fatalf("expected rgEligibleOnly SubscriptionName %q, got %q", "Secret Sub", byID[rgEligibleOnly].SubscriptionName)
+	}
+	if armClient.postCalls != 1 {
+		t.Fatalf("expected 1 Resource Graph POST call, got %d", armClient.postCalls)
+	}
+	if armClient.pinCalls != 1 {
+		t.Fatalf("expected 1 pinned token across ARG + recursive walk, got %d", armClient.pinCalls)
+	}
+}
+
+func TestDiscoverDescendantScopesFallsBackCleanlyWhenResourceGraphFails(t *testing.T) {
+	subScope := "/subscriptions/sub-1"
+	rgScope := "/subscriptions/sub-1/resourceGroups/rg-app"
+	armClient := newProviderFakeARM(map[string]any{
+		subScope + "/providers/Microsoft.Authorization/eligibleChildResources?$filter=resourceType+eq+%27resourcegroup%27&api-version=2020-10-01": childResourceResponse{
+			Value: []eligibleChildResource{{ID: rgScope, Name: "rg-app", Type: "resourcegroup"}},
+		},
+	})
+	armClient.postErr = errors.New("Resource Graph forbidden")
+
+	descendants, err := NewProvider(armClient).DiscoverDescendantScopes(context.Background(), pim.Scope{
+		ID:   subScope,
+		Type: pim.ScopeTypeSubscription,
+	})
+	if err != nil {
+		t.Fatalf("expected fallback to succeed when Resource Graph fails, got %v", err)
+	}
+	if len(descendants) != 1 || descendants[0].ID != rgScope {
+		t.Fatalf("expected fallback descendant %s, got %#v", rgScope, descendants)
+	}
+}
+
 type providerFakeARM struct {
-	mu          sync.Mutex
-	responses   map[string]any
-	errs        map[string]error
-	paths       []string
-	pinCalls    int
-	onGet       func(context.Context, string) error
-	inFlight    int
-	maxInFlight int
+	mu            sync.Mutex
+	responses     map[string]any
+	postResponses map[string][]resourceGraphResponse
+	errs          map[string]error
+	postErr       error
+	paths         []string
+	postCalls     int
+	pinCalls      int
+	onGet         func(context.Context, string) error
+	inFlight      int
+	maxInFlight   int
 }
 
 func newProviderFakeARM(responses map[string]any) *providerFakeARM {
@@ -515,6 +639,12 @@ func (f *providerFakeARM) Get(ctx context.Context, path string, out any) error {
 		}
 	}
 	if !ok {
+		if strings.HasPrefix(path, "/subscriptions?") {
+			if target, ok := out.(*subscriptionListResponse); ok {
+				*target = subscriptionListResponse{}
+				return nil
+			}
+		}
 		return fmt.Errorf("unexpected GET %s", path)
 	}
 	switch target := out.(type) {
@@ -526,6 +656,8 @@ func (f *providerFakeARM) Get(ctx context.Context, path string, out any) error {
 		*target = response.(policyAssignmentResponse)
 	case *childResourceResponse:
 		*target = response.(childResourceResponse)
+	case *subscriptionListResponse:
+		*target = response.(subscriptionListResponse)
 	default:
 		return fmt.Errorf("unsupported response target %T", out)
 	}
@@ -562,6 +694,24 @@ func countPath(paths []string, want string) int {
 		}
 	}
 	return count
+}
+
+func (f *providerFakeARM) Post(_ context.Context, path string, _ any, out any) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.postCalls++
+	if f.postErr != nil {
+		return f.postErr
+	}
+	queue := f.postResponses[path]
+	if len(queue) == 0 {
+		return nil
+	}
+	f.postResponses[path] = queue[1:]
+	if target, ok := out.(*resourceGraphResponse); ok {
+		*target = queue[0]
+	}
+	return nil
 }
 
 func (f *providerFakeARM) Put(context.Context, string, any, any) error {

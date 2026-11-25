@@ -25,7 +25,7 @@ func (m Model) withActivity(content string) string {
 
 func (m Model) activityHeight() int {
 	rows := len(m.activityEntries)
-	if m.checkingTenants || m.checkingAccount || m.loading || m.preparingPolicies || m.checkingAuthentication || m.graphConnecting || m.scopePicker.loading || m.scopePicker.preparing || m.screen == ScreenProgress {
+	if m.checkingTenants || m.checkingAccount || m.loading || m.preparingPolicies || m.checkingAuthentication || m.graphConnecting || m.scopePicker.loading || m.scopePicker.preparing || m.scopePicker.descLoading || m.screen == ScreenProgress {
 		rows++
 	}
 	if m.tenantErr != nil && m.screen != ScreenTenants {
@@ -79,7 +79,7 @@ func (m Model) currentOperation() string {
 		{"account", "Account check", m.checkingAccount},
 		{"discovery", "Discovery", m.loading && m.screen != ScreenProgress},
 		{"policies", "Activation requirements", m.preparingPolicies},
-		{"scopes", "Child scopes", m.scopePicker.loading || m.scopePicker.preparing},
+		{"scopes", "Child scopes", m.scopePicker.loading || m.scopePicker.preparing || m.scopePicker.descLoading},
 		{"authentication", "Authenticating", m.checkingAuthentication},
 		{"graph", "Microsoft Graph sign-in", m.graphConnecting},
 		{"activation", "Submitting activation requests", m.screen == ScreenProgress},
@@ -165,26 +165,29 @@ func (m Model) screenHints() []keyHint {
 		}
 		return append(hints, keyHint{"enter", "continue"}, keyHint{"r", "refresh"}, keyHint{"esc", "back"})
 	case ScreenScope:
-		if m.scopePicker.loading || m.scopePicker.preparing {
+		if m.scopePicker.preparing {
 			return []keyHint{{"esc", "cancel"}, {"q", "quit"}}
 		}
 		if m.scopePicker.searchMode {
-			return []keyHint{{"type", "filter"}, {"enter", "apply"}, {"esc", "close search"}}
+			return []keyHint{{"type", "search"}, {"enter", "apply"}, {"esc", "close search"}}
+		}
+		if m.scopePicker.loading && strings.TrimSpace(m.scopePicker.query) == "" {
+			return []keyHint{{"/", "search"}, {"esc", "cancel"}, {"q", "quit"}}
 		}
 		hints := []keyHint{{"up/down", "move"}, {"enter", "use scope"}}
 		options := m.currentScopeOptions()
 		if len(m.scopePicker.stack) > 0 {
-			cursor := m.scopePicker.stack[len(m.scopePicker.stack)-1].cursor
+			cursor := m.scopeCursor()
 			if cursor > 0 && cursor < len(options) && canDrillScope(options[cursor]) {
 				hints = append(hints, keyHint{"right/l", "children"})
 			}
-			if len(m.scopePicker.stack) > 1 {
+			if len(m.scopePicker.stack) > 1 && strings.TrimSpace(m.scopePicker.query) == "" {
 				hints = append(hints, keyHint{"left/h", "parent"})
 			}
 		}
-		return append(hints, keyHint{"/", "filter"}, keyHint{"esc", "back"})
+		return append(hints, keyHint{"/", "search"}, keyHint{"esc", "back"})
 	case ScreenDetails:
-		if !m.policiesReady && !m.preparingPolicies {
+		if (!m.policiesReady || (m.activeSection == SectionAzureResources && m.err != nil)) && !m.preparingPolicies {
 			return []keyHint{{"up/down", "scroll"}, {"r", "retry discovery"}, {"esc", "back to assignments"}, {"q", "quit"}}
 		}
 		return []keyHint{{"up/down", "scroll"}, {"esc", "back to assignments"}, {"q", "quit"}}

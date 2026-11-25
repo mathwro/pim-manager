@@ -145,12 +145,12 @@ func TestCachedDiscoveryKeepsSameSectionPreparation(t *testing.T) {
 			{ID: "two", DisplayName: "Azure Owner", ActivationPolicy: pim.ActivationPolicy{MaximumDurationISO: "PT2H"}},
 		},
 	}
-	model := NewModel(Runtime{AzureResources: provider})
+	model := NewModel(Runtime{Entra: provider, GraphConnected: func(context.Context) bool { return true }})
 	model.selectedTenant = azureauth.Tenant{ID: "tenant-1"}
-	next, cmd := model.beginDiscovery(SectionAzureResources, false)
+	next, cmd := model.beginDiscovery(SectionEntra, false)
 	model, prepare := startDiscoveryBatch(t, next.(Model), cmd)
 	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyEsc})
-	next, cmd = next.(Model).beginDiscovery(SectionAzureResources, false)
+	next, cmd = next.(Model).beginDiscovery(SectionEntra, false)
 	model = next.(Model)
 	if cmd != nil || !model.preparingPolicies || provider.discoverCalls != 1 {
 		t.Fatalf("re-entry restarted or lost progressive preparation: cmd=%v preparing=%v discoveries=%d", cmd != nil, model.preparingPolicies, provider.discoverCalls)
@@ -182,18 +182,18 @@ func TestInactiveSectionMessagesCannotCancelForegroundPreparation(t *testing.T) 
 				}},
 				prepared: []pim.EligibleAssignment{{ID: "azure", DisplayName: "Azure Reader", ActivationPolicy: pim.ActivationPolicy{MaximumDurationISO: "PT2H"}}},
 			}
-			model := NewModel(Runtime{AzureResources: provider})
+			model := NewModel(Runtime{Entra: provider, GraphConnected: func(context.Context) bool { return true }})
 			model.selectedTenant = azureauth.Tenant{ID: "tenant-1"}
-			next, cmd := model.beginDiscovery(SectionAzureResources, false)
+			next, cmd := model.beginDiscovery(SectionEntra, false)
 			model, prepare := startDiscoveryBatch(t, next.(Model), cmd)
 			ready := preparationCommand(t, prepare)()
 			model = sendRunes(model, " ")
 			next, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
 			model = next.(Model)
-			key := discoveryKey{tenantID: "tenant-1", section: SectionEntra}
-			var late tea.Msg = assignmentsDiscoveredMsg{tenantID: "tenant-1", section: SectionEntra, checkID: model.discoveryCheck, err: azureauth.ErrAccountUnavailable}
+			key := discoveryKey{tenantID: "tenant-1", section: SectionAzureResources}
+			var late tea.Msg = assignmentsDiscoveredMsg{tenantID: "tenant-1", section: SectionAzureResources, checkID: model.discoveryCheck, err: azureauth.ErrAccountUnavailable}
 			if phase == "policies" {
-				model.discoveryCache[key] = discoveryEntry{assignments: []pim.EligibleAssignment{{ID: "entra"}}, generation: model.discoveryCheck}
+				model.discoveryCache[key] = discoveryEntry{assignments: []pim.EligibleAssignment{{ID: "azure"}}, generation: model.discoveryCheck}
 				late = assignmentsPreparedMsg{key: key, generation: model.discoveryCheck, err: azureauth.ErrAccountUnavailable}
 			}
 

@@ -30,9 +30,10 @@ const (
 )
 
 type Scope struct {
-	ID          string
-	DisplayName string
-	Type        ScopeType
+	ID               string
+	DisplayName      string
+	Type             ScopeType
+	SubscriptionName string
 }
 
 type ActivationPolicy struct {

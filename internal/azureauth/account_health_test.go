@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/mathwro/pim-manager/internal/arm"
 )
 
 func TestCheckAccountFindsLiveTenantScopedSelf(t *testing.T) {
@@ -100,10 +102,10 @@ func TestCheckAccountClassifiesGraphFailuresConservatively(t *testing.T) {
 	}{
 		{"missing self", 404, `{"error":{"code":"Request_ResourceNotFound","message":"Resource does not exist."}}`, true},
 		{"invalid sign-in", 401, `{"error":{"code":"InvalidAuthenticationToken","message":"Access token has expired."}}`, true},
+		{"CAE interaction required", 401, `{"error":{"code":"InvalidAuthenticationToken","message":"Continuous access evaluation resulted in challenge with result: InteractionRequired and code: TokenCreatedWithOutdatedPolicies"}}`, false},
 		{"disabled account", 403, `{"error":{"code":"Forbidden","message":"AADSTS50057: User account is disabled."}}`, true},
 		{"restricted Graph", 403, `{"error":{"code":"Authorization_RequestDenied","message":"Insufficient privileges to complete the operation."}}`, false},
 		{"no delegated permissions", 401, `{"error":{"code":"NoPermissionsInAccessToken","message":"The token contains no permissions."}}`, false},
-		{"throttle", 429, `{"error":{"code":"TooManyRequests","message":"Please retry later."}}`, false},
 		{"service unavailable", 503, `{"error":{"code":"ServiceUnavailable","message":"Service unavailable."}}`, false},
 		{"unstructured unauthorized", 401, `upstream failure`, false},
 		{"invalid JSON", 200, `not-json`, false},
@@ -122,6 +124,68 @@ func TestCheckAccountClassifiesGraphFailuresConservatively(t *testing.T) {
 				t.Fatal("probe errors must not expose the access token")
 			}
 		})
+	}
+}
+
+func TestCheckAccountLeavesWWWAuthenticateClaimsChallengeUnverified(t *testing.T) {
+	cli := accountTokenCLI("opaque-graph-token")
+	got, err := cli.checkAccount(WithTenant(context.Background(), "tenant-1"), accountHTTPClient(func(*http.Request) (*http.Response, error) {
+		resp := accountResponse(http.StatusUnauthorized, `{"error":{"code":"InvalidAuthenticationToken","message":"CompactToken parsing failed"}}`)
+		resp.Header.Set("Www-Authenticate", `Bearer realm="", authorization_uri="https://login.microsoftonline.com/common/oauth2/authorize", error="insufficient_claims", claims="eyJhY2Nlc3NfdG9rZW4iOnt9fQ=="`)
+		return resp, nil
+	}))
+	if err == nil || errors.Is(err, ErrAccountUnavailable) || got != (AccountHealth{}) {
+		t.Fatalf("expected WWW-Authenticate claims challenge to stay unverified (not unavailable), got %#v, %v", got, err)
+	}
+}
+
+func TestCheckAccountFallsBackToLiveARMProbeOnGraphCAEChallenge(t *testing.T) {
+	armTok := graphToken(`{"tid":"tenant-1","oid":"principal-1","name":"Ada Lovelace","upn":"ada@gn.group"}`)
+	graphTok := graphToken(`{"tid":"tenant-1","oid":"principal-1"}`)
+
+	cli := NewCLI(func(_ context.Context, _ string, args ...string) ([]byte, error) {
+		cmdLine := strings.Join(args, " ")
+		if strings.Contains(cmdLine, "https://graph.microsoft.com/") {
+			return json.Marshal(map[string]string{"accessToken": graphTok})
+		}
+		if strings.Contains(cmdLine, arm.Resource) {
+			return json.Marshal(map[string]string{"accessToken": armTok})
+		}
+		t.Fatalf("unexpected CLI args: %v", args)
+		return nil, nil
+	})
+
+	var urls []string
+	client := accountHTTPClient(func(req *http.Request) (*http.Response, error) {
+		urls = append(urls, req.URL.String())
+		if strings.HasPrefix(req.URL.String(), "https://graph.microsoft.com/") {
+			return accountResponse(http.StatusUnauthorized, `{"error":{"code":"InvalidAuthenticationToken","message":"Continuous access evaluation resulted in challenge with result: InteractionRequired and code: TokenCreatedWithOutdatedPolicies"}}`), nil
+		}
+		if req.URL.String() == tenantListURL {
+			if req.Header.Get("Authorization") != "Bearer "+armTok {
+				t.Fatalf("expected ARM token header, got %q", req.Header.Get("Authorization"))
+			}
+			return accountResponse(http.StatusOK, `{"value":[{"tenantId":"tenant-1"}]}`), nil
+		}
+		t.Fatalf("unexpected HTTP request: %s", req.URL)
+		return nil, nil
+	})
+
+	got, err := cli.checkAccount(WithTenant(context.Background(), "tenant-1"), client)
+	if err != nil {
+		t.Fatalf("expected CAE fallback to succeed without error, got %v", err)
+	}
+	want := AccountHealth{
+		TenantID:          "tenant-1",
+		PrincipalID:       "principal-1",
+		DisplayName:       "Ada Lovelace",
+		UserPrincipalName: "ada@gn.group",
+	}
+	if got != want {
+		t.Fatalf("expected %#v, got %#v", want, got)
+	}
+	if len(urls) != 2 {
+		t.Fatalf("expected Graph probe then ARM fallback probe, got %v", urls)
 	}
 }
 

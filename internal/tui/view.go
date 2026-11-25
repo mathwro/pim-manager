@@ -228,7 +228,7 @@ func (m Model) viewDetails() string {
 }
 
 func (m Model) detailsNotice() string {
-	if !m.policiesReady && !m.preparingPolicies {
+	if (!m.policiesReady || (m.activeSection == SectionAzureResources && m.err != nil)) && !m.preparingPolicies {
 		return warningStyle.Width(m.contentWidth()).Render("Activation requirements are unavailable; press r to retry discovery.")
 	}
 	return ""
@@ -255,7 +255,7 @@ func (m Model) detailsContent() string {
 	b.WriteString("\n")
 	b.WriteString(mutedStyle.Render(displayScope(assignment)))
 	b.WriteString("\n\n")
-	if !m.policiesReady && !m.preparingPolicies && m.err != nil {
+	if (!m.policiesReady || m.activeSection == SectionAzureResources) && !m.preparingPolicies && m.err != nil {
 		b.WriteString(errorStyle.Width(m.contentWidth() - 2).Render("Error: " + m.err.Error()))
 		b.WriteString("\n\n")
 	}
@@ -283,7 +283,7 @@ func (m Model) detailsContent() string {
 		maximumDuration = "Loading..."
 		justification = "Loading..."
 		authentication = "Loading..."
-	case !m.policiesReady:
+	case !m.policiesReady || (m.activeSection == SectionAzureResources && maximumDuration == ""):
 		maximumDuration = "Unavailable"
 		justification = "Unavailable"
 		authentication = "Unavailable"
@@ -772,6 +772,21 @@ func displayName(assignment pim.EligibleAssignment) string {
 	return "Unnamed assignment"
 }
 
+func subscriptionIDFromAzureScope(scope string) string {
+	scope = strings.TrimSpace(scope)
+	if scope != "" && !strings.HasPrefix(scope, "/") {
+		scope = "/" + scope
+	}
+	if !strings.HasPrefix(strings.ToLower(scope), "/subscriptions/") {
+		return ""
+	}
+	rest := scope[len("/subscriptions/"):]
+	if idx := strings.IndexByte(rest, '/'); idx >= 0 {
+		rest = rest[:idx]
+	}
+	return strings.TrimSpace(rest)
+}
+
 func displayScope(assignment pim.EligibleAssignment) string {
 	name := strings.TrimSpace(assignment.Scope.DisplayName)
 	scopeType := strings.TrimSpace(string(assignment.Scope.Type))
@@ -782,6 +797,16 @@ func displayScope(assignment pim.EligibleAssignment) string {
 		scopeType = "Sub"
 	case pim.ScopeTypeResourceGroup:
 		scopeType = "RG"
+		sub := strings.TrimSpace(assignment.Scope.SubscriptionName)
+		if sub == "" {
+			sub = subscriptionIDFromAzureScope(assignment.Scope.ID)
+		}
+		if sub == "" {
+			sub = subscriptionIDFromAzureScope(assignment.AzureScope)
+		}
+		if name != "" && sub != "" {
+			return fmt.Sprintf("RG: %s (%s)", name, sub)
+		}
 	}
 	switch {
 	case name != "" && scopeType != "":

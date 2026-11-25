@@ -88,10 +88,13 @@ func (c Client) Get(ctx context.Context, path string, out any) error {
 	return c.do(ctx, http.MethodGet, path, nil, out)
 }
 
+func (c Client) Post(ctx context.Context, path string, body any, out any) error {
+	return c.do(ctx, http.MethodPost, path, body, out)
+}
+
 func (c Client) Put(ctx context.Context, path string, body any, out any) error {
 	return c.do(ctx, http.MethodPut, path, body, out)
 }
-
 func (c Client) do(ctx context.Context, method string, path string, body any, out any) error {
 	u, err := c.requestURL(path)
 	if err != nil {

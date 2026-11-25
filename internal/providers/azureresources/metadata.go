@@ -3,6 +3,7 @@ package azureresources
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"slices"
 	"sort"
 	"strings"
@@ -266,8 +267,20 @@ func (p Provider) discoverActiveAssignments(ctx context.Context, scope string) (
 	return out, nil
 }
 
-func (p Provider) policiesForScope(ctx context.Context, scope string) ([]roleManagementPolicyAssignment, error) {
-	path := fmt.Sprintf("%s/providers/Microsoft.Authorization/roleManagementPolicyAssignments?api-version=%s", scopePathPrefix(scope), arm.AuthorizationAPIVersion)
+func scopedRoleDefinitionID(scope string, roleDefinitionID string) string {
+	guid := resourceName(roleDefinitionID)
+	if guid == "" {
+		return ""
+	}
+	return fmt.Sprintf("%s/providers/Microsoft.Authorization/roleDefinitions/%s", scopePathPrefix(scope), guid)
+}
+
+func (p Provider) policiesForScope(ctx context.Context, scope string, roleFilter string) ([]roleManagementPolicyAssignment, error) {
+	query := fmt.Sprintf("api-version=%s", arm.AuthorizationAPIVersion)
+	if roleFilter != "" {
+		query = fmt.Sprintf("$filter=%s&%s", url.QueryEscape(fmt.Sprintf("roleDefinitionId eq '%s'", roleFilter)), query)
+	}
+	path := fmt.Sprintf("%s/providers/Microsoft.Authorization/roleManagementPolicyAssignments?%s", scopePathPrefix(scope), query)
 	var out []roleManagementPolicyAssignment
 	for path != "" {
 		var response policyAssignmentResponse
@@ -315,7 +328,24 @@ func (p Provider) applyPolicies(ctx context.Context, assignments []pim.EligibleA
 	scopes := assignmentScopes(assignments)
 	policiesByScope := make([][]roleManagementPolicyAssignment, len(scopes))
 	if err := forEachScope(ctx, scopes, func(ctx context.Context, index int, scope string) error {
-		policies, err := p.policiesForScope(ctx, scope)
+		indices := byScope[strings.ToLower(scope)]
+		roleFilter := ""
+		if len(indices) == 1 {
+			roleFilter = scopedRoleDefinitionID(scope, assignments[indices[0]].RoleDefinitionID)
+		} else if len(indices) > 1 {
+			first := resourceName(assignments[indices[0]].RoleDefinitionID)
+			same := first != ""
+			for _, idx := range indices[1:] {
+				if resourceName(assignments[idx].RoleDefinitionID) != first {
+					same = false
+					break
+				}
+			}
+			if same {
+				roleFilter = scopedRoleDefinitionID(scope, assignments[indices[0]].RoleDefinitionID)
+			}
+		}
+		policies, err := p.policiesForScope(ctx, scope, roleFilter)
 		policiesByScope[index] = policies
 		return err
 	}); err != nil {
