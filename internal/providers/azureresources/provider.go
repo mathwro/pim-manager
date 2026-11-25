@@ -284,7 +284,7 @@ func (p Provider) listEligibleChildScopes(ctx context.Context, parent pim.Scope)
 	for path != "" {
 		var response childResourceResponse
 		if err := p.arm.Get(ctx, path, &response); err != nil {
-			return nil, fmt.Errorf("list eligible child scopes at %s: %w", prefix, err)
+			return children, fmt.Errorf("list eligible child scopes at %s: %w", prefix, err)
 		}
 		for _, item := range response.Value {
 			id := scopePathPrefix(item.ID)
@@ -345,8 +345,8 @@ func (p Provider) DiscoverDescendantScopes(ctx context.Context, root pim.Scope) 
 		treeScopes, treeErr = p.walkEligibleDescendants(ctx, root)
 	}()
 	wg.Wait()
-	if treeErr != nil {
-		return nil, treeErr
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 
 	subNames := make(map[string]string)
@@ -399,7 +399,7 @@ func (p Provider) DiscoverDescendantScopes(ctx context.Context, root pim.Scope) 
 		out = append(out, scope)
 	}
 	slices.SortFunc(out, compareScopes)
-	return out, nil
+	return out, treeErr
 }
 
 func compareScopes(a, b pim.Scope) int {
@@ -460,7 +460,7 @@ func (p Provider) queryResourceGraphDescendants(ctx context.Context, root pim.Sc
 	for {
 		var resp resourceGraphResponse
 		if err := p.arm.Post(ctx, path, req, &resp); err != nil {
-			return nil, err
+			return out, err
 		}
 		for _, row := range resp.Data {
 			id := scopePathPrefix(row.ID)
@@ -486,9 +486,6 @@ func (p Provider) queryResourceGraphDescendants(ctx context.Context, root pim.Sc
 }
 
 func (p Provider) walkEligibleDescendants(ctx context.Context, root pim.Scope) ([]pim.Scope, error) {
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
 	semaphore := make(chan struct{}, maxConcurrentScopeRequests)
 	var (
 		mu       sync.Mutex
@@ -507,19 +504,9 @@ func (p Provider) walkEligibleDescendants(ctx context.Context, root pim.Scope) (
 		}
 		children, err := p.listEligibleChildScopes(ctx, parent)
 		<-semaphore
-		if err != nil {
-			mu.Lock()
-			if firstErr == nil {
-				firstErr = err
-				cancel()
-			}
-			mu.Unlock()
-			return
-		}
 		mu.Lock()
-		if firstErr != nil {
-			mu.Unlock()
-			return
+		if err != nil && firstErr == nil {
+			firstErr = err
 		}
 		var drill []pim.Scope
 		for _, child := range children {
@@ -542,13 +529,7 @@ func (p Provider) walkEligibleDescendants(ctx context.Context, root pim.Scope) (
 	wg.Add(1)
 	go visit(root)
 	wg.Wait()
-	if firstErr != nil {
-		return nil, firstErr
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	return results, nil
+	return results, firstErr
 }
 
 func mapChildScopeType(apiType string, scope string) pim.ScopeType {

@@ -588,6 +588,38 @@ func TestDiscoverDescendantScopesFallsBackCleanlyWhenResourceGraphFails(t *testi
 	}
 }
 
+func TestDescendantSearchKeepsResultsWhenSubtreeFails(t *testing.T) {
+	const root = "/providers/Microsoft.Management/managementGroups/root"
+	const sub = "/subscriptions/sub"
+	const graphRG = sub + "/resourceGroups/graph"
+	const treeRG = sub + "/resourceGroups/tree"
+	const endpoint = "/providers/Microsoft.Authorization/eligibleChildResources?"
+	client := newProviderFakeARM(map[string]any{
+		root + endpoint + "api-version=2020-10-01": childResourceResponse{
+			Value: []eligibleChildResource{{ID: sub, Type: "subscription"}},
+		},
+		sub + endpoint + "$filter=resourceType+eq+%27resourcegroup%27&api-version=2020-10-01": childResourceResponse{
+			Value: []eligibleChildResource{{ID: treeRG, Type: "resourcegroup"}}, NextLink: "/next",
+		},
+	})
+	throttled := errors.New("throttled")
+	client.errs = map[string]error{"/next": throttled}
+	client.postResponses = map[string][]resourceGraphResponse{
+		"/providers/Microsoft.ResourceGraph/resources?api-version=2022-10-01": {{
+			Data: []resourceGraphRow{{ID: graphRG, Type: "resourcegroup"}},
+		}},
+	}
+	scopes, err := NewProvider(client).DiscoverDescendantScopes(context.Background(), pim.Scope{ID: root, Type: pim.ScopeTypeManagementGroup})
+	if !errors.Is(err, throttled) {
+		t.Fatalf("expected partial-search diagnostic; got %v", err)
+	}
+	for _, id := range []string{sub, graphRG, treeRG} {
+		if !slices.ContainsFunc(scopes, func(s pim.Scope) bool { return s.ID == id }) {
+			t.Errorf("lost known descendant %s: %v", id, scopes)
+		}
+	}
+}
+
 type providerFakeARM struct {
 	mu            sync.Mutex
 	responses     map[string]any
