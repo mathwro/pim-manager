@@ -27,13 +27,16 @@ type scopeLevel struct {
 	parent   pim.Scope
 	children []pim.Scope
 	cursor   int
+	loaded   bool
 }
 
 type scopePickerState struct {
-	assignment   pim.EligibleAssignment
+	targetID     string
 	base         pim.EligibleAssignment
 	stack        []scopeLevel
 	descendants  []pim.Scope
+	indexedIDs   map[string]struct{}
+	descErr      error
 	descLoading  bool
 	descCheckID  int
 	descCancel   context.CancelFunc
@@ -52,7 +55,6 @@ type childScopesDiscoveredMsg struct {
 	checkID  int
 	parent   pim.Scope
 	children []pim.Scope
-	push     bool
 	err      error
 }
 
@@ -108,16 +110,15 @@ func (m *Model) syncBaseAssignments(assignments []pim.EligibleAssignment) {
 	}
 }
 
-func (m *Model) updateBaseAssignmentPolicy(assignment pim.EligibleAssignment) {
-	if m.scopePicker.basePolicies == nil {
+func (m *Model) updateBaseAssignmentPolicy(prepared *pim.EligibleAssignment) {
+	base, ok := m.scopePicker.basePolicies[prepared.ID]
+	if !ok || !sameAzureScope(base.AzureScope, prepared.AzureScope) {
 		return
 	}
-	base, ok := m.scopePicker.basePolicies[assignment.ID]
-	if !ok {
-		return
-	}
-	if strings.EqualFold(strings.TrimRight(base.AzureScope, "/"), strings.TrimRight(assignment.AzureScope, "/")) {
-		m.scopePicker.basePolicies[assignment.ID] = assignment
+	base.ActivationPolicy = prepared.ActivationPolicy
+	m.scopePicker.basePolicies[base.ID] = base
+	if m.screen == ScreenScope && m.scopePicker.base.ID == base.ID && sameAzureScope(m.scopePicker.base.AzureScope, base.AzureScope) {
+		m.scopePicker.base.ActivationPolicy = base.ActivationPolicy
 	}
 }
 
@@ -154,25 +155,24 @@ func (m Model) openScopePicker() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	provider := m.providerForSection(m.activeSection)
-	discoverer, ok := provider.(childScopeDiscoverer)
 	base := m.rememberBaseAssignment(assignment)
-	if !ok || m.activeSection != SectionAzureResources || base.Active || !canDrillScope(base.Scope) {
+	if !canNarrowScope(m.activeSection, provider, base) {
 		return m, nil
 	}
 
 	m.cancelScopePicker()
 	m.err = nil
-	m.scopePicker.assignment = assignment
 	m.scopePicker.base = base
-	m.scopePicker.stack = nil
+	m.scopePicker.stack = []scopeLevel{{parent: base.Scope}}
 	m.scopePicker.descendants = nil
+	m.scopePicker.indexedIDs = make(map[string]struct{})
+	m.scopePicker.descErr = nil
 	m.scopePicker.query = ""
 	m.scopePicker.searchMode = false
 	m.scopePicker.err = nil
 	m.screen = ScreenScope
 
-	next, childCmd := m.loadChildScopes(discoverer, base.Scope, true)
-	m = next.(Model)
+	childCmd := m.loadChildScopes()
 	if descDiscoverer, ok := provider.(descendantScopeDiscoverer); ok {
 		descCmd := m.startDescendantDiscovery(descDiscoverer, base.Scope)
 		return m, tea.Batch(childCmd, descCmd)
@@ -201,13 +201,20 @@ func (m *Model) startDescendantDiscovery(discoverer descendantScopeDiscoverer, r
 	}
 }
 
-func (m Model) loadChildScopes(discoverer childScopeDiscoverer, parent pim.Scope, push bool) (tea.Model, tea.Cmd) {
+// A descendant can be drilled or selected before the current level finishes
+// loading. Resume an interrupted level when the user comes back to it.
+func (m *Model) loadChildScopes() tea.Cmd {
+	level := m.scopePicker.stack[len(m.scopePicker.stack)-1]
+	if level.loaded {
+		return nil
+	}
+	parent := level.parent
+	discoverer := m.providerForSection(m.activeSection).(childScopeDiscoverer)
 	m.cancelScopeForeground()
 	ctx, cancel := context.WithCancel(m.tenantContext())
 	m.scopePicker.cancel = cancel
 	m.scopePicker.checkID++
 	m.scopePicker.loading = true
-	m.scopePicker.err = nil
 	checkID := m.scopePicker.checkID
 	tenantID := m.selectedTenant.ID
 	m.beginOperation("scopes")
@@ -219,70 +226,74 @@ func (m Model) loadChildScopes(discoverer childScopeDiscoverer, parent pim.Scope
 			checkID:  checkID,
 			parent:   parent,
 			children: children,
-			push:     push,
 			err:      err,
 		}
 	}
-	return m, tea.Batch(cmd, m.spinner.Tick)
+	return tea.Batch(cmd, m.spinner.Tick)
 }
 
 func (m Model) handleChildScopesDiscovered(msg childScopesDiscoveredMsg) (tea.Model, tea.Cmd) {
-	if !m.scopePicker.loading || msg.checkID != m.scopePicker.checkID || msg.tenantID != m.selectedTenant.ID || m.screen != ScreenScope {
+	stack := m.scopePicker.stack
+	if !m.scopePicker.loading || msg.checkID != m.scopePicker.checkID || msg.tenantID != m.selectedTenant.ID || m.screen != ScreenScope ||
+		len(stack) == 0 || !sameAzureScope(msg.parent.ID, stack[len(stack)-1].parent.ID) {
 		return m, nil
 	}
 	m.cancelScopeForeground()
-	if msg.err != nil {
-		m.recordActivity("Child scope discovery failed", true)
-		if accountUnavailableError(msg.err) {
-			m.markAccountUnavailable(msg.err)
-			return m, nil
-		}
-		m.scopePicker.err = msg.err
+	if accountUnavailableError(msg.err) {
+		m.markAccountUnavailable(msg.err)
 		return m, nil
 	}
-	m.recordActivity(fmt.Sprintf("Child scopes ready: %d", len(msg.children)), false)
-	level := scopeLevel{
-		parent:   msg.parent,
-		children: msg.children,
-		cursor:   0,
-	}
-	if msg.push || len(m.scopePicker.stack) == 0 {
-		m.scopePicker.stack = append(m.scopePicker.stack, level)
+	focus := m.searchFocusID()
+	level := &stack[len(stack)-1]
+	level.children = msg.children
+	level.loaded = true
+	m.scopePicker.addSearchScopes(msg.children)
+	m.restoreSearchFocus(focus)
+	if msg.err != nil {
+		m.recordActivity("Child scope discovery failed", true)
+		m.scopePicker.err = msg.err
 	} else {
-		m.scopePicker.stack[len(m.scopePicker.stack)-1] = level
+		m.recordActivity(fmt.Sprintf("Child scopes ready: %d", len(msg.children)), false)
 	}
-	if !m.scopePicker.searchMode {
-		m.scopePicker.query = ""
-	}
-	m.clampScopeCursor()
-	m.scopePicker.err = nil
 	return m, nil
 }
 
 func (m Model) handleDescendantScopesDiscovered(msg descendantScopesDiscoveredMsg) (tea.Model, tea.Cmd) {
-	if !m.scopePicker.descLoading || msg.checkID != m.scopePicker.descCheckID || msg.tenantID != m.selectedTenant.ID || m.screen != ScreenScope {
+	if !m.scopePicker.descLoading || msg.checkID != m.scopePicker.descCheckID || msg.tenantID != m.selectedTenant.ID || m.screen != ScreenScope ||
+		!sameAzureScope(msg.rootID, m.scopePicker.base.Scope.ID) {
 		return m, nil
 	}
 	m.cancelScopeDescendants()
 	if !m.scopePicker.loading && !m.scopePicker.preparing {
 		m.endOperation("scopes")
 	}
-	if msg.err != nil {
-		if accountUnavailableError(msg.err) {
-			m.markAccountUnavailable(msg.err)
-		}
+	if accountUnavailableError(msg.err) {
+		m.markAccountUnavailable(msg.err)
 		return m, nil
 	}
-	m.scopePicker.descendants = msg.descendants
-	m.clampScopeCursor()
+	m.scopePicker.descErr = msg.err
+	if len(msg.descendants) > 0 {
+		focus := m.searchFocusID()
+		// Prefer the sorted index, but keep children from independently loaded
+		// levels when they were missing from the hierarchy response.
+		known := m.scopePicker.descendants
+		m.scopePicker.descendants = msg.descendants
+		clear(m.scopePicker.indexedIDs)
+		for _, scope := range msg.descendants {
+			m.scopePicker.indexedIDs[scopeIDKey(scope.ID)] = struct{}{}
+		}
+		m.scopePicker.addSearchScopes(known)
+		m.restoreSearchFocus(focus)
+	}
 	return m, nil
 }
 
 func (m Model) handleScopedAssignmentPrepared(msg scopedAssignmentPreparedMsg) (tea.Model, tea.Cmd) {
-	if !m.scopePicker.preparing || msg.checkID != m.scopePicker.checkID || msg.tenantID != m.selectedTenant.ID || m.screen != ScreenScope {
+	if !m.scopePicker.preparing || msg.checkID != m.scopePicker.checkID || msg.tenantID != m.selectedTenant.ID || m.screen != ScreenScope ||
+		msg.assignment.ID != m.scopePicker.base.ID || !sameAzureScope(msg.assignment.AzureScope, m.scopePicker.targetID) || !sameAzureScope(msg.assignment.Scope.ID, m.scopePicker.targetID) {
 		return m, nil
 	}
-	m.cancelScopePicker()
+	m.cancelScopeForeground()
 	if msg.err != nil {
 		m.recordActivity("Scoped activation requirements failed", true)
 		if accountUnavailableError(msg.err) {
@@ -290,12 +301,15 @@ func (m Model) handleScopedAssignmentPrepared(msg scopedAssignmentPreparedMsg) (
 			return m, nil
 		}
 		m.scopePicker.err = msg.err
-		return m, nil
+		cmd := m.loadChildScopes()
+		return m, cmd
 	}
 	if msg.assignment.Active {
 		m.scopePicker.err = fmt.Errorf("%s is already active at %s", displayName(msg.assignment), displayScope(msg.assignment))
-		return m, nil
+		cmd := m.loadChildScopes()
+		return m, cmd
 	}
+	m.cancelScopePicker()
 	m.applyScopedAssignment(msg.assignment, true)
 	m.recordActivity("Scope selected: "+displayScope(msg.assignment), false)
 	m.screen = ScreenAssignments
@@ -328,42 +342,65 @@ func (m *Model) applyScopedAssignment(updated pim.EligibleAssignment, selectItem
 	delete(m.form.durations, updated.ID)
 }
 
-func (m Model) currentScopeOptions() []pim.Scope {
-	query := strings.ToLower(strings.TrimSpace(m.scopePicker.query))
-	if query != "" && len(m.scopePicker.descendants) > 0 {
-		root := m.scopePicker.base.Scope
-		if len(m.scopePicker.stack) > 0 {
-			root = m.scopePicker.stack[0].parent
+func scopeIDKey(id string) string {
+	return strings.ToLower(strings.TrimRight(id, "/"))
+}
+
+func (p *scopePickerState) addSearchScopes(scopes []pim.Scope) {
+	for _, scope := range scopes {
+		id := scopeIDKey(scope.ID)
+		if _, ok := p.indexedIDs[id]; !ok {
+			p.indexedIDs[id] = struct{}{}
+			p.descendants = append(p.descendants, scope)
 		}
-		options := make([]pim.Scope, 0, 1+len(m.scopePicker.descendants))
-		options = append(options, root)
-		for _, desc := range m.scopePicker.descendants {
-			haystack := strings.ToLower(desc.DisplayName + " " + desc.SubscriptionName + " " + string(desc.Type) + " " + desc.ID)
-			if strings.Contains(haystack, query) {
-				options = append(options, desc)
-			}
-		}
-		return options
 	}
+}
+
+func (m Model) currentScopeOptions() []pim.Scope {
 	if len(m.scopePicker.stack) == 0 {
-		if query != "" {
-			return []pim.Scope{m.scopePicker.base.Scope}
-		}
 		return nil
 	}
-	top := m.scopePicker.stack[len(m.scopePicker.stack)-1]
-	options := make([]pim.Scope, 0, 1+len(top.children))
-	options = append(options, top.parent)
+	query := strings.ToLower(strings.TrimSpace(m.scopePicker.query))
 	if query == "" {
+		top := m.scopePicker.stack[len(m.scopePicker.stack)-1]
+		options := make([]pim.Scope, 1, 1+len(top.children))
+		options[0] = top.parent
 		return append(options, top.children...)
 	}
-	for _, child := range top.children {
-		haystack := strings.ToLower(child.DisplayName + " " + child.SubscriptionName + " " + string(child.Type) + " " + child.ID)
+	options := []pim.Scope{m.scopePicker.base.Scope}
+	for _, scope := range m.scopePicker.descendants {
+		haystack := strings.ToLower(scope.DisplayName + " " + scope.SubscriptionName + " " + string(scope.Type) + " " + scope.ID)
 		if strings.Contains(haystack, query) {
-			options = append(options, child)
+			options = append(options, scope)
 		}
 	}
 	return options
+}
+
+func (m Model) searchFocusID() string {
+	if strings.TrimSpace(m.scopePicker.query) != "" {
+		options, cursor := m.currentScopeOptions(), m.scopeCursor()
+		if cursor >= 0 && cursor < len(options) {
+			return options[cursor].ID
+		}
+	}
+	return ""
+}
+
+func (m *Model) restoreSearchFocus(id string) {
+	if id == "" {
+		return
+	}
+	level := &m.scopePicker.stack[len(m.scopePicker.stack)-1]
+	for i, option := range m.currentScopeOptions() {
+		if sameAzureScope(option.ID, id) {
+			level.cursor = i
+			return
+		}
+	}
+	// A refreshed display name may no longer match the query. Don't let
+	// Enter silently choose another target in the old row.
+	level.cursor = -1
 }
 
 func (m Model) scopeCursor() int {
@@ -377,18 +414,12 @@ func (m *Model) clampScopeCursor() {
 	if len(m.scopePicker.stack) == 0 {
 		return
 	}
-	options := m.currentScopeOptions()
 	top := &m.scopePicker.stack[len(m.scopePicker.stack)-1]
-	if len(options) == 0 {
-		top.cursor = 0
-		return
+	count := 1 + len(top.children)
+	if strings.TrimSpace(m.scopePicker.query) != "" {
+		count = len(m.currentScopeOptions())
 	}
-	if top.cursor < 0 {
-		top.cursor = 0
-	}
-	if top.cursor >= len(options) {
-		top.cursor = len(options) - 1
-	}
+	top.cursor = max(0, min(top.cursor, count-1))
 }
 
 func (m *Model) moveScopeCursor(delta int) {
@@ -403,6 +434,8 @@ func (m Model) updateScope(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.scopePicker.preparing {
 		if key.Type == tea.KeyEsc {
 			m.cancelScopeForeground()
+			cmd := m.loadChildScopes()
+			return m, cmd
 		}
 		return m, nil
 	}
@@ -418,25 +451,14 @@ func (m Model) updateScope(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.scopePicker.query = ""
 			m.clampScopeCursor()
 		case tea.KeyRunes, tea.KeySpace:
-			m.scopePicker.query += key.String()
-			if len(m.scopePicker.stack) > 0 && m.scopePicker.stack[len(m.scopePicker.stack)-1].cursor == 0 && len(m.currentScopeOptions()) > 1 {
-				m.scopePicker.stack[len(m.scopePicker.stack)-1].cursor = 1
+			if key.Type == tea.KeySpace {
+				m.scopePicker.query += " "
+			} else {
+				m.scopePicker.query += string(key.Runes)
 			}
+			level := &m.scopePicker.stack[len(m.scopePicker.stack)-1]
+			level.cursor = max(1, level.cursor)
 			m.clampScopeCursor()
-		}
-		return m, nil
-	}
-
-	if m.scopePicker.loading && strings.TrimSpace(m.scopePicker.query) == "" {
-		switch {
-		case key.Type == tea.KeyEsc:
-			m.cancelScopePicker()
-			if len(m.scopePicker.stack) == 0 {
-				m.screen = ScreenAssignments
-			}
-		case key.Type == tea.KeyRunes && string(key.Runes) == "/":
-			m.scopePicker.searchMode = true
-			m.scopePicker.err = nil
 		}
 		return m, nil
 	}
@@ -449,10 +471,7 @@ func (m Model) updateScope(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if len(m.scopePicker.stack) > 1 {
-			m.scopePicker.stack = m.scopePicker.stack[:len(m.scopePicker.stack)-1]
-			m.scopePicker.query = ""
-			m.scopePicker.err = nil
-			return m, nil
+			return m.popScopeLevel()
 		}
 		m.cancelScopePicker()
 		m.screen = ScreenAssignments
@@ -460,9 +479,7 @@ func (m Model) updateScope(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case tea.KeyLeft:
 		if len(m.scopePicker.stack) > 1 {
-			m.scopePicker.stack = m.scopePicker.stack[:len(m.scopePicker.stack)-1]
-			m.scopePicker.query = ""
-			m.scopePicker.err = nil
+			return m.popScopeLevel()
 		}
 		return m, nil
 	case tea.KeyUp:
@@ -483,9 +500,7 @@ func (m Model) updateScope(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m.drillFocusedScope()
 		case "h":
 			if len(m.scopePicker.stack) > 1 {
-				m.scopePicker.stack = m.scopePicker.stack[:len(m.scopePicker.stack)-1]
-				m.scopePicker.query = ""
-				m.scopePicker.err = nil
+				return m.popScopeLevel()
 			}
 		case "/":
 			m.scopePicker.searchMode = true
@@ -495,39 +510,46 @@ func (m Model) updateScope(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m Model) popScopeLevel() (tea.Model, tea.Cmd) {
+	m.cancelScopeForeground()
+	m.scopePicker.stack = m.scopePicker.stack[:len(m.scopePicker.stack)-1]
+	m.scopePicker.query = ""
+	m.scopePicker.err = nil
+	m.clampScopeCursor()
+	cmd := m.loadChildScopes()
+	return m, cmd
+}
+
 func (m Model) drillFocusedScope() (tea.Model, tea.Cmd) {
 	options := m.currentScopeOptions()
-	if len(m.scopePicker.stack) == 0 || len(options) == 0 {
-		return m, nil
-	}
 	cursor := m.scopeCursor()
-	if cursor == 0 {
+	if cursor <= 0 || cursor >= len(options) {
 		return m, nil
 	}
 	chosen := options[cursor]
 	if !canDrillScope(chosen) {
 		return m, nil
 	}
-	discoverer, ok := m.providerForSection(m.activeSection).(childScopeDiscoverer)
-	if !ok {
-		return m, nil
+	if m.scopePicker.query != "" {
+		m.scopePicker.query = ""
+		m.restoreSearchFocus(chosen.ID)
+		m.clampScopeCursor()
 	}
-	m.scopePicker.query = ""
-	return m.loadChildScopes(discoverer, chosen, true)
+	m.scopePicker.err = nil
+	m.scopePicker.stack = append(m.scopePicker.stack, scopeLevel{parent: chosen})
+	cmd := m.loadChildScopes()
+	return m, cmd
 }
 
 func (m Model) selectFocusedScope() (tea.Model, tea.Cmd) {
 	options := m.currentScopeOptions()
-	if len(options) == 0 {
-		return m, nil
-	}
 	cursor := m.scopeCursor()
-	if cursor >= len(options) {
-		cursor = 0
+	if cursor < 0 || cursor >= len(options) {
+		return m, nil
 	}
 	chosen := options[cursor]
 	base := m.scopePicker.base
-	if strings.EqualFold(strings.TrimRight(chosen.ID, "/"), strings.TrimRight(base.AzureScope, "/")) {
+	if sameAzureScope(chosen.ID, base.AzureScope) {
 		m.cancelScopePicker()
 		m.applyScopedAssignment(base, false)
 		m.recordActivity("Scope reset: "+displayScope(base), false)
@@ -556,24 +578,31 @@ func (m Model) selectFocusedScope() (tea.Model, tea.Cmd) {
 	m.scopePicker.cancel = cancel
 	m.scopePicker.checkID++
 	m.scopePicker.preparing = true
+	m.scopePicker.targetID = chosen.ID
 	m.scopePicker.err = nil
 	checkID := m.scopePicker.checkID
 	tenantID := m.selectedTenant.ID
 	m.beginOperation("scopes")
 	m.recordActivity("Loading activation requirements: "+displayScopeLabel(chosen), false)
 	cmd := func() tea.Msg {
+		var prepared pim.EligibleAssignment
+		var err error
 		if hasTargetPreparer {
-			prepared, err := targetPreparer.PrepareTargetScope(ctx, updated)
-			return scopedAssignmentPreparedMsg{tenantID: tenantID, checkID: checkID, assignment: prepared, err: err}
+			prepared, err = targetPreparer.PrepareTargetScope(ctx, updated)
+		} else {
+			var items []pim.EligibleAssignment
+			items, err = preparer.Prepare(ctx, []pim.EligibleAssignment{updated})
+			if len(items) == 1 {
+				prepared = items[0]
+			}
 		}
-		prepared, err := preparer.Prepare(ctx, []pim.EligibleAssignment{updated})
+		if err == nil && (prepared.ID != updated.ID || !sameAzureScope(prepared.AzureScope, chosen.ID) || !sameAzureScope(prepared.Scope.ID, chosen.ID)) {
+			err = fmt.Errorf("activation requirements did not match the requested target %s", chosen.ID)
+		}
 		if err != nil {
-			return scopedAssignmentPreparedMsg{tenantID: tenantID, checkID: checkID, err: err}
+			prepared = updated
 		}
-		if len(prepared) > 0 {
-			updated = prepared[0]
-		}
-		return scopedAssignmentPreparedMsg{tenantID: tenantID, checkID: checkID, assignment: updated}
+		return scopedAssignmentPreparedMsg{tenantID: tenantID, checkID: checkID, assignment: prepared, err: err}
 	}
 	return m, tea.Batch(cmd, m.spinner.Tick)
 }
@@ -594,8 +623,15 @@ func (m Model) viewScope() string {
 	b.WriteString("\n")
 
 	queryActive := strings.TrimSpace(m.scopePicker.query) != ""
-	if queryActive && len(m.scopePicker.descendants) > 0 {
-		b.WriteString(mutedStyle.Render(truncateText(fmt.Sprintf("Searching across %d descendant scopes", len(m.scopePicker.descendants)), m.contentWidth())))
+	if m.scopePicker.descErr != nil {
+		b.WriteString(warningStyle.Render(truncateText("Hierarchy search incomplete: "+m.scopePicker.descErr.Error(), m.contentWidth())))
+		b.WriteString("\n")
+	} else if queryActive && len(m.scopePicker.descendants) > 0 {
+		status := fmt.Sprintf("Searching across %d descendant scopes", len(m.scopePicker.descendants))
+		if m.scopePicker.descLoading {
+			status += "  ·  indexing hierarchy..."
+		}
+		b.WriteString(mutedStyle.Render(truncateText(status, m.contentWidth())))
 		b.WriteString("\n")
 	} else if len(m.scopePicker.stack) > 0 {
 		crumbs := make([]string, 0, len(m.scopePicker.stack))
@@ -631,12 +667,6 @@ func (m Model) viewScope() string {
 	b.WriteString(fieldStyle.Width(m.contentWidth() - 4).Render(searchLabel))
 	b.WriteString("\n\n")
 
-	if m.scopePicker.loading && !queryActive {
-		b.WriteString(panelStyle.Width(m.contentWidth() - 6).Render(
-			fmt.Sprintf("%s  Loading child scopes...", m.spinner.View()),
-		))
-		return b.String()
-	}
 	if m.scopePicker.err != nil {
 		b.WriteString(errorStyle.Width(m.contentWidth() - 4).Render("Could not load scope: " + m.scopePicker.err.Error()))
 		b.WriteString("\n\n")
@@ -672,7 +702,7 @@ func (m Model) viewScope() string {
 		prefix := ""
 		suffix := ""
 		if index == 0 {
-			if len(m.scopePicker.stack) <= 1 || (queryActive && len(m.scopePicker.descendants) > 0) {
+			if len(m.scopePicker.stack) <= 1 || queryActive {
 				prefix = "[Eligible] "
 			} else {
 				prefix = "[Current]  "
@@ -691,9 +721,14 @@ func (m Model) viewScope() string {
 	if queryActive && len(options) == 1 {
 		if m.scopePicker.descLoading {
 			b.WriteString(mutedStyle.Render(fmt.Sprintf("  %s Searching descendant scopes for %q...", m.spinner.View(), m.scopePicker.query)))
+		} else if m.scopePicker.descErr != nil {
+			b.WriteString(mutedStyle.Render(fmt.Sprintf("  No known scopes match %q.", m.scopePicker.query)))
 		} else {
 			b.WriteString(mutedStyle.Render(fmt.Sprintf("  No scopes match %q.", m.scopePicker.query)))
 		}
+		b.WriteString("\n")
+	} else if !queryActive && m.scopePicker.loading {
+		b.WriteString(mutedStyle.Render(fmt.Sprintf("  %s Loading child scopes...", m.spinner.View())))
 		b.WriteString("\n")
 	} else if !queryActive && len(m.scopePicker.stack) > 0 && len(m.scopePicker.stack[len(m.scopePicker.stack)-1].children) == 0 {
 		b.WriteString(mutedStyle.Render("  No child scopes returned under this resource."))

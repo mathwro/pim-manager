@@ -157,6 +157,7 @@ type discoveryKey struct {
 
 type discoveryEntry struct {
 	assignments   []pim.EligibleAssignment
+	basePolicies  map[string]pim.EligibleAssignment
 	policiesReady bool
 	generation    int
 }
@@ -349,7 +350,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.recordActivity(fmt.Sprintf("Assignments ready: %d", len(typed.assignments)), false)
 		entry := discoveryEntry{assignments: typed.assignments, policiesReady: true, generation: typed.checkID}
-		m.syncBaseAssignments(typed.assignments)
+		if typed.section == SectionAzureResources {
+			m.syncBaseAssignments(typed.assignments)
+			entry.basePolicies = m.scopePicker.basePolicies
+		} else {
+			m.scopePicker.basePolicies = nil
+		}
 		m.assignmentList = newAssignmentList(typed.assignments)
 		m.listCursor = 0
 		m.policiesReady = true
@@ -378,7 +384,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case assignmentsPreparedMsg:
 		entry, ok := m.discoveryCache[typed.key]
-		if !ok || entry.generation != typed.generation || typed.key.tenantID != m.selectedTenant.ID || typed.key.section != m.activeSection {
+		if !ok || m.discoveryCancelKey != typed.key || entry.generation != typed.generation || typed.key.tenantID != m.selectedTenant.ID || typed.key.section != m.activeSection {
 			return m, nil
 		}
 		m.cancelDiscovery(false)
@@ -400,27 +406,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.recordActivity("Activation requirements ready", false)
 		if typed.key.section == SectionAzureResources {
-			byID := make(map[string]pim.EligibleAssignment, len(typed.assignments))
-			for _, item := range typed.assignments {
-				byID[item.ID] = item
-				m.updateBaseAssignmentPolicy(item)
+			byID := make(map[string]*pim.EligibleAssignment, len(typed.assignments))
+			for i := range typed.assignments {
+				prepared := &typed.assignments[i]
+				byID[prepared.ID] = prepared
+				m.updateBaseAssignmentPolicy(prepared)
 			}
-			for index := range m.assignmentList.items {
-				if updated, ok := byID[m.assignmentList.items[index].ID]; ok {
-					m.assignmentList.items[index] = updated
+			for i := range m.assignmentList.items {
+				target := &m.assignmentList.items[i]
+				if prepared := byID[target.ID]; prepared != nil && sameAzureScope(target.AzureScope, prepared.AzureScope) {
+					target.ActivationPolicy = prepared.ActivationPolicy
 				}
 			}
-			for index := range entry.assignments {
-				if updated, ok := byID[entry.assignments[index].ID]; ok {
-					entry.assignments[index] = updated
-				}
-			}
+			entry.assignments = m.assignmentList.items
 			m.discoveryCache[typed.key] = entry
 		} else {
 			entry.assignments = typed.assignments
 			entry.policiesReady = true
 			m.discoveryCache[typed.key] = entry
-			m.syncBaseAssignments(typed.assignments)
 			selected := m.assignmentList.selectedIDs
 			m.assignmentList = newAssignmentList(typed.assignments)
 			for id, enabled := range selected {
@@ -1195,10 +1198,10 @@ func (m Model) beginDiscovery(section Section, refresh bool) (tea.Model, tea.Cmd
 		}
 		m.loading = false
 		m.err = nil
-		m.syncBaseAssignments(entry.assignments)
+		m.scopePicker.basePolicies = entry.basePolicies
 		m.assignmentList = newAssignmentList(entry.assignments)
 		m.policiesReady = entry.policiesReady
-		m.preparingPolicies = !entry.policiesReady
+		m.preparingPolicies = !entry.policiesReady || m.discoveryCancelKey == key
 		m.waitingForPolicies = false
 		m.recordActivity(fmt.Sprintf("Cached assignments ready: %d", len(entry.assignments)), false)
 		return m, accountCheck
@@ -1223,17 +1226,23 @@ func (m Model) beginDiscovery(section Section, refresh bool) (tea.Model, tea.Cmd
 }
 
 func (m Model) openActivationForm() (tea.Model, tea.Cmd) {
+	if err := m.prepareActivationForm(); err != nil {
+		m.err = err
+		return m, nil
+	}
 	m.formField = formFieldJustification
-	m.prepareActivationForm()
 	m.screen = ScreenActivation
 	m.err = nil
 	return m.focusJustification()
 }
 
-func (m *Model) prepareActivationForm() {
+func (m *Model) prepareActivationForm() error {
 	selected := m.assignmentList.selected()
 	durations := make(map[string]string, len(selected))
 	for _, assignment := range selected {
+		if m.activeSection == SectionAzureResources && strings.TrimSpace(assignment.ActivationPolicy.MaximumDurationISO) == "" {
+			return fmt.Errorf("activation requirements are unavailable for %s; press r to retry discovery", displayName(assignment))
+		}
 		value := strings.TrimSpace(m.form.durations[assignment.ID])
 		if value == "" {
 			value = assignment.ActivationPolicy.MaximumDurationISO
@@ -1244,6 +1253,7 @@ func (m *Model) prepareActivationForm() {
 	if m.durationIndex >= len(selected) {
 		m.durationIndex = max(0, len(selected)-1)
 	}
+	return nil
 }
 
 func (m Model) focusJustification() (tea.Model, tea.Cmd) {
@@ -1322,7 +1332,7 @@ func (m *Model) selectTenant(index int) {
 func (m *Model) clearTenantWorkflow() {
 	m.cancelGraphConnection(true)
 	m.cancelScopePicker()
-	m.scopePicker = scopePickerState{}
+	m.scopePicker = scopePickerState{checkID: m.scopePicker.checkID, descCheckID: m.scopePicker.descCheckID}
 	m.cancelAuthentication()
 	m.cancelActivation()
 	m.cancelDiscovery(true)
@@ -1481,7 +1491,7 @@ func (m *Model) cancelDiscovery(deletePending bool) {
 		m.discoveryCancel()
 		m.discoveryCancel = nil
 	}
-	if deletePending {
+	if deletePending && !m.discoveryCache[m.discoveryCancelKey].policiesReady {
 		delete(m.discoveryCache, m.discoveryCancelKey)
 	}
 	m.endOperation("discovery")
@@ -1496,6 +1506,10 @@ func (m Model) prepareAssignments(ctx context.Context, preparer assignmentPrepar
 	}
 }
 
+func sameAzureScope(a, b string) bool {
+	return strings.EqualFold(strings.TrimRight(a, "/"), strings.TrimRight(b, "/"))
+}
+
 func (m *Model) prepareAzureAssignmentsIfNeeded(targets []pim.EligibleAssignment, wait bool) tea.Cmd {
 	if m.activeSection != SectionAzureResources {
 		return nil
@@ -1506,7 +1520,7 @@ func (m *Model) prepareAzureAssignmentsIfNeeded(targets []pim.EligibleAssignment
 	}
 	var missing []pim.EligibleAssignment
 	for _, item := range targets {
-		if item.ActivationPolicy.MaximumDurationISO == "" {
+		if strings.TrimSpace(item.ActivationPolicy.MaximumDurationISO) == "" {
 			missing = append(missing, item)
 		}
 	}
@@ -1516,10 +1530,12 @@ func (m *Model) prepareAzureAssignmentsIfNeeded(targets []pim.EligibleAssignment
 	key := discoveryKey{tenantID: m.selectedTenant.ID, section: m.activeSection}
 	entry, ok := m.discoveryCache[key]
 	if !ok {
-		entry = discoveryEntry{assignments: m.assignmentList.items, policiesReady: true, generation: m.discoveryCheck}
-		m.discoveryCache[key] = entry
+		entry = discoveryEntry{assignments: m.assignmentList.items, basePolicies: m.scopePicker.basePolicies, policiesReady: true}
 	}
 	m.cancelDiscovery(false)
+	m.discoveryCheck++
+	entry.generation = m.discoveryCheck
+	m.discoveryCache[key] = entry
 	m.preparingPolicies = true
 	m.waitingForPolicies = wait
 	m.err = nil

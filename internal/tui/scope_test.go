@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -20,6 +21,7 @@ type childScopeTestProvider struct {
 	descCalls          []string
 	prepareScopes      []string
 	childErr           error
+	descErr            error
 	prepareErr         error
 }
 
@@ -33,7 +35,7 @@ func (p *childScopeTestProvider) DiscoverChildScopes(_ context.Context, parent p
 
 func (p *childScopeTestProvider) DiscoverDescendantScopes(_ context.Context, root pim.Scope) ([]pim.Scope, error) {
 	p.descCalls = append(p.descCalls, root.ID)
-	return p.descendantsByScope[root.ID], nil
+	return p.descendantsByScope[root.ID], p.descErr
 }
 
 func (p *childScopeTestProvider) PrepareTargetScope(ctx context.Context, assignment pim.EligibleAssignment) (pim.EligibleAssignment, error) {
@@ -506,5 +508,265 @@ func TestScopePickerShowsDisambiguatedSubscriptionOnResourceGroups(t *testing.T)
 	view := model.View()
 	if !strings.Contains(view, "RG: rg-shared (gnsn-pbuildinglab-development)") || !strings.Contains(view, "RG: rg-shared (gnsn-pbuildinglab-production)") {
 		t.Fatalf("expected resource groups to show subscription names in scope picker, got:\n%s", view)
+	}
+}
+
+type pickerReplies struct {
+	child childScopesDiscoveredMsg
+	index descendantScopesDiscoveredMsg
+	prep  scopedAssignmentPreparedMsg
+}
+
+func (r *pickerReplies) collect(cmd tea.Cmd) {
+	if cmd == nil {
+		return
+	}
+	switch msg := cmd().(type) {
+	case tea.BatchMsg:
+		for _, part := range msg {
+			r.collect(part)
+		}
+	case childScopesDiscoveredMsg:
+		r.child = msg
+	case descendantScopesDiscoveredMsg:
+		r.index = msg
+	case scopedAssignmentPreparedMsg:
+		r.prep = msg
+	}
+}
+
+func openPendingPicker(t *testing.T, provider *childScopeTestProvider) (Model, pickerReplies) {
+	t.Helper()
+	root := pim.Scope{ID: "/providers/Microsoft.Management/managementGroups/root", Type: pim.ScopeTypeManagementGroup}
+	m := NewModel(Runtime{AzureResources: provider})
+	m.selectedTenant.ID = "tenant-a"
+	m.activeSection = SectionAzureResources
+	m.screen = ScreenAssignments
+	m.assignmentList = newAssignmentList([]pim.EligibleAssignment{{ID: "owner", AzureScope: root.ID, Scope: root}})
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("s")})
+	var replies pickerReplies
+	replies.collect(cmd)
+	if next.(Model).screen != ScreenScope || replies.child.parent.ID != root.ID || replies.index.rootID != root.ID {
+		t.Fatal("picker did not start both hierarchy requests")
+	}
+	return next.(Model), replies
+}
+
+func pickerUpdate(m Model, msg tea.Msg) Model {
+	next, _ := m.Update(msg)
+	return next.(Model)
+}
+
+func TestScopeSearchTracksFocusAcrossEitherReplyOrder(t *testing.T) {
+	root := "/providers/Microsoft.Management/managementGroups/root"
+	direct := pim.Scope{ID: "/subscriptions/z", DisplayName: "Z-prod", Type: pim.ScopeTypeSubscription}
+	deep := pim.Scope{ID: "/subscriptions/a", DisplayName: "A-prod", Type: pim.ScopeTypeSubscription}
+	for _, first := range []string{"children", "descendants"} {
+		t.Run(first, func(t *testing.T) {
+			m, replies := openPendingPicker(t, &childScopeTestProvider{
+				childrenByScope:    map[string][]pim.Scope{root: {direct}},
+				descendantsByScope: map[string][]pim.Scope{root: {deep, direct}},
+			})
+			m = sendRunes(m, "/prod")
+			m = pickerUpdate(m, tea.KeyMsg{Type: tea.KeyEnter})
+			var earlier, later tea.Msg = replies.child, replies.index
+			moves := 1
+			if first == "descendants" {
+				earlier, later = later, earlier
+				moves = 2
+			}
+			m = pickerUpdate(m, earlier)
+			for range moves {
+				m = pickerUpdate(m, tea.KeyMsg{Type: tea.KeyDown})
+			}
+			m = pickerUpdate(m, later)
+			if m.scopePicker.query != "prod" {
+				t.Fatalf("reply cleared applied search: %q", m.scopePicker.query)
+			}
+			next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+			m = runScopeCommands(next.(Model), cmd)
+			if m.screen != ScreenAssignments || m.assignmentList.items[0].AzureScope != direct.ID {
+				t.Fatalf("Enter did not select the highlighted scope: %s %s", m.screen, m.assignmentList.items[0].AzureScope)
+			}
+		})
+	}
+}
+
+func TestScopeSearchUsesPastedRunesAndSpace(t *testing.T) {
+	m, _ := openPendingPicker(t, &childScopeTestProvider{})
+	m = sendRunes(m, "/")
+	m = pickerUpdate(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("rg-payments"), Paste: true})
+	m = pickerUpdate(m, tea.KeyMsg{Type: tea.KeySpace})
+	m = pickerUpdate(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("部署"), Paste: true})
+	if m.scopePicker.query != "rg-payments 部署" {
+		t.Fatalf("search did not use literal text: %q", m.scopePicker.query)
+	}
+}
+
+func TestScopeDrillReturnsToValidParentFocus(t *testing.T) {
+	m, replies := openPendingPicker(t, &childScopeTestProvider{})
+	branch := pim.Scope{ID: "/subscriptions/one", DisplayName: "Prod one", Type: pim.ScopeTypeSubscription}
+	other := pim.Scope{ID: "/subscriptions/two", DisplayName: "Prod two", Type: pim.ScopeTypeSubscription}
+	replies.child.children = []pim.Scope{branch}
+	replies.index.descendants = []pim.Scope{branch, other}
+	m = pickerUpdate(m, replies.child)
+	m = pickerUpdate(m, replies.index)
+	m = sendRunes(m, "/prod")
+	m = pickerUpdate(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m = pickerUpdate(m, tea.KeyMsg{Type: tea.KeyDown})
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRight})
+	m = runScopeCommands(next.(Model), cmd)
+	if len(m.scopePicker.stack) != 2 || m.scopePicker.stack[1].parent.ID != other.ID {
+		t.Fatal("did not drill into the second search result")
+	}
+	m = pickerUpdate(m, tea.KeyMsg{Type: tea.KeyLeft})
+	if cursor := m.scopeCursor(); cursor < 0 || cursor >= len(m.currentScopeOptions()) {
+		t.Fatalf("drill left an invalid parent focus: %d", cursor)
+	}
+	next, cmd = m.Update(tea.KeyMsg{Type: tea.KeyRight})
+	runScopeCommands(next.(Model), cmd)
+}
+
+func TestScopePartialIndexKeepsKnownMatchesAndWarnsOnMiss(t *testing.T) {
+	m, replies := openPendingPicker(t, &childScopeTestProvider{descErr: errors.New("subtree throttled")})
+	replies.child.children = []pim.Scope{{ID: "/subscriptions/direct", DisplayName: "Direct"}}
+	replies.index.descendants = []pim.Scope{{ID: "/subscriptions/nested", DisplayName: "Nested"}}
+	m = pickerUpdate(m, replies.child)
+	m = pickerUpdate(m, replies.index)
+	m = sendRunes(m, "/nested")
+	if opts := m.currentScopeOptions(); len(opts) != 2 || opts[1].ID != "/subscriptions/nested" {
+		t.Fatalf("lost a successful subtree: %+v", opts)
+	}
+	m = pickerUpdate(m, tea.KeyMsg{Type: tea.KeyCtrlU})
+	m = sendRunes(m, "direct")
+	if opts := m.currentScopeOptions(); len(opts) != 2 || opts[1].ID != "/subscriptions/direct" {
+		t.Fatalf("partial index hid a known immediate child: %+v", opts)
+	}
+	m = pickerUpdate(m, tea.KeyMsg{Type: tea.KeyCtrlU})
+	m = sendRunes(m, "absent")
+	view := strings.ToLower(m.View())
+	if !strings.Contains(view, "incomplete") || !strings.Contains(view, "subtree throttled") || strings.Contains(view, "no scopes match") {
+		t.Fatalf("search reported a definitive miss after a partial failure:\n%s", view)
+	}
+}
+
+func TestScopeRejectedTargetKeepsBackgroundIndexing(t *testing.T) {
+	for _, reason := range []string{"active", "policy error"} {
+		t.Run(reason, func(t *testing.T) {
+			sub := pim.Scope{ID: "/subscriptions/direct", Type: pim.ScopeTypeSubscription}
+			provider := &childScopeTestProvider{activeScopes: map[string]bool{sub.ID: true}}
+			if reason == "policy error" {
+				provider.prepareErr = errors.New("policy failed")
+			}
+			m, replies := openPendingPicker(t, provider)
+			replies.child.children = []pim.Scope{sub}
+			replies.index.descendants = []pim.Scope{{ID: "/subscriptions/nested", DisplayName: "Nested"}}
+			m = pickerUpdate(m, replies.child)
+			m = pickerUpdate(m, tea.KeyMsg{Type: tea.KeyDown})
+			next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+			m = runScopeCommands(next.(Model), cmd)
+			if m.screen != ScreenScope || m.scopePicker.err == nil {
+				t.Fatal("target was not rejected")
+			}
+			m = pickerUpdate(m, replies.index)
+			m = sendRunes(m, "/nested")
+			if opts := m.currentScopeOptions(); len(opts) != 2 || opts[1].ID != "/subscriptions/nested" {
+				t.Fatalf("index stopped after rejected target: %+v", opts)
+			}
+		})
+	}
+}
+
+func TestScopeRejectsWrongReplyBeforeCancelingCurrentWork(t *testing.T) {
+	m, replies := openPendingPicker(t, &childScopeTestProvider{})
+	badChild, badIndex := replies.child, replies.index
+	badChild.parent.ID, badIndex.rootID = "/wrong-root", "/wrong-root"
+	m = pickerUpdate(m, badChild)
+	m = pickerUpdate(m, badIndex)
+	if !m.scopePicker.loading || !m.scopePicker.descLoading {
+		t.Fatal("unrelated scope reply consumed a pending request")
+	}
+	target := pim.Scope{ID: "/subscriptions/right", Type: pim.ScopeTypeSubscription}
+	replies.child.children = []pim.Scope{target}
+	m = pickerUpdate(m, replies.child)
+	m = pickerUpdate(m, tea.KeyMsg{Type: tea.KeyDown})
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	replies.collect(cmd)
+	m = next.(Model)
+	for _, field := range []string{"scope", "assignment"} {
+		bad := replies.prep
+		if field == "scope" {
+			bad.assignment.AzureScope, bad.assignment.Scope.ID = "/wrong-target", "/wrong-target"
+		} else {
+			bad.assignment.ID = "another role"
+		}
+		m = pickerUpdate(m, bad)
+		if m.screen != ScreenScope || !m.scopePicker.preparing {
+			t.Fatalf("accepted a preparation for the wrong %s", field)
+		}
+	}
+	m = pickerUpdate(m, replies.prep)
+	if m.screen != ScreenAssignments || m.assignmentList.items[0].AzureScope != target.ID {
+		t.Fatal("legitimate completion was discarded")
+	}
+}
+
+func TestScopeRejectsPreResetRepliesAfterReopeningSameRoot(t *testing.T) {
+	m, stale := openPendingPicker(t, &childScopeTestProvider{})
+	base := m.scopePicker.base
+	m.clearTenantWorkflow()
+	m.activeSection, m.screen = SectionAzureResources, ScreenAssignments
+	m.assignmentList = newAssignmentList([]pim.EligibleAssignment{base})
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("s")})
+	var current pickerReplies
+	current.collect(cmd)
+	m = pickerUpdate(next.(Model), stale.child)
+	m = pickerUpdate(m, stale.index)
+	if !m.scopePicker.loading || !m.scopePicker.descLoading {
+		t.Fatal("reopened picker accepted a pre-reset reply for the same tenant and root")
+	}
+	m = pickerUpdate(m, current.child)
+	m = pickerUpdate(m, current.index)
+	if m.scopePicker.loading || m.scopePicker.descLoading {
+		t.Fatal("reopened picker ignored its own replies")
+	}
+}
+
+func TestScopeRenamedMatchDoesNotRetargetEnter(t *testing.T) {
+	m, replies := openPendingPicker(t, &childScopeTestProvider{})
+	original := pim.Scope{ID: "/subscriptions/one", DisplayName: "old prod"}
+	replies.child.children = []pim.Scope{original}
+	replies.index.descendants = []pim.Scope{
+		{ID: original.ID, DisplayName: "archived"},
+		{ID: "/subscriptions/two", DisplayName: "other prod"},
+	}
+	m = pickerUpdate(m, replies.child)
+	m = sendRunes(m, "/prod")
+	m = pickerUpdate(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m = pickerUpdate(m, replies.index)
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd != nil || next.(Model).screen != ScreenScope || next.(Model).scopePicker.preparing {
+		t.Fatal("Enter chose a different target after the highlighted row stopped matching")
+	}
+}
+
+func TestScopeSelectsDescendantWithoutImmediateChildren(t *testing.T) {
+	for _, status := range []string{"pending", "failed"} {
+		t.Run(status, func(t *testing.T) {
+			m, replies := openPendingPicker(t, &childScopeTestProvider{childErr: errors.New("children unavailable")})
+			if status == "failed" {
+				m = pickerUpdate(m, replies.child)
+			}
+			deep := pim.Scope{ID: "/subscriptions/deep", DisplayName: "Payments"}
+			replies.index.descendants = []pim.Scope{deep}
+			m = pickerUpdate(m, replies.index)
+			m = sendRunes(m, "/payments")
+			m = pickerUpdate(m, tea.KeyMsg{Type: tea.KeyEnter})
+			next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+			m = runScopeCommands(next.(Model), cmd)
+			if m.screen != ScreenAssignments || m.assignmentList.items[0].AzureScope != deep.ID {
+				t.Fatal("descendant selection depended on the children request")
+			}
+		})
 	}
 }

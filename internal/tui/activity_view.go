@@ -171,17 +171,17 @@ func (m Model) screenHints() []keyHint {
 		if m.scopePicker.searchMode {
 			return []keyHint{{"type", "search"}, {"enter", "apply"}, {"esc", "close search"}}
 		}
-		if m.scopePicker.loading && strings.TrimSpace(m.scopePicker.query) == "" {
-			return []keyHint{{"/", "search"}, {"esc", "cancel"}, {"q", "quit"}}
-		}
-		hints := []keyHint{{"up/down", "move"}, {"enter", "use scope"}}
+		hints := []keyHint{{"up/down", "move"}}
 		options := m.currentScopeOptions()
 		if len(m.scopePicker.stack) > 0 {
 			cursor := m.scopeCursor()
+			if cursor >= 0 && cursor < len(options) {
+				hints = append(hints, keyHint{"enter", "use scope"})
+			}
 			if cursor > 0 && cursor < len(options) && canDrillScope(options[cursor]) {
 				hints = append(hints, keyHint{"right/l", "children"})
 			}
-			if len(m.scopePicker.stack) > 1 && strings.TrimSpace(m.scopePicker.query) == "" {
+			if len(m.scopePicker.stack) > 1 {
 				hints = append(hints, keyHint{"left/h", "parent"})
 			}
 		}
