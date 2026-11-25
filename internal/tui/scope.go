@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -15,8 +16,12 @@ type childScopeDiscoverer interface {
 	DiscoverChildScopes(context.Context, pim.Scope) ([]pim.Scope, error)
 }
 
+// descendantScopeDiscoverer indexes a scope hierarchy in two phases: a fast
+// Resource Graph index, then an eligibility walk that skips subtrees the index
+// already covers.
 type descendantScopeDiscoverer interface {
-	DiscoverDescendantScopes(context.Context, pim.Scope) ([]pim.Scope, error)
+	IndexDescendantScopes(context.Context, pim.Scope) ([]pim.Scope, error)
+	WalkDescendantScopes(context.Context, pim.Scope, []pim.Scope) ([]pim.Scope, error)
 }
 
 type targetScopePreparer interface {
@@ -31,23 +36,27 @@ type scopeLevel struct {
 }
 
 type scopePickerState struct {
-	targetID     string
-	base         pim.EligibleAssignment
-	stack        []scopeLevel
-	descendants  []pim.Scope
-	indexedIDs   map[string]struct{}
-	descErr      error
-	descLoading  bool
-	descCheckID  int
-	descCancel   context.CancelFunc
-	query        string
-	searchMode   bool
-	loading      bool
-	preparing    bool
-	checkID      int
-	cancel       context.CancelFunc
-	err          error
-	basePolicies map[string]pim.EligibleAssignment
+	targetID    string
+	base        pim.EligibleAssignment
+	stack       []scopeLevel
+	descendants []pim.Scope
+	indexedIDs  map[string]struct{}
+	// indexedSubs holds subscriptions from a complete Resource Graph index;
+	// their resource groups are all in descendants.
+	indexedSubs   map[string]struct{}
+	indexComplete bool
+	descErr       error
+	descLoading   bool
+	descCheckID   int
+	descCancel    context.CancelFunc
+	query         string
+	searchMode    bool
+	loading       bool
+	preparing     bool
+	checkID       int
+	cancel        context.CancelFunc
+	err           error
+	basePolicies  map[string]pim.EligibleAssignment
 }
 
 type childScopesDiscoveredMsg struct {
@@ -62,6 +71,7 @@ type descendantScopesDiscoveredMsg struct {
 	tenantID    string
 	checkID     int
 	rootID      string
+	walked      bool
 	descendants []pim.Scope
 	err         error
 }
@@ -166,21 +176,61 @@ func (m Model) openScopePicker() (tea.Model, tea.Cmd) {
 	m.scopePicker.stack = []scopeLevel{{parent: base.Scope}}
 	m.scopePicker.descendants = nil
 	m.scopePicker.indexedIDs = make(map[string]struct{})
+	m.scopePicker.indexedSubs = nil
+	m.scopePicker.indexComplete = false
 	m.scopePicker.descErr = nil
 	m.scopePicker.query = ""
 	m.scopePicker.searchMode = false
 	m.scopePicker.err = nil
 	m.screen = ScreenScope
 
+	if cached, ok := m.cachedScopeIndex(base.Scope); ok {
+		m.scopePicker.addSearchScopes(cached)
+		m.scopePicker.indexComplete = true
+		return m, m.loadChildScopes()
+	}
 	childCmd := m.loadChildScopes()
 	if descDiscoverer, ok := provider.(descendantScopeDiscoverer); ok {
-		descCmd := m.startDescendantDiscovery(descDiscoverer, base.Scope)
+		descCmd := m.startDescendantIndex(descDiscoverer, base.Scope)
 		return m, tea.Batch(childCmd, descCmd)
 	}
 	return m, childCmd
 }
 
-func (m *Model) startDescendantDiscovery(discoverer descendantScopeDiscoverer, root pim.Scope) tea.Cmd {
+func (m Model) cachedScopeIndex(root pim.Scope) ([]pim.Scope, bool) {
+	entry := m.discoveryCache[discoveryKey{tenantID: m.selectedTenant.ID, section: m.activeSection}]
+	scopes, ok := entry.scopeIndexes[scopeIDKey(root.ID)]
+	return scopes, ok
+}
+
+// storeScopeIndex keeps a complete hierarchy for the session's cached
+// assignments; refresh and account or tenant changes drop it with the entry.
+func (m *Model) storeScopeIndex(root pim.Scope) {
+	key := discoveryKey{tenantID: m.selectedTenant.ID, section: m.activeSection}
+	entry, ok := m.discoveryCache[key]
+	if !ok {
+		return
+	}
+	if entry.scopeIndexes == nil {
+		entry.scopeIndexes = make(map[string][]pim.Scope)
+	}
+	entry.scopeIndexes[scopeIDKey(root.ID)] = slices.Clone(m.scopePicker.descendants)
+	m.discoveryCache[key] = entry
+}
+
+func (m *Model) startDescendantIndex(discoverer descendantScopeDiscoverer, root pim.Scope) tea.Cmd {
+	return m.startDescendantPhase(root, false, func(ctx context.Context) ([]pim.Scope, error) {
+		return discoverer.IndexDescendantScopes(ctx, root)
+	})
+}
+
+func (m *Model) startDescendantWalk(discoverer descendantScopeDiscoverer, root pim.Scope, indexed []pim.Scope) tea.Cmd {
+	return m.startDescendantPhase(root, true, func(ctx context.Context) ([]pim.Scope, error) {
+		return discoverer.WalkDescendantScopes(ctx, root, indexed)
+	})
+}
+
+func (m *Model) startDescendantPhase(root pim.Scope, walked bool, discover func(context.Context) ([]pim.Scope, error)) tea.Cmd {
 	m.cancelScopeDescendants()
 	ctx, cancel := context.WithCancel(m.tenantContext())
 	m.scopePicker.descCancel = cancel
@@ -190,15 +240,34 @@ func (m *Model) startDescendantDiscovery(discoverer descendantScopeDiscoverer, r
 	tenantID := m.selectedTenant.ID
 	m.beginOperation("scopes")
 	return func() tea.Msg {
-		descendants, err := discoverer.DiscoverDescendantScopes(ctx, root)
+		descendants, err := discover(ctx)
 		return descendantScopesDiscoveredMsg{
 			tenantID:    tenantID,
 			checkID:     checkID,
 			rootID:      root.ID,
+			walked:      walked,
 			descendants: descendants,
 			err:         err,
 		}
 	}
+}
+
+// indexedChildren returns a level's children from the hierarchy index when the
+// index is known to hold all of them.
+func (m Model) indexedChildren(parent pim.Scope) ([]pim.Scope, bool) {
+	key := scopeIDKey(parent.ID)
+	if !m.scopePicker.indexComplete {
+		if _, ok := m.scopePicker.indexedSubs[key]; !ok {
+			return nil, false
+		}
+	}
+	var children []pim.Scope
+	for _, scope := range m.scopePicker.descendants {
+		if scopeIDKey(scope.ParentID) == key {
+			children = append(children, scope)
+		}
+	}
+	return children, true
 }
 
 // A descendant can be drilled or selected before the current level finishes
@@ -209,6 +278,12 @@ func (m *Model) loadChildScopes() tea.Cmd {
 		return nil
 	}
 	parent := level.parent
+	if children, ok := m.indexedChildren(parent); ok {
+		m.cancelScopeForeground()
+		top := &m.scopePicker.stack[len(m.scopePicker.stack)-1]
+		top.children, top.loaded = children, true
+		return nil
+	}
 	discoverer := m.providerForSection(m.activeSection).(childScopeDiscoverer)
 	m.cancelScopeForeground()
 	ctx, cancel := context.WithCancel(m.tenantContext())
@@ -264,26 +339,50 @@ func (m Model) handleDescendantScopesDiscovered(msg descendantScopesDiscoveredMs
 		return m, nil
 	}
 	m.cancelScopeDescendants()
-	if !m.scopePicker.loading && !m.scopePicker.preparing {
-		m.endOperation("scopes")
-	}
 	if accountUnavailableError(msg.err) {
 		m.markAccountUnavailable(msg.err)
 		return m, nil
 	}
-	m.scopePicker.descErr = msg.err
 	if len(msg.descendants) > 0 {
 		focus := m.searchFocusID()
-		// Prefer the sorted index, but keep children from independently loaded
-		// levels when they were missing from the hierarchy response.
-		known := m.scopePicker.descendants
-		m.scopePicker.descendants = msg.descendants
-		clear(m.scopePicker.indexedIDs)
-		for _, scope := range msg.descendants {
-			m.scopePicker.indexedIDs[scopeIDKey(scope.ID)] = struct{}{}
+		if msg.walked {
+			m.scopePicker.addSearchScopes(msg.descendants)
+		} else {
+			// Prefer the sorted index, but keep children from independently loaded
+			// levels when they were missing from the hierarchy response.
+			known := m.scopePicker.descendants
+			m.scopePicker.descendants = msg.descendants
+			clear(m.scopePicker.indexedIDs)
+			for _, scope := range msg.descendants {
+				m.scopePicker.indexedIDs[scopeIDKey(scope.ID)] = struct{}{}
+			}
+			m.scopePicker.addSearchScopes(known)
 		}
-		m.scopePicker.addSearchScopes(known)
 		m.restoreSearchFocus(focus)
+	}
+	if !msg.walked {
+		// A failed index may have dropped resource groups of the subscriptions
+		// it did return, so only a complete index may prune the walk.
+		var indexed []pim.Scope
+		if msg.err == nil {
+			indexed = msg.descendants
+			m.scopePicker.indexedSubs = make(map[string]struct{})
+			for _, scope := range indexed {
+				if scope.Type == pim.ScopeTypeSubscription {
+					m.scopePicker.indexedSubs[scopeIDKey(scope.ID)] = struct{}{}
+				}
+			}
+		}
+		discoverer := m.providerForSection(m.activeSection).(descendantScopeDiscoverer)
+		return m, m.startDescendantWalk(discoverer, m.scopePicker.base.Scope, indexed)
+	}
+	if !m.scopePicker.loading && !m.scopePicker.preparing {
+		m.endOperation("scopes")
+	}
+	m.scopePicker.descErr = msg.err
+	if msg.err == nil {
+		m.scopePicker.indexComplete = true
+		m.storeScopeIndex(m.scopePicker.base.Scope)
 	}
 	return m, nil
 }

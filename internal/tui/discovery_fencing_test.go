@@ -228,7 +228,8 @@ func TestAzureInspectionCannotUnblockNewerPolicyRequest(t *testing.T) {
 			}
 			model := NewModel(Runtime{AzureResources: provider})
 			next, cmd := model.beginDiscovery(SectionAzureResources, false)
-			model, _ = startDiscoveryBatch(t, next.(Model), cmd)
+			model, prefetch := startDiscoveryBatch(t, next.(Model), cmd)
+			model = skipAzurePrefetch(t, model, prefetch)
 			next, inspect := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'i'}})
 			late := preparationCommand(t, inspect)()
 			next, _ = next.(Model).Update(tea.KeyMsg{Type: tea.KeyEsc})
@@ -267,7 +268,8 @@ func TestAzureSelectionRequiresEveryPolicy(t *testing.T) {
 	}
 	model := NewModel(Runtime{AzureResources: provider})
 	next, cmd := model.beginDiscovery(SectionAzureResources, false)
-	model, _ = startDiscoveryBatch(t, next.(Model), cmd)
+	model, prefetch := startDiscoveryBatch(t, next.(Model), cmd)
+	model = skipAzurePrefetch(t, model, prefetch)
 	model = sendRunes(model, "a")
 	next, cmd = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	next, follow := next.(Model).Update(preparationCommand(t, cmd)())
@@ -300,7 +302,24 @@ func azureScopePolicyModel(t *testing.T) Model {
 	}
 	model := NewModel(Runtime{AzureResources: provider, Entra: &scriptedProvider{}, GraphConnected: func(context.Context) bool { return true }})
 	next, cmd := model.beginDiscovery(SectionAzureResources, false)
-	model, _ = startDiscoveryBatch(t, next.(Model), cmd)
+	model, prefetch := startDiscoveryBatch(t, next.(Model), cmd)
+	return skipAzurePrefetch(t, model, prefetch)
+}
+
+// skipAzurePrefetch fails the background policy prefetch quietly so a test can
+// exercise the on-demand policy load.
+func skipAzurePrefetch(t *testing.T, model Model, prefetch tea.Cmd) Model {
+	t.Helper()
+	if prefetch == nil {
+		t.Fatal("Azure discovery did not start a policy prefetch")
+	}
+	msg := preparationCommand(t, prefetch)().(assignmentsPreparedMsg)
+	msg.assignments, msg.err = nil, errors.New("prefetch skipped")
+	next, _ := model.Update(msg)
+	model = next.(Model)
+	if model.err != nil || model.preparingPolicies {
+		t.Fatalf("skipped prefetch left visible state: err=%v preparing=%t", model.err, model.preparingPolicies)
+	}
 	return model
 }
 

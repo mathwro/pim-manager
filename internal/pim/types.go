@@ -34,6 +34,8 @@ type Scope struct {
 	DisplayName      string
 	Type             ScopeType
 	SubscriptionName string
+	// ParentID is the containing scope when known (child or descendant discovery).
+	ParentID string
 }
 
 type ActivationPolicy struct {

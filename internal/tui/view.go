@@ -772,21 +772,6 @@ func displayName(assignment pim.EligibleAssignment) string {
 	return "Unnamed assignment"
 }
 
-func subscriptionIDFromAzureScope(scope string) string {
-	scope = strings.TrimSpace(scope)
-	if scope != "" && !strings.HasPrefix(scope, "/") {
-		scope = "/" + scope
-	}
-	if !strings.HasPrefix(strings.ToLower(scope), "/subscriptions/") {
-		return ""
-	}
-	rest := scope[len("/subscriptions/"):]
-	if idx := strings.IndexByte(rest, '/'); idx >= 0 {
-		rest = rest[:idx]
-	}
-	return strings.TrimSpace(rest)
-}
-
 func displayScope(assignment pim.EligibleAssignment) string {
 	name := strings.TrimSpace(assignment.Scope.DisplayName)
 	scopeType := strings.TrimSpace(string(assignment.Scope.Type))
@@ -797,13 +782,8 @@ func displayScope(assignment pim.EligibleAssignment) string {
 		scopeType = "Sub"
 	case pim.ScopeTypeResourceGroup:
 		scopeType = "RG"
+		// Providers fill SubscriptionName (display name or ID) for resource groups.
 		sub := strings.TrimSpace(assignment.Scope.SubscriptionName)
-		if sub == "" {
-			sub = subscriptionIDFromAzureScope(assignment.Scope.ID)
-		}
-		if sub == "" {
-			sub = subscriptionIDFromAzureScope(assignment.AzureScope)
-		}
 		if name != "" && sub != "" {
 			return fmt.Sprintf("RG: %s (%s)", name, sub)
 		}

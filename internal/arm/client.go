@@ -8,7 +8,9 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
+	"time"
 )
 
 const BaseURL = "https://management.azure.com"
@@ -95,6 +97,7 @@ func (c Client) Post(ctx context.Context, path string, body any, out any) error 
 func (c Client) Put(ctx context.Context, path string, body any, out any) error {
 	return c.do(ctx, http.MethodPut, path, body, out)
 }
+
 func (c Client) do(ctx context.Context, method string, path string, body any, out any) error {
 	u, err := c.requestURL(path)
 	if err != nil {
@@ -105,25 +108,69 @@ func (c Client) do(ctx context.Context, method string, path string, body any, ou
 		return err
 	}
 	token := PinnedAccessToken(ctx)
-	var reader io.Reader
+	var payload []byte
 	if body != nil {
 		buf := &bytes.Buffer{}
 		if err := json.NewEncoder(buf).Encode(body); err != nil {
 			return fmt.Errorf("encode ARM request: %w", err)
 		}
-		reader = buf
+		payload = buf.Bytes()
 	}
-	req, err := http.NewRequestWithContext(ctx, method, u, reader)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Content-Type", "application/json")
+	for attempt := 0; ; attempt++ {
+		var reader io.Reader
+		if payload != nil {
+			reader = bytes.NewReader(payload)
+		}
+		req, err := http.NewRequestWithContext(ctx, method, u, reader)
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Content-Type", "application/json")
 
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return err
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			return err
+		}
+		// Only reads are retried: GET, and POST, which this client uses solely for
+		// Resource Graph queries. Activation PUTs are never replayed.
+		if resp.StatusCode == http.StatusTooManyRequests && (method == http.MethodGet || method == http.MethodPost) && attempt < maxThrottleRetries {
+			if wait, ok := throttleWait(resp.Header.Get("Retry-After"), time.Now()); ok {
+				resp.Body.Close()
+				timer := time.NewTimer(wait)
+				select {
+				case <-ctx.Done():
+					timer.Stop()
+					return ctx.Err()
+				case <-timer.C:
+				}
+				continue
+			}
+		}
+		return decodeResponse(resp, method, u, out)
 	}
+}
+
+const (
+	maxThrottleRetries  = 2
+	defaultThrottleWait = 2 * time.Second
+	maxThrottleWait     = 10 * time.Second
+)
+
+// throttleWait reads Retry-After (seconds or HTTP date). Waits longer than
+// maxThrottleWait are not retried so the 429 reaches the user promptly.
+func throttleWait(retryAfter string, now time.Time) (time.Duration, bool) {
+	retryAfter = strings.TrimSpace(retryAfter)
+	wait := defaultThrottleWait
+	if seconds, err := strconv.Atoi(retryAfter); err == nil {
+		wait = time.Duration(max(seconds, 0)) * time.Second
+	} else if at, err := http.ParseTime(retryAfter); err == nil {
+		wait = max(at.Sub(now), 0)
+	}
+	return wait, wait <= maxThrottleWait
+}
+
+func decodeResponse(resp *http.Response, method string, u string, out any) error {
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		b, _ := io.ReadAll(resp.Body)

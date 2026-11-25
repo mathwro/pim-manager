@@ -2128,15 +2128,6 @@ func TestDisplayScopeUsesCompactAzureScopeLabels(t *testing.T) {
 			}},
 			want: "RG: rg-shared (gnsn-pbuildinglab-production)",
 		},
-		{
-			name: "resource group falls back to subscription ID from path",
-			assignment: pim.EligibleAssignment{Scope: pim.Scope{
-				ID:          "/subscriptions/sub-123/resourceGroups/rg-shared",
-				DisplayName: "rg-shared",
-				Type:        pim.ScopeTypeResourceGroup,
-			}},
-			want: "RG: rg-shared (sub-123)",
-		},
 	}
 
 	for _, test := range tests {

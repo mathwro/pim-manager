@@ -3,15 +3,17 @@ package azureresources
 import (
 	"context"
 	"fmt"
-	"github.com/google/uuid"
-	"github.com/mathwro/pim-manager/internal/activation"
-	"github.com/mathwro/pim-manager/internal/arm"
-	"github.com/mathwro/pim-manager/internal/pim"
+	"maps"
 	"net/url"
 	"slices"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/google/uuid"
+	"github.com/mathwro/pim-manager/internal/activation"
+	"github.com/mathwro/pim-manager/internal/arm"
+	"github.com/mathwro/pim-manager/internal/pim"
 )
 
 type ARMClient interface {
@@ -20,6 +22,7 @@ type ARMClient interface {
 	Post(context.Context, string, any, any) error
 	Put(context.Context, string, any, any) error
 }
+
 type Provider struct {
 	arm ARMClient
 }
@@ -102,6 +105,7 @@ type resourceGraphRow struct {
 	Name        string `json:"name"`
 	DisplayName string `json:"displayName"`
 	Type        string `json:"type"`
+	Parent      string `json:"parent"`
 }
 
 func (p Provider) discoverEligibilities(ctx context.Context) ([]pim.EligibleAssignment, error) {
@@ -130,21 +134,38 @@ func (p Provider) Discover(ctx context.Context) ([]pim.EligibleAssignment, error
 	if err != nil || len(assignments) == 0 {
 		return assignments, err
 	}
+	// Subscription labels are best-effort; list them while active state loads.
+	listCtx, cancelListing := context.WithCancel(ctx)
+	defer cancelListing()
+	var (
+		listedNames map[string]string
+		listing     sync.WaitGroup
+	)
+	if needsSubscriptionListing(assignments) {
+		listing.Add(1)
+		go func() {
+			defer listing.Done()
+			listedNames = p.listSubscriptionNames(listCtx)
+		}()
+	}
 	scopes := assignmentScopes(assignments)
 	activeByScope := make([][]roleAssignmentScheduleInstance, len(scopes))
-	if err := forEachScope(ctx, scopes, func(ctx context.Context, index int, scope string) error {
-		active, err := p.discoverActiveAssignments(ctx, scope)
+	if err := forEach(ctx, len(scopes), func(ctx context.Context, index int) error {
+		active, err := p.discoverActiveAssignments(ctx, scopes[index])
 		activeByScope[index] = active
 		return err
 	}); err != nil {
+		cancelListing()
+		listing.Wait()
 		return nil, err
 	}
+	listing.Wait()
 	var active []roleAssignmentScheduleInstance
 	for _, scoped := range activeByScope {
 		active = append(active, scoped...)
 	}
 	applyActiveState(assignments, active, time.Now().UTC())
-	p.enrichResourceGroupSubscriptions(ctx, assignments)
+	labelResourceGroupSubscriptions(assignments, listedNames)
 	return assignments, nil
 }
 
@@ -171,34 +192,38 @@ func subscriptionIDFromScope(scope string) string {
 	return strings.TrimSpace(rest)
 }
 
-func (p Provider) enrichResourceGroupSubscriptions(ctx context.Context, assignments []pim.EligibleAssignment) {
-	subNames := make(map[string]string)
-	needsLookup := false
+// assignmentSubscriptionNames maps lowercase subscription IDs to the names of
+// subscription-scoped assignments.
+func assignmentSubscriptionNames(assignments []pim.EligibleAssignment) map[string]string {
+	names := make(map[string]string)
 	for _, a := range assignments {
 		if a.Scope.Type == pim.ScopeTypeSubscription && strings.TrimSpace(a.Scope.DisplayName) != "" {
 			if subID := subscriptionIDFromScope(a.Scope.ID); subID != "" {
-				subNames[strings.ToLower(subID)] = strings.TrimSpace(a.Scope.DisplayName)
+				names[strings.ToLower(subID)] = strings.TrimSpace(a.Scope.DisplayName)
 			}
 		}
 	}
-	for i := range assignments {
-		if assignments[i].Scope.Type != pim.ScopeTypeResourceGroup {
+	return names
+}
+
+func needsSubscriptionListing(assignments []pim.EligibleAssignment) bool {
+	names := assignmentSubscriptionNames(assignments)
+	for _, a := range assignments {
+		if a.Scope.Type != pim.ScopeTypeResourceGroup {
 			continue
 		}
-		subID := subscriptionIDFromScope(assignments[i].Scope.ID)
-		if subID == "" {
-			continue
-		}
-		if name, ok := subNames[strings.ToLower(subID)]; ok {
-			assignments[i].Scope.SubscriptionName = name
-		} else {
-			assignments[i].Scope.SubscriptionName = subID
-			needsLookup = true
+		if subID := subscriptionIDFromScope(a.Scope.ID); subID != "" {
+			if _, ok := names[strings.ToLower(subID)]; !ok {
+				return true
+			}
 		}
 	}
-	if !needsLookup {
-		return
-	}
+	return false
+}
+
+// listSubscriptionNames is best-effort: a failed page keeps the names already listed.
+func (p Provider) listSubscriptionNames(ctx context.Context) map[string]string {
+	names := make(map[string]string)
 	path := "/subscriptions?api-version=2022-12-01"
 	for path != "" {
 		var resp subscriptionListResponse
@@ -207,19 +232,31 @@ func (p Provider) enrichResourceGroupSubscriptions(ctx context.Context, assignme
 		}
 		for _, item := range resp.Value {
 			if id, name := strings.TrimSpace(item.SubscriptionID), strings.TrimSpace(item.DisplayName); id != "" && name != "" {
-				subNames[strings.ToLower(id)] = name
+				names[strings.ToLower(id)] = name
 			}
 		}
 		path = resp.NextLink
 	}
+	return names
+}
+
+// labelResourceGroupSubscriptions names each resource group's subscription,
+// preferring listed names, then subscription assignments, then the ID.
+func labelResourceGroupSubscriptions(assignments []pim.EligibleAssignment, listed map[string]string) {
+	names := assignmentSubscriptionNames(assignments)
+	maps.Copy(names, listed)
 	for i := range assignments {
 		if assignments[i].Scope.Type != pim.ScopeTypeResourceGroup {
 			continue
 		}
-		if subID := subscriptionIDFromScope(assignments[i].Scope.ID); subID != "" {
-			if name, ok := subNames[strings.ToLower(subID)]; ok {
-				assignments[i].Scope.SubscriptionName = name
-			}
+		subID := subscriptionIDFromScope(assignments[i].Scope.ID)
+		if subID == "" {
+			continue
+		}
+		if name, ok := names[strings.ToLower(subID)]; ok {
+			assignments[i].Scope.SubscriptionName = name
+		} else {
+			assignments[i].Scope.SubscriptionName = subID
 		}
 	}
 }
@@ -245,16 +282,20 @@ func (p Provider) PrepareTargetScope(ctx context.Context, assignment pim.Eligibl
 		return pim.EligibleAssignment{}, fmt.Errorf("authenticate Azure target scope preparation: %w", err)
 	}
 	prepared := []pim.EligibleAssignment{assignment}
-	active, err := p.discoverActiveAssignments(ctx, assignment.AzureScope)
-	if err != nil {
+	var active []roleAssignmentScheduleInstance
+	if err := forEach(ctx, 2, func(ctx context.Context, index int) error {
+		if index == 0 {
+			var err error
+			active, err = p.discoverActiveAssignments(ctx, assignment.AzureScope)
+			return err
+		}
+		return p.applyPolicies(ctx, prepared)
+	}); err != nil {
 		return pim.EligibleAssignment{}, err
 	}
 	prepared[0].Active = false
 	prepared[0].ActiveUntil = nil
 	applyActiveState(prepared, active, time.Now().UTC())
-	if err := p.applyPolicies(ctx, prepared); err != nil {
-		return pim.EligibleAssignment{}, err
-	}
 	return prepared[0], nil
 }
 
@@ -303,6 +344,7 @@ func (p Provider) listEligibleChildScopes(ctx context.Context, parent pim.Scope)
 				ID:          id,
 				DisplayName: name,
 				Type:        scopeType,
+				ParentID:    prefix,
 			}
 			if scopeType == pim.ScopeTypeResourceGroup {
 				if parent.Type == pim.ScopeTypeSubscription && strings.TrimSpace(parent.DisplayName) != "" {
@@ -318,88 +360,54 @@ func (p Provider) listEligibleChildScopes(ctx context.Context, parent pim.Scope)
 	return children, nil
 }
 
-func (p Provider) DiscoverDescendantScopes(ctx context.Context, root pim.Scope) ([]pim.Scope, error) {
+// IndexDescendantScopes lists the management groups, subscriptions and
+// resource groups below root that Resource Graph can read, excluding root.
+// A failed page returns the scopes already indexed with the error.
+func (p Provider) IndexDescendantScopes(ctx context.Context, root pim.Scope) ([]pim.Scope, error) {
 	prefix := scopePathPrefix(root.ID)
 	if prefix == "" || root.Type == pim.ScopeTypeResourceGroup {
 		return nil, nil
 	}
 	ctx, err := p.arm.PinAccessToken(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("authenticate Azure descendant scope discovery: %w", err)
+		return nil, fmt.Errorf("authenticate Azure descendant scope index: %w", err)
 	}
-
-	var (
-		graphScopes []pim.Scope
-		treeScopes  []pim.Scope
-		treeErr     error
-		wg          sync.WaitGroup
-	)
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		// Best-effort fast path: Resource Graph returns only scopes with standing read access.
-		graphScopes, _ = p.queryResourceGraphDescendants(ctx, root)
-	}()
-	go func() {
-		defer wg.Done()
-		treeScopes, treeErr = p.walkEligibleDescendants(ctx, root)
-	}()
-	wg.Wait()
-	if err := ctx.Err(); err != nil {
-		return nil, err
+	scopes, err := p.queryResourceGraphDescendants(ctx, root)
+	if err != nil {
+		err = fmt.Errorf("index descendant scopes of %s: %w", prefix, err)
 	}
-
 	subNames := make(map[string]string)
 	if root.Type == pim.ScopeTypeSubscription && strings.TrimSpace(root.DisplayName) != "" {
-		if subID := subscriptionIDFromScope(root.ID); subID != "" {
+		if subID := subscriptionIDFromScope(prefix); subID != "" {
 			subNames[strings.ToLower(subID)] = strings.TrimSpace(root.DisplayName)
 		}
 	}
-	byID := make(map[string]pim.Scope, len(graphScopes)+len(treeScopes))
 	rootKey := strings.ToLower(prefix)
-	add := func(scope pim.Scope) {
-		key := strings.ToLower(scopePathPrefix(scope.ID))
-		if scope.Type == pim.ScopeTypeSubscription && strings.TrimSpace(scope.DisplayName) != "" {
+	out := scopes[:0]
+	for _, scope := range scopes {
+		if strings.ToLower(scope.ID) == rootKey {
+			continue
+		}
+		if scope.Type == pim.ScopeTypeSubscription {
 			if subID := subscriptionIDFromScope(scope.ID); subID != "" {
-				subNames[strings.ToLower(subID)] = strings.TrimSpace(scope.DisplayName)
-			}
-		}
-		if key == "" || key == rootKey {
-			return
-		}
-		if existing, ok := byID[key]; ok {
-			if existing.DisplayName == "" || strings.EqualFold(existing.DisplayName, resourceName(existing.ID)) {
-				existing.DisplayName = scope.DisplayName
-			}
-			if existing.SubscriptionName == "" {
-				existing.SubscriptionName = scope.SubscriptionName
-			}
-			byID[key] = existing
-			return
-		}
-		byID[key] = scope
-	}
-	for _, scope := range graphScopes {
-		add(scope)
-	}
-	for _, scope := range treeScopes {
-		add(scope)
-	}
-	out := make([]pim.Scope, 0, len(byID))
-	for _, scope := range byID {
-		if scope.Type == pim.ScopeTypeResourceGroup {
-			if subID := subscriptionIDFromScope(scope.ID); subID != "" {
-				if name, ok := subNames[strings.ToLower(subID)]; ok {
-					scope.SubscriptionName = name
-				} else if scope.SubscriptionName == "" {
-					scope.SubscriptionName = subID
-				}
+				subNames[strings.ToLower(subID)] = scope.DisplayName
 			}
 		}
 		out = append(out, scope)
 	}
+	for i := range out {
+		if out[i].Type != pim.ScopeTypeResourceGroup {
+			continue
+		}
+		subID := subscriptionIDFromScope(out[i].ID)
+		if name, ok := subNames[strings.ToLower(subID)]; ok {
+			out[i].SubscriptionName = name
+		} else {
+			out[i].SubscriptionName = subID
+		}
+	}
 	slices.SortFunc(out, compareScopes)
-	return out, treeErr
+	return out, err
 }
 
 func compareScopes(a, b pim.Scope) int {
@@ -425,9 +433,16 @@ func compareScopes(a, b pim.Scope) int {
 	return strings.Compare(strings.ToLower(a.ID), strings.ToLower(b.ID))
 }
 
+const managementGroupPathPrefix = "/providers/Microsoft.Management/managementGroups/"
+
+// resourceGraphParentColumn yields the full parent ID for management groups
+// and the parent management group name for subscriptions.
+const resourceGraphParentColumn = "extend parent = case(type =~ 'microsoft.management/managementgroups', tostring(properties.details.parent.id), type =~ 'microsoft.resources/subscriptions', tostring(properties.managementGroupAncestorsChain[0].name), '')"
+
 func (p Provider) queryResourceGraphDescendants(ctx context.Context, root pim.Scope) ([]pim.Scope, error) {
 	req := resourceGraphRequest{
-		Query: "ResourceContainers | where type in~ ('microsoft.management/managementgroups', 'microsoft.resources/subscriptions', 'microsoft.resources/subscriptions/resourcegroups') | project id, name, displayName = tostring(properties.displayName), type",
+		Query: "ResourceContainers | where type in~ ('microsoft.management/managementgroups', 'microsoft.resources/subscriptions', 'microsoft.resources/subscriptions/resourcegroups') | " +
+			resourceGraphParentColumn + " | project id, name, displayName = tostring(properties.displayName), type, parent",
 		Options: resourceGraphOptions{
 			ResultFormat:       "objectArray",
 			Top:                1000,
@@ -445,6 +460,7 @@ func (p Provider) queryResourceGraphDescendants(ctx context.Context, root pim.Sc
 			return nil, nil
 		}
 		req.Subscriptions = []string{subID}
+		// Resource group parents come from their IDs.
 		req.Query = "ResourceContainers | where type =~ 'microsoft.resources/subscriptions/resourcegroups' | project id, name, displayName = '', type"
 	case pim.ScopeTypeManagementGroup:
 		if prefix != "/" {
@@ -475,7 +491,7 @@ func (p Provider) queryResourceGraphDescendants(ctx context.Context, root pim.Sc
 			if name == "" {
 				name = resourceName(id)
 			}
-			out = append(out, pim.Scope{ID: id, DisplayName: name, Type: scopeType})
+			out = append(out, pim.Scope{ID: id, DisplayName: name, Type: scopeType, ParentID: resourceGraphParentID(scopeType, id, row.Parent)})
 		}
 		if resp.SkipToken == "" {
 			break
@@ -485,11 +501,53 @@ func (p Provider) queryResourceGraphDescendants(ctx context.Context, root pim.Sc
 	return out, nil
 }
 
-func (p Provider) walkEligibleDescendants(ctx context.Context, root pim.Scope) ([]pim.Scope, error) {
+func resourceGraphParentID(scopeType pim.ScopeType, id string, parent string) string {
+	if scopeType == pim.ScopeTypeResourceGroup {
+		if subID := subscriptionIDFromScope(id); subID != "" {
+			return "/subscriptions/" + subID
+		}
+		return ""
+	}
+	parent = strings.TrimSpace(parent)
+	if parent == "" {
+		return ""
+	}
+	if !strings.Contains(parent, "/") {
+		return managementGroupPathPrefix + parent
+	}
+	return scopePathPrefix(parent)
+}
+
+// WalkDescendantScopes recursively lists eligible child scopes below root. It
+// skips listing children of subscriptions in indexed, whose resource groups
+// Resource Graph already returned; management groups are always walked.
+// It returns the scopes found so far with the first error.
+func (p Provider) WalkDescendantScopes(ctx context.Context, root pim.Scope, indexed []pim.Scope) ([]pim.Scope, error) {
+	prefix := scopePathPrefix(root.ID)
+	if prefix == "" || root.Type == pim.ScopeTypeResourceGroup {
+		return nil, nil
+	}
+	indexedSubscriptions := make(map[string]bool)
+	for _, scope := range indexed {
+		if scope.Type == pim.ScopeTypeSubscription {
+			indexedSubscriptions[strings.ToLower(scopePathPrefix(scope.ID))] = true
+		}
+	}
+	isIndexed := func(scope pim.Scope) bool {
+		return scope.Type == pim.ScopeTypeSubscription && indexedSubscriptions[strings.ToLower(scopePathPrefix(scope.ID))]
+	}
+	if isIndexed(root) {
+		return nil, nil
+	}
+	ctx, err := p.arm.PinAccessToken(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("authenticate Azure descendant scope walk: %w", err)
+	}
+
 	semaphore := make(chan struct{}, maxConcurrentScopeRequests)
 	var (
 		mu       sync.Mutex
-		visited  = map[string]bool{strings.ToLower(scopePathPrefix(root.ID)): true}
+		visited  = map[string]bool{strings.ToLower(prefix): true}
 		results  []pim.Scope
 		firstErr error
 		wg       sync.WaitGroup
@@ -516,7 +574,7 @@ func (p Provider) walkEligibleDescendants(ctx context.Context, root pim.Scope) (
 			}
 			visited[key] = true
 			results = append(results, child)
-			if child.Type == pim.ScopeTypeManagementGroup || child.Type == pim.ScopeTypeSubscription {
+			if child.Type == pim.ScopeTypeManagementGroup || (child.Type == pim.ScopeTypeSubscription && !isIndexed(child)) {
 				drill = append(drill, child)
 			}
 		}
@@ -529,6 +587,10 @@ func (p Provider) walkEligibleDescendants(ctx context.Context, root pim.Scope) (
 	wg.Add(1)
 	go visit(root)
 	wg.Wait()
+	if firstErr == nil {
+		firstErr = ctx.Err()
+	}
+	slices.SortFunc(results, compareScopes)
 	return results, firstErr
 }
 

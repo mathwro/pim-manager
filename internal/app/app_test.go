@@ -153,3 +153,25 @@ func TestRunConfiguresBoundedHTTPClientTimeout(t *testing.T) {
 		t.Fatalf("expected Graph HTTP client with 60s timeout, got %#v", graphHTTPClient)
 	}
 }
+
+func TestRunGivesARMClientSessionTokenCache(t *testing.T) {
+	oldNewARMClient := newARMClient
+	oldRunProgram := runProgram
+	t.Cleanup(func() {
+		newARMClient = oldNewARMClient
+		runProgram = oldRunProgram
+	})
+	var armTokens arm.TokenSource
+	newARMClient = func(client *http.Client, tokenSource arm.TokenSource) arm.Client {
+		armTokens = tokenSource
+		return oldNewARMClient(client, tokenSource)
+	}
+	runProgram = func(tea.Model) error { return nil }
+
+	if err := Run(); err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if _, ok := armTokens.(*azureauth.CachedTokens); !ok {
+		t.Fatalf("expected ARM reads to use the session token cache, got %T", armTokens)
+	}
+}

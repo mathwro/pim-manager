@@ -56,6 +56,8 @@ type Runtime struct {
 	GraphConnected      func(context.Context) bool
 	GraphAuthentication func(context.Context, bool, string) (azureauth.ARMAuthentication, error)
 	ResetGraph          func()
+	// ResetARMTokens drops cached read-only ARM tokens (refresh, account or principal change).
+	ResetARMTokens func()
 }
 
 type AssignmentProvider interface {
@@ -136,11 +138,15 @@ type Model struct {
 	policiesReady          bool
 	preparingPolicies      bool
 	waitingForPolicies     bool
-	scopePicker            scopePickerState
-	err                    error
-	helpVisible            bool
-	width                  int
-	height                 int
+	// policyTargets maps assignment IDs to the scopes of the in-flight Azure policy load.
+	policyTargets map[string]string
+	// policyPrefetch marks that in-flight load as a background prefetch nobody waits on.
+	policyPrefetch bool
+	scopePicker    scopePickerState
+	err            error
+	helpVisible    bool
+	width          int
+	height         int
 }
 
 type activationFormField int
@@ -156,8 +162,10 @@ type discoveryKey struct {
 }
 
 type discoveryEntry struct {
-	assignments   []pim.EligibleAssignment
-	basePolicies  map[string]pim.EligibleAssignment
+	assignments  []pim.EligibleAssignment
+	basePolicies map[string]pim.EligibleAssignment
+	// scopeIndexes holds complete descendant hierarchies by root scope key.
+	scopeIndexes  map[string][]pim.Scope
 	policiesReady bool
 	generation    int
 }
@@ -381,26 +389,39 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmd := m.startAccountCheck(false)
 			return m, cmd
 		}
+		if typed.section == SectionAzureResources {
+			// Filtered per-role policy requests are small, so load them before the user asks.
+			cmd := m.prepareAzureAssignmentsIfNeeded(typed.assignments, false)
+			m.policyPrefetch = cmd != nil
+			return m, cmd
+		}
 		return m, nil
 	case assignmentsPreparedMsg:
 		entry, ok := m.discoveryCache[typed.key]
 		if !ok || m.discoveryCancelKey != typed.key || entry.generation != typed.generation || typed.key.tenantID != m.selectedTenant.ID || typed.key.section != m.activeSection {
 			return m, nil
 		}
+		background := m.policyPrefetch
 		m.cancelDiscovery(false)
 		m.endOperation("policies")
 		if typed.err != nil {
-			m.recordActivity("Activation requirements failed", true)
 			if accountUnavailableError(typed.err) {
+				m.recordActivity("Activation requirements failed", true)
 				m.markAccountUnavailable(typed.err)
 				return m, nil
 			}
+			m.preparingPolicies = false
+			m.waitingForPolicies = false
+			if background {
+				// Nobody asked yet; the next inspection or selection retries and reports it.
+				m.recordActivity("Activation requirements prefetch failed; loading on demand", false)
+				return m, nil
+			}
+			m.recordActivity("Activation requirements failed", true)
 			if typed.key.section != SectionAzureResources {
 				delete(m.discoveryCache, typed.key)
 				m.policiesReady = false
 			}
-			m.preparingPolicies = false
-			m.waitingForPolicies = false
 			m.err = typed.err
 			return m, nil
 		}
@@ -1329,8 +1350,17 @@ func (m *Model) selectTenant(index int) {
 	m.tenantErr = nil
 }
 
+// resetARMTokens drops cached read-only ARM tokens so the next lookup asks
+// Azure CLI again; activation always fetches its own checked token.
+func (m *Model) resetARMTokens() {
+	if m.runtime.ResetARMTokens != nil {
+		m.runtime.ResetARMTokens()
+	}
+}
+
 func (m *Model) clearTenantWorkflow() {
 	m.cancelGraphConnection(true)
+	m.resetARMTokens()
 	m.cancelScopePicker()
 	m.scopePicker = scopePickerState{checkID: m.scopePicker.checkID, descCheckID: m.scopePicker.descCheckID}
 	m.cancelAuthentication()
@@ -1497,6 +1527,8 @@ func (m *Model) cancelDiscovery(deletePending bool) {
 	m.endOperation("discovery")
 	m.endOperation("policies")
 	m.discoveryCancelKey = discoveryKey{}
+	m.policyTargets = nil
+	m.policyPrefetch = false
 }
 
 func (m Model) prepareAssignments(ctx context.Context, preparer assignmentPreparer, key discoveryKey, generation int, assignments []pim.EligibleAssignment) tea.Cmd {
@@ -1528,6 +1560,13 @@ func (m *Model) prepareAzureAssignmentsIfNeeded(targets []pim.EligibleAssignment
 		return nil
 	}
 	key := discoveryKey{tenantID: m.selectedTenant.ID, section: m.activeSection}
+	if m.preparingPolicies && m.discoveryCancelKey == key && m.coversPolicyTargets(missing) {
+		// Join the in-flight load instead of restarting it; the caller now owns its outcome.
+		m.policyPrefetch = false
+		m.waitingForPolicies = m.waitingForPolicies || wait
+		m.err = nil
+		return m.spinner.Tick
+	}
 	entry, ok := m.discoveryCache[key]
 	if !ok {
 		entry = discoveryEntry{assignments: m.assignmentList.items, basePolicies: m.scopePicker.basePolicies, policiesReady: true}
@@ -1544,7 +1583,20 @@ func (m *Model) prepareAzureAssignmentsIfNeeded(targets []pim.EligibleAssignment
 	ctx, cancel := context.WithCancel(azureauth.WithTenant(context.Background(), m.selectedTenant.ID))
 	m.discoveryCancel = cancel
 	m.discoveryCancelKey = key
+	m.policyTargets = make(map[string]string, len(missing))
+	for _, item := range missing {
+		m.policyTargets[item.ID] = scopeIDKey(item.AzureScope)
+	}
 	return tea.Batch(m.prepareAssignments(ctx, preparer, key, entry.generation, missing), m.spinner.Tick)
+}
+
+func (m Model) coversPolicyTargets(items []pim.EligibleAssignment) bool {
+	for _, item := range items {
+		if scope, ok := m.policyTargets[item.ID]; !ok || scope != scopeIDKey(item.AzureScope) {
+			return false
+		}
+	}
+	return true
 }
 
 func (m *Model) snapshotBatchInputs(selected []pim.EligibleAssignment, justification string, durations map[string]string) {

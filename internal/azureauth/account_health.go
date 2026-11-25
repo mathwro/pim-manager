@@ -113,20 +113,30 @@ func (c CLI) checkAccount(ctx context.Context, client *http.Client) (AccountHeal
 	}, nil
 }
 
+// graphIdentity holds readable Azure CLI token claims for Graph and ARM tokens.
 type graphIdentity struct {
-	TenantID    string `json:"tid"`
-	PrincipalID string `json:"oid"`
+	TenantID          string `json:"tid"`
+	PrincipalID       string `json:"oid"`
+	DisplayName       string `json:"name"`
+	PreferredUsername string `json:"preferred_username"`
+	UPN               string `json:"upn"`
+	UniqueName        string `json:"unique_name"`
+}
+
+func (i graphIdentity) userPrincipalName() string {
+	for _, value := range []string{i.PreferredUsername, i.UPN, i.UniqueName} {
+		if value = strings.TrimSpace(value); value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func graphIdentityClaims(token string) graphIdentity {
-	// Graph tokens may be opaque. Readable claims are only consistency guards,
+	// Tokens may be opaque. Readable claims are only consistency guards,
 	// not signature validation; Graph validates the token and ARM stays authoritative.
-	parts := strings.Split(token, ".")
-	if len(parts) != 3 {
-		return graphIdentity{}
-	}
-	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
-	if err != nil {
+	payload, ok := jwtPayload(token)
+	if !ok {
 		return graphIdentity{}
 	}
 	var claims graphIdentity
@@ -134,6 +144,19 @@ func graphIdentityClaims(token string) graphIdentity {
 		return graphIdentity{}
 	}
 	return claims
+}
+
+// jwtPayload decodes the payload of a three-part JWT without validating it.
+func jwtPayload(token string) ([]byte, bool) {
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 || parts[0] == "" || parts[2] == "" {
+		return nil, false
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return nil, false
+	}
+	return payload, true
 }
 
 func accountSignInUnavailable(message string) bool {
@@ -173,41 +196,6 @@ func graphInteractionChallenge(wwwAuthenticate string, message string) bool {
 		strings.Contains(lowerMsg, "tokencreatedwithoutdatedpolicies")
 }
 
-type armIdentity struct {
-	TenantID          string `json:"tid"`
-	PrincipalID       string `json:"oid"`
-	DisplayName       string `json:"name"`
-	PreferredUsername string `json:"preferred_username"`
-	UPN               string `json:"upn"`
-	UniqueName        string `json:"unique_name"`
-}
-
-func (i armIdentity) userPrincipalName() string {
-	for _, value := range []string{i.PreferredUsername, i.UPN, i.UniqueName} {
-		if value = strings.TrimSpace(value); value != "" {
-			return value
-		}
-	}
-	return ""
-}
-
-func armIdentityClaims(token string) armIdentity {
-	header, rest, _ := strings.Cut(token, ".")
-	encoded, signature, _ := strings.Cut(rest, ".")
-	if header == "" || signature == "" || strings.Contains(signature, ".") {
-		return armIdentity{}
-	}
-	payload, err := base64.RawURLEncoding.DecodeString(encoded)
-	if err != nil {
-		return armIdentity{}
-	}
-	var claims armIdentity
-	if json.Unmarshal(payload, &claims) != nil {
-		return armIdentity{}
-	}
-	return claims
-}
-
 // checkARMAccountFallback verifies live sign-in against ARM when Microsoft Graph
 // rejects Azure CLI's cached Graph token with a CAE claims challenge (which `az`
 // cannot answer non-interactively) while the ARM session remains valid.
@@ -216,7 +204,7 @@ func (c CLI) checkARMAccountFallback(ctx context.Context, client *http.Client, t
 	if err != nil {
 		return AccountHealth{}, fmt.Errorf("ARM token acquisition: %w", err)
 	}
-	claims := armIdentityClaims(token)
+	claims := graphIdentityClaims(token)
 	principalID := strings.TrimSpace(claims.PrincipalID)
 	if principalID == "" {
 		return AccountHealth{}, errors.New("ARM token has no principal ID")

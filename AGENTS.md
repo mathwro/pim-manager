@@ -45,7 +45,7 @@ Keep packages small and purpose-specific:
 | --- | --- |
 | `cmd` | Cobra commands, root command setup, flags, and process exit behavior. |
 | `internal/app` | Application wiring for auth, providers, activation services, and the TUI model. |
-| `internal/azureauth` | Azure CLI tenant discovery and display-name enrichment, session-local tenant context, access token retrieval and claims inspection, and interactive authentication-context step-up command construction. |
+| `internal/azureauth` | Azure CLI tenant discovery and display-name enrichment, session-local tenant context, access token retrieval with in-memory read-only ARM token reuse, claims inspection, and interactive authentication-context step-up command construction. |
 | `internal/graphauth` | Native Graph browser PKCE login, in-memory session, checked CLI/Graph identity binding, silent refresh, policy claims, and cancellation/reset fencing. |
 | `internal/graph` | Graph HTTP transport, checked-token pinning, safe pagination, and effective activation-policy normalization shared by Graph providers. |
 | `internal/pim` | Shared domain types for eligibility, activation policy requirements, scope metadata, activation requests, and activation results. |
@@ -72,6 +72,7 @@ The TUI should depend on interfaces rather than concrete Azure clients. Provider
 - Failed or canceled step-up authentication submits no activation requests.
 - If authentication-context step-up changes the signed-in principal, submit no activation requests.
 - Pin the checked service token (ARM or Graph) to every activation request in its batch; do not fetch a different token between validation and submission.
+- Read-only ARM lookups may reuse the in-memory per-tenant ARM token (`azureauth.CachedTokens`); drop it on refresh, tenant, account, or principal change. Activation fetches its own checked token. Only reads retry `429`; activation PUTs never retry.
 - For group-derived Azure role eligibilities, preserve the linked group eligibility schedule but use the authenticated user's principal ID as the `SelfActivate` target.
 - Disable Azure CLI's subscription selector only for the child step-up process; do not mutate the user's global CLI configuration.
 - Connect Graph only after explicit user action; explain Microsoft Graph Command Line Tools branding before opening the browser. Share the session across Entra Roles and Groups, clear it on tenant/principal changes, and reject stale callbacks. Use a known checked CLI username as a login hint without forcing account selection; returned identity checks remain authoritative.
