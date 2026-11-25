@@ -30,7 +30,7 @@ func (l assignmentList) filtered(query string) []pim.EligibleAssignment {
 			}
 			continue
 		}
-		haystack := strings.ToLower(item.DisplayName + " " + item.Scope.DisplayName + " " + string(item.Kind))
+		haystack := strings.ToLower(item.DisplayName + " " + item.Scope.DisplayName + " " + item.Scope.SubscriptionName + " " + string(item.Kind))
 		if strings.Contains(haystack, query) || strings.Contains(strings.ToLower(item.Scope.ID), query) {
 			out = append(out, item)
 		}

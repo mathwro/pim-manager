@@ -29,7 +29,9 @@ var runProgram = func(model tea.Model) error {
 func Run() error {
 	auth := newCLI(nil)
 	httpClient := &http.Client{Timeout: 60 * time.Second}
-	armClient := newARMClient(httpClient, auth)
+	// Read-only ARM calls share session-cached tokens; activation pins a fresh checked token.
+	armTokens := azureauth.NewCachedTokens(auth)
+	armClient := newARMClient(httpClient, armTokens)
 	graphSession := graphauth.NewSession(auth)
 	defer graphSession.Reset()
 	graphClient := newGraphClient(httpClient, graphSession)
@@ -41,6 +43,7 @@ func Run() error {
 		GraphAuthentication: graphSession.Authentication,
 		ResetGraph:          graphSession.Reset,
 		AzureResources:      azureresources.NewProvider(armClient),
+		ResetARMTokens:      armTokens.Reset,
 		Tenants:             auth,
 		CheckAccount:        auth.CheckAccount,
 		StepUpCommand:       azureauth.StepUpLoginCommand,

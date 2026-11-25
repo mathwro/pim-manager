@@ -165,7 +165,7 @@ func (p *progressiveProvider) Prepare(context.Context, []pim.EligibleAssignment)
 
 func startProgressiveDiscovery(t *testing.T, model Model) (Model, tea.Cmd) {
 	t.Helper()
-	next, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next, cmd := model.beginDiscovery(SectionEntra, false)
 	model = next.(Model)
 	batch, ok := cmd().(tea.BatchMsg)
 	if !ok {
@@ -331,7 +331,7 @@ func TestRefreshAndTenantSwitchCancelPolicyPreparation(t *testing.T) {
 				prepareStarted:   make(chan struct{}),
 				prepareCanceled:  make(chan struct{}),
 			}
-			model := NewModel(Runtime{AzureResources: provider})
+			model := NewModel(Runtime{Entra: provider, GraphConnected: func(context.Context) bool { return true }})
 			model.selectedTenant = azureauth.Tenant{ID: "tenant-1"}
 			model, prepareBatch := startProgressiveDiscovery(t, model)
 			prepare := preparationCommand(t, prepareBatch)
@@ -360,7 +360,7 @@ func progressiveTestModel(assignments ...pim.EligibleAssignment) (Model, *progre
 		scriptedProvider: &scriptedProvider{discoveries: [][]pim.EligibleAssignment{assignments}},
 		prepared:         make(chan []pim.EligibleAssignment, 1),
 	}
-	model := NewModel(Runtime{AzureResources: provider})
+	model := NewModel(Runtime{Entra: provider, GraphConnected: func(context.Context) bool { return true }})
 	model.selectedTenant = azureauth.Tenant{ID: "tenant-1"}
 	return model, provider
 }
@@ -429,7 +429,7 @@ func TestDiscoveryCacheReusesPreparedAssignments(t *testing.T) {
 	provider.prepared <- []pim.EligibleAssignment{{ID: "reader", DisplayName: "Reader", ActivationPolicy: pim.ActivationPolicy{MaximumDurationISO: "PT2H"}}}
 	model = runCommand(model, prepare)
 	next, _ := model.Update(tea.KeyMsg{Type: tea.KeyEsc})
-	next, cmd := next.(Model).Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next, cmd := next.(Model).beginDiscovery(SectionEntra, false)
 	model = next.(Model)
 
 	if cmd != nil || provider.discoverCalls != 1 || provider.prepareCalls != 1 || !model.policiesReady {
@@ -2099,19 +2099,40 @@ func TestModelSupportsHelpBackNavigationAndQuit(t *testing.T) {
 
 func TestDisplayScopeUsesCompactAzureScopeLabels(t *testing.T) {
 	tests := []struct {
-		name      string
-		scopeType pim.ScopeType
-		want      string
+		name       string
+		assignment pim.EligibleAssignment
+		want       string
 	}{
-		{name: "management group", scopeType: pim.ScopeTypeManagementGroup, want: "MG: scope-name"},
-		{name: "subscription", scopeType: pim.ScopeTypeSubscription, want: "Sub: scope-name"},
-		{name: "resource group", scopeType: pim.ScopeTypeResourceGroup, want: "RG: scope-name"},
+		{
+			name:       "management group",
+			assignment: pim.EligibleAssignment{Scope: pim.Scope{DisplayName: "scope-name", Type: pim.ScopeTypeManagementGroup}},
+			want:       "MG: scope-name",
+		},
+		{
+			name:       "subscription",
+			assignment: pim.EligibleAssignment{Scope: pim.Scope{DisplayName: "scope-name", Type: pim.ScopeTypeSubscription}},
+			want:       "Sub: scope-name",
+		},
+		{
+			name:       "resource group without subscription",
+			assignment: pim.EligibleAssignment{Scope: pim.Scope{DisplayName: "scope-name", Type: pim.ScopeTypeResourceGroup}},
+			want:       "RG: scope-name",
+		},
+		{
+			name: "resource group with subscription name",
+			assignment: pim.EligibleAssignment{Scope: pim.Scope{
+				ID:               "/subscriptions/sub-1/resourceGroups/rg-shared",
+				DisplayName:      "rg-shared",
+				Type:             pim.ScopeTypeResourceGroup,
+				SubscriptionName: "gnsn-pbuildinglab-production",
+			}},
+			want: "RG: rg-shared (gnsn-pbuildinglab-production)",
+		},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			assignment := pim.EligibleAssignment{Scope: pim.Scope{DisplayName: "scope-name", Type: test.scopeType}}
-			if got := displayScope(assignment); got != test.want {
+			if got := displayScope(test.assignment); got != test.want {
 				t.Fatalf("expected %q, got %q", test.want, got)
 			}
 		})

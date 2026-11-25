@@ -113,6 +113,7 @@ func (m *Model) cancelPendingWork() {
 	m.cancelGraphConnection(true)
 	m.cancelAuthentication()
 	m.cancelActivation()
+	m.cancelScopePicker()
 	m.cancelDiscovery(true)
 	m.cancelAccountCheck()
 }

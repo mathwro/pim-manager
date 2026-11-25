@@ -228,7 +228,7 @@ func (m Model) viewDetails() string {
 }
 
 func (m Model) detailsNotice() string {
-	if !m.policiesReady && !m.preparingPolicies {
+	if (!m.policiesReady || (m.activeSection == SectionAzureResources && m.err != nil)) && !m.preparingPolicies {
 		return warningStyle.Width(m.contentWidth()).Render("Activation requirements are unavailable; press r to retry discovery.")
 	}
 	return ""
@@ -255,7 +255,7 @@ func (m Model) detailsContent() string {
 	b.WriteString("\n")
 	b.WriteString(mutedStyle.Render(displayScope(assignment)))
 	b.WriteString("\n\n")
-	if !m.policiesReady && !m.preparingPolicies && m.err != nil {
+	if (!m.policiesReady || m.activeSection == SectionAzureResources) && !m.preparingPolicies && m.err != nil {
 		b.WriteString(errorStyle.Width(m.contentWidth() - 2).Render("Error: " + m.err.Error()))
 		b.WriteString("\n\n")
 	}
@@ -283,7 +283,7 @@ func (m Model) detailsContent() string {
 		maximumDuration = "Loading..."
 		justification = "Loading..."
 		authentication = "Loading..."
-	case !m.policiesReady:
+	case !m.policiesReady || (m.activeSection == SectionAzureResources && maximumDuration == ""):
 		maximumDuration = "Unavailable"
 		justification = "Unavailable"
 		authentication = "Unavailable"
@@ -297,6 +297,8 @@ func (m Model) detailsContent() string {
 		{"Source", string(assignment.Source)},
 		{"Assignment type", string(assignment.Kind)},
 		{"Scope type", string(assignment.Scope.Type)},
+		{"Target scope ID", assignment.Scope.ID},
+		{"Eligible scope", m.eligibleScopeDetail(assignment)},
 		{"Assignment ID", assignment.ID},
 		{"Role definition", assignment.RoleDefinitionID},
 		{"Eligibility schedule", assignment.EligibilityScheduleID},
@@ -310,6 +312,16 @@ func (m Model) detailsContent() string {
 		b.WriteString(fmt.Sprintf("%-22s %s\n", mutedStyle.Render(row[0]), row[1]))
 	}
 	return b.String()
+}
+func (m Model) eligibleScopeDetail(assignment pim.EligibleAssignment) string {
+	base, ok := m.scopePicker.basePolicies[assignment.ID]
+	if !ok {
+		return ""
+	}
+	if strings.EqualFold(strings.TrimRight(base.AzureScope, "/"), strings.TrimRight(assignment.AzureScope, "/")) {
+		return ""
+	}
+	return displayScope(base) + " (" + base.AzureScope + ")"
 }
 
 func (m Model) viewActivation() string {
@@ -475,7 +487,7 @@ func (m Model) viewHelp() string {
 		keys  []keyHint
 	}{
 		{"Navigate", []keyHint{{"up/down or j/k", "move"}, {"enter", "open or continue"}, {"esc", "go back"}}},
-		{"Assignments", []keyHint{{"space", "toggle selection"}, {"/", "search"}, {"a", "select visible"}, {"i", "inspect"}}},
+		{"Assignments", []keyHint{{"space", "toggle selection"}, {"s", "narrow Azure scope"}, {"/", "search"}, {"a", "select visible"}, {"i", "inspect"}}},
 		{"Everywhere", []keyHint{{"?", "open this guide"}, {"q", "quit"}, {"ctrl+c", "quit immediately"}}},
 	}
 	for _, section := range sections {
@@ -615,6 +627,9 @@ func (m Model) summaryContent() string {
 	var b strings.Builder
 	for _, result := range m.summary.results {
 		name := displayName(result.Assignment)
+		if result.Assignment.Source == pim.AssignmentSourceAzureResource {
+			name += " (" + displayScope(result.Assignment) + ")"
+		}
 		message := strings.TrimSpace(result.Message)
 		status := string(result.Status)
 		statusText := status
@@ -767,6 +782,11 @@ func displayScope(assignment pim.EligibleAssignment) string {
 		scopeType = "Sub"
 	case pim.ScopeTypeResourceGroup:
 		scopeType = "RG"
+		// Providers fill SubscriptionName (display name or ID) for resource groups.
+		sub := strings.TrimSpace(assignment.Scope.SubscriptionName)
+		if name != "" && sub != "" {
+			return fmt.Sprintf("RG: %s (%s)", name, sub)
+		}
 	}
 	switch {
 	case name != "" && scopeType != "":

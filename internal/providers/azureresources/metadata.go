@@ -3,6 +3,7 @@ package azureresources
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"slices"
 	"sort"
 	"strings"
@@ -13,7 +14,7 @@ import (
 	"github.com/mathwro/pim-manager/internal/pim"
 )
 
-const maxConcurrentScopeRequests = 4
+const maxConcurrentScopeRequests = 8
 
 type activeAssignmentResponse struct {
 	Value    []roleAssignmentScheduleInstance `json:"value"`
@@ -25,6 +26,7 @@ type roleAssignmentScheduleInstance struct {
 }
 
 type roleAssignmentScheduleProperties struct {
+	Scope                           string     `json:"scope"`
 	LinkedRoleEligibilityScheduleID string     `json:"linkedRoleEligibilityScheduleId"`
 	AssignmentType                  string     `json:"assignmentType"`
 	Status                          string     `json:"status"`
@@ -209,13 +211,15 @@ func assignmentScopes(assignments []pim.EligibleAssignment) []string {
 	return scopes
 }
 
-func forEachScope(ctx context.Context, scopes []string, fn func(context.Context, int, string) error) error {
+// forEach runs fn for indices [0, count) with bounded concurrency, cancels the
+// remaining calls on the first error and returns that error.
+func forEach(ctx context.Context, count int, fn func(context.Context, int) error) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	semaphore := make(chan struct{}, maxConcurrentScopeRequests)
 	errCh := make(chan error, 1)
 	var wg sync.WaitGroup
-	for index, scope := range scopes {
+	for index := range count {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -230,7 +234,7 @@ func forEachScope(ctx context.Context, scopes []string, fn func(context.Context,
 				return
 			default:
 			}
-			if err := fn(ctx, index, scope); err != nil {
+			if err := fn(ctx, index); err != nil {
 				select {
 				case errCh <- err:
 				default:
@@ -265,8 +269,20 @@ func (p Provider) discoverActiveAssignments(ctx context.Context, scope string) (
 	return out, nil
 }
 
-func (p Provider) policiesForScope(ctx context.Context, scope string) ([]roleManagementPolicyAssignment, error) {
-	path := fmt.Sprintf("%s/providers/Microsoft.Authorization/roleManagementPolicyAssignments?api-version=%s", scopePathPrefix(scope), arm.AuthorizationAPIVersion)
+func scopedRoleDefinitionID(scope string, roleDefinitionID string) string {
+	guid := resourceName(roleDefinitionID)
+	if guid == "" {
+		return ""
+	}
+	return fmt.Sprintf("%s/providers/Microsoft.Authorization/roleDefinitions/%s", scopePathPrefix(scope), guid)
+}
+
+func (p Provider) policiesForScope(ctx context.Context, scope string, roleFilter string) ([]roleManagementPolicyAssignment, error) {
+	query := fmt.Sprintf("api-version=%s", arm.AuthorizationAPIVersion)
+	if roleFilter != "" {
+		query = fmt.Sprintf("$filter=%s&%s", url.QueryEscape(fmt.Sprintf("roleDefinitionId eq '%s'", roleFilter)), query)
+	}
+	path := fmt.Sprintf("%s/providers/Microsoft.Authorization/roleManagementPolicyAssignments?%s", scopePathPrefix(scope), query)
 	var out []roleManagementPolicyAssignment
 	for path != "" {
 		var response policyAssignmentResponse
@@ -280,11 +296,11 @@ func (p Provider) policiesForScope(ctx context.Context, scope string) ([]roleMan
 }
 
 func applyActiveState(assignments []pim.EligibleAssignment, active []roleAssignmentScheduleInstance, now time.Time) {
-	bySchedule := make(map[string]roleAssignmentScheduleInstance, len(active))
+	bySchedule := make(map[string][]roleAssignmentScheduleInstance, len(active))
 	for _, instance := range active {
 		key := resourceName(instance.Properties.LinkedRoleEligibilityScheduleID)
 		if key != "" && isCurrentActivation(instance, now) {
-			bySchedule[key] = instance
+			bySchedule[key] = append(bySchedule[key], instance)
 		}
 	}
 	for index := range assignments {
@@ -292,37 +308,60 @@ func applyActiveState(assignments []pim.EligibleAssignment, active []roleAssignm
 		if key == "" {
 			continue
 		}
-		instance, ok := bySchedule[key]
-		if !ok {
-			continue
+		targetScope := scopePathPrefix(assignments[index].AzureScope)
+		for _, instance := range bySchedule[key] {
+			instanceScope := scopePathPrefix(instance.Properties.Scope)
+			if instanceScope != "" && !strings.EqualFold(instanceScope, targetScope) {
+				continue
+			}
+			assignments[index].Active = true
+			assignments[index].ActiveUntil = instance.Properties.EndDateTime
+			break
 		}
-		assignments[index].Active = true
-		assignments[index].ActiveUntil = instance.Properties.EndDateTime
 	}
 }
 
+type policyLookup struct {
+	scope      string
+	roleFilter string
+	indices    []int
+	policies   []roleManagementPolicyAssignment
+}
+
+// applyPolicies loads one role-filtered policy per (scope, role); an unfiltered
+// scope listing returns every role's policy and is only used without a role ID.
 func (p Provider) applyPolicies(ctx context.Context, assignments []pim.EligibleAssignment) error {
-	byScope := make(map[string][]int)
+	type lookupKey struct{ scope, role string }
+	positions := make(map[lookupKey]int)
+	var lookups []policyLookup
 	for index := range assignments {
-		key := strings.ToLower(strings.TrimRight(strings.TrimSpace(assignments[index].AzureScope), "/"))
-		byScope[key] = append(byScope[key], index)
+		scope := strings.TrimRight(strings.TrimSpace(assignments[index].AzureScope), "/")
+		if scope == "" {
+			continue
+		}
+		key := lookupKey{scope: strings.ToLower(scopePathPrefix(scope)), role: resourceName(assignments[index].RoleDefinitionID)}
+		position, ok := positions[key]
+		if !ok {
+			position = len(lookups)
+			positions[key] = position
+			lookups = append(lookups, policyLookup{scope: scope, roleFilter: scopedRoleDefinitionID(scope, assignments[index].RoleDefinitionID)})
+		}
+		lookups[position].indices = append(lookups[position].indices, index)
 	}
-	scopes := assignmentScopes(assignments)
-	policiesByScope := make([][]roleManagementPolicyAssignment, len(scopes))
-	if err := forEachScope(ctx, scopes, func(ctx context.Context, index int, scope string) error {
-		policies, err := p.policiesForScope(ctx, scope)
-		policiesByScope[index] = policies
+	if err := forEach(ctx, len(lookups), func(ctx context.Context, index int) error {
+		policies, err := p.policiesForScope(ctx, lookups[index].scope, lookups[index].roleFilter)
+		lookups[index].policies = policies
 		return err
 	}); err != nil {
 		return err
 	}
-	for scopeIndex, scope := range scopes {
-		for _, assignmentIndex := range byScope[strings.ToLower(scope)] {
-			policy, err := policyForAssignment(policiesByScope[scopeIndex], assignments[assignmentIndex].RoleDefinitionID)
+	for _, lookup := range lookups {
+		for _, index := range lookup.indices {
+			policy, err := policyForAssignment(lookup.policies, assignments[index].RoleDefinitionID)
 			if err != nil {
-				return fmt.Errorf("activation policy for %s at %s: %w", assignments[assignmentIndex].DisplayName, scope, err)
+				return fmt.Errorf("activation policy for %s at %s: %w", assignments[index].DisplayName, lookup.scope, err)
 			}
-			assignments[assignmentIndex].ActivationPolicy = policy
+			assignments[index].ActivationPolicy = policy
 		}
 	}
 	return nil

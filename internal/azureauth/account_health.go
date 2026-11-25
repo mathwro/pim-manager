@@ -9,9 +9,11 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/mathwro/pim-manager/internal/arm"
 )
 
-// AccountHealth identifies the account found by a live Microsoft Graph self lookup.
+// AccountHealth identifies the account found by a live Graph or ARM lookup.
 // Finding the account does not establish that its roles or sign-in are active.
 type AccountHealth struct {
 	TenantID          string
@@ -24,8 +26,8 @@ type AccountHealth struct {
 // Other probe errors leave account health unverified.
 var ErrAccountUnavailable = errors.New("account unavailable")
 
-// CheckAccount performs a non-interactive, tenant-scoped live self lookup. Its
-// fifteen-second background deadline covers Azure CLI startup, token acquisition and Graph HTTP.
+// CheckAccount performs a non-interactive, tenant-scoped live account lookup.
+// Its fifteen-second deadline covers Azure CLI, Graph and the optional ARM fallback.
 func (c CLI) CheckAccount(ctx context.Context) (AccountHealth, error) {
 	return c.checkAccount(ctx, &http.Client{})
 }
@@ -74,6 +76,13 @@ func (c CLI) checkAccount(ctx context.Context, client *http.Client) (AccountHeal
 		// not establish account absence (except for a missing self resource).
 		_ = json.NewDecoder(response.Body).Decode(&payload)
 		graphErr := fmt.Errorf("Graph self lookup: HTTP %d: %s: %s", response.StatusCode, payload.Error.Code, payload.Error.Message)
+		if graphInteractionChallenge(response.Header.Get("Www-Authenticate"), payload.Error.Message) {
+			health, err := c.checkARMAccountFallback(ctx, client, tenantID, claims.PrincipalID)
+			if err != nil {
+				return AccountHealth{}, fmt.Errorf("%w; ARM fallback: %w", graphErr, err)
+			}
+			return health, nil
+		}
 		if response.StatusCode == http.StatusNotFound ||
 			(response.StatusCode == http.StatusUnauthorized && strings.EqualFold(payload.Error.Code, "InvalidAuthenticationToken")) ||
 			accountSignInUnavailable(payload.Error.Message) {
@@ -104,20 +113,30 @@ func (c CLI) checkAccount(ctx context.Context, client *http.Client) (AccountHeal
 	}, nil
 }
 
+// graphIdentity holds readable Azure CLI token claims for Graph and ARM tokens.
 type graphIdentity struct {
-	TenantID    string `json:"tid"`
-	PrincipalID string `json:"oid"`
+	TenantID          string `json:"tid"`
+	PrincipalID       string `json:"oid"`
+	DisplayName       string `json:"name"`
+	PreferredUsername string `json:"preferred_username"`
+	UPN               string `json:"upn"`
+	UniqueName        string `json:"unique_name"`
+}
+
+func (i graphIdentity) userPrincipalName() string {
+	for _, value := range []string{i.PreferredUsername, i.UPN, i.UniqueName} {
+		if value = strings.TrimSpace(value); value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func graphIdentityClaims(token string) graphIdentity {
-	// Graph tokens may be opaque. Readable claims are only consistency guards,
+	// Tokens may be opaque. Readable claims are only consistency guards,
 	// not signature validation; Graph validates the token and ARM stays authoritative.
-	parts := strings.Split(token, ".")
-	if len(parts) != 3 {
-		return graphIdentity{}
-	}
-	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
-	if err != nil {
+	payload, ok := jwtPayload(token)
+	if !ok {
 		return graphIdentity{}
 	}
 	var claims graphIdentity
@@ -125,6 +144,19 @@ func graphIdentityClaims(token string) graphIdentity {
 		return graphIdentity{}
 	}
 	return claims
+}
+
+// jwtPayload decodes the payload of a three-part JWT without validating it.
+func jwtPayload(token string) ([]byte, bool) {
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 || parts[0] == "" || parts[2] == "" {
+		return nil, false
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return nil, false
+	}
+	return payload, true
 }
 
 func accountSignInUnavailable(message string) bool {
@@ -147,4 +179,66 @@ func accountSignInUnavailable(message string) bool {
 	return azureCLILoginRequired(errors.New(message)) ||
 		strings.Contains(message, "user account is disabled") ||
 		strings.Contains(message, "user account does not exist")
+}
+
+// graphInteractionChallenge detects Graph Conditional Access / Continuous Access
+// Evaluation (CAE) challenges on the Azure CLI Graph token (for example,
+// InteractionRequired / TokenCreatedWithOutdatedPolicies after PIM role changes).
+// A Graph challenge alone cannot establish whether the ARM sign-in is usable.
+func graphInteractionChallenge(wwwAuthenticate string, message string) bool {
+	lowerAuth := strings.ToLower(wwwAuthenticate)
+	if strings.Contains(lowerAuth, "insufficient_claims") || strings.Contains(lowerAuth, "claims=") {
+		return true
+	}
+	lowerMsg := strings.ToLower(message)
+	return strings.Contains(lowerMsg, "continuous access evaluation") ||
+		strings.Contains(lowerMsg, "interactionrequired") ||
+		strings.Contains(lowerMsg, "tokencreatedwithoutdatedpolicies")
+}
+
+// checkARMAccountFallback verifies live sign-in against ARM when Microsoft Graph
+// rejects Azure CLI's cached Graph token with a CAE claims challenge (which `az`
+// cannot answer non-interactively) while the ARM session remains valid.
+func (c CLI) checkARMAccountFallback(ctx context.Context, client *http.Client, tenantID string, graphPrincipalID string) (AccountHealth, error) {
+	token, err := c.AccessToken(ctx, arm.Resource)
+	if err != nil {
+		return AccountHealth{}, fmt.Errorf("ARM token acquisition: %w", err)
+	}
+	claims := graphIdentityClaims(token)
+	principalID := strings.TrimSpace(claims.PrincipalID)
+	if principalID == "" {
+		return AccountHealth{}, errors.New("ARM token has no principal ID")
+	}
+	if !strings.EqualFold(claims.TenantID, tenantID) {
+		return AccountHealth{}, errors.New("ARM token tenant does not match the selected tenant")
+	}
+	if graphPrincipalID != "" && !strings.EqualFold(graphPrincipalID, principalID) {
+		return AccountHealth{}, errors.New("ARM token principal does not match the Graph token principal")
+	}
+
+	armClient := arm.NewClient(client, c)
+	ctx = arm.WithAccessToken(ctx, token)
+	for path := tenantListURL; path != ""; {
+		var page struct {
+			Value []struct {
+				TenantID string `json:"tenantId"`
+			} `json:"value"`
+			NextLink string `json:"nextLink"`
+		}
+		if err := armClient.Get(ctx, path, &page); err != nil {
+			return AccountHealth{}, fmt.Errorf("ARM tenant listing: %w", err)
+		}
+		for _, tenant := range page.Value {
+			if strings.EqualFold(tenant.TenantID, tenantID) {
+				return AccountHealth{
+					TenantID:          tenantID,
+					PrincipalID:       principalID,
+					DisplayName:       strings.TrimSpace(claims.DisplayName),
+					UserPrincipalName: claims.userPrincipalName(),
+				}, nil
+			}
+		}
+		path = page.NextLink
+	}
+	return AccountHealth{}, errors.New("ARM tenant listing did not include the selected tenant")
 }

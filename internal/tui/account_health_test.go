@@ -105,7 +105,11 @@ func TestAccountHealthSuccessIsAccountFoundNotConnectedOrActive(t *testing.T) {
 }
 
 func TestAccountHealthUnknownFailureDoesNotBlockPinnedARMActivation(t *testing.T) {
-	for _, healthErr := range []error{context.DeadlineExceeded, errors.New("Graph permission denied")} {
+	for _, healthErr := range []error{
+		context.DeadlineExceeded,
+		errors.New("Graph permission denied"),
+		errors.New("Graph self lookup: HTTP 401: InvalidAuthenticationToken: Continuous access evaluation resulted in challenge with result: InteractionRequired and code: TokenCreatedWithOutdatedPolicies"),
+	} {
 		t.Run(healthErr.Error(), func(t *testing.T) {
 			provider := &scriptedProvider{}
 			model, check := accountTestModel(Runtime{

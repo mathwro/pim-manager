@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/mathwro/pim-manager/internal/arm"
 )
 
 func TestCheckAccountFindsLiveTenantScopedSelf(t *testing.T) {
@@ -100,10 +102,10 @@ func TestCheckAccountClassifiesGraphFailuresConservatively(t *testing.T) {
 	}{
 		{"missing self", 404, `{"error":{"code":"Request_ResourceNotFound","message":"Resource does not exist."}}`, true},
 		{"invalid sign-in", 401, `{"error":{"code":"InvalidAuthenticationToken","message":"Access token has expired."}}`, true},
+		{"CAE interaction required", 401, `{"error":{"code":"InvalidAuthenticationToken","message":"Continuous access evaluation resulted in challenge with result: InteractionRequired and code: TokenCreatedWithOutdatedPolicies"}}`, false},
 		{"disabled account", 403, `{"error":{"code":"Forbidden","message":"AADSTS50057: User account is disabled."}}`, true},
 		{"restricted Graph", 403, `{"error":{"code":"Authorization_RequestDenied","message":"Insufficient privileges to complete the operation."}}`, false},
 		{"no delegated permissions", 401, `{"error":{"code":"NoPermissionsInAccessToken","message":"The token contains no permissions."}}`, false},
-		{"throttle", 429, `{"error":{"code":"TooManyRequests","message":"Please retry later."}}`, false},
 		{"service unavailable", 503, `{"error":{"code":"ServiceUnavailable","message":"Service unavailable."}}`, false},
 		{"unstructured unauthorized", 401, `upstream failure`, false},
 		{"invalid JSON", 200, `not-json`, false},
@@ -123,6 +125,161 @@ func TestCheckAccountClassifiesGraphFailuresConservatively(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCheckAccountLeavesWWWAuthenticateClaimsChallengeUnverified(t *testing.T) {
+	cli := accountTokenCLI("opaque-graph-token")
+	got, err := cli.checkAccount(WithTenant(context.Background(), "tenant-1"), accountHTTPClient(func(*http.Request) (*http.Response, error) {
+		resp := accountResponse(http.StatusUnauthorized, `{"error":{"code":"InvalidAuthenticationToken","message":"CompactToken parsing failed"}}`)
+		resp.Header.Set("Www-Authenticate", `Bearer realm="", authorization_uri="https://login.microsoftonline.com/common/oauth2/authorize", error="insufficient_claims", claims="eyJhY2Nlc3NfdG9rZW4iOnt9fQ=="`)
+		return resp, nil
+	}))
+	if err == nil || errors.Is(err, ErrAccountUnavailable) || got != (AccountHealth{}) {
+		t.Fatalf("expected WWW-Authenticate claims challenge to stay unverified (not unavailable), got %#v, %v", got, err)
+	}
+}
+
+func TestCheckAccountFallsBackToLiveARMProbeOnGraphCAEChallenge(t *testing.T) {
+	armTok := graphToken(`{"tid":"tenant-1","oid":"principal-1","name":"Ada Lovelace","upn":"ada@gn.group"}`)
+	const nextPage = "https://management.azure.com/tenants?api-version=2022-12-01&$skiptoken=second"
+
+	tokenCalls := 0
+	armToken := func(context.Context, string, ...string) ([]byte, error) {
+		tokenCalls++
+		return json.Marshal(map[string]string{"accessToken": armTok})
+	}
+	var urls []string
+	got, err := checkAfterGraphChallenge(t, armToken, func(req *http.Request) (*http.Response, error) {
+		urls = append(urls, req.URL.String())
+		if req.Header.Get("Authorization") != "Bearer "+armTok {
+			t.Fatal("tenant listing must use the token whose identity was checked")
+		}
+		switch req.URL.String() {
+		case tenantListURL:
+			return accountResponse(http.StatusOK, `{"value":[{"tenantId":"other"}],"nextLink":"`+nextPage+`"}`), nil
+		case nextPage:
+			return accountResponse(http.StatusOK, `{"value":[{"tenantId":"TENANT-1"}]}`), nil
+		default:
+			t.Fatalf("unexpected tenant listing request: %s", req.URL)
+			return nil, nil
+		}
+	})
+
+	if err != nil {
+		t.Fatalf("expected CAE fallback to succeed without error, got %v", err)
+	}
+	want := AccountHealth{
+		TenantID:          "tenant-1",
+		PrincipalID:       "principal-1",
+		DisplayName:       "Ada Lovelace",
+		UserPrincipalName: "ada@gn.group",
+	}
+	if got != want {
+		t.Fatalf("expected %#v, got %#v", want, got)
+	}
+	if tokenCalls != 1 || len(urls) != 2 {
+		t.Fatalf("expected one ARM token and both tenant pages, got token calls=%d, requests=%v", tokenCalls, urls)
+	}
+}
+
+func TestARMFallbackPreservesTokenAcquisitionFailures(t *testing.T) {
+	for _, tc := range []struct {
+		details     string
+		cause       error
+		unavailable bool
+	}{
+		{"AADSTS50057: User account is disabled.", errors.New("exit status 1"), true},
+		{"AADSTS65001: Consent required. Run az login", errors.New("exit status 1"), false},
+		{"Please run az login", context.DeadlineExceeded, false},
+	} {
+		t.Run(tc.details, func(t *testing.T) {
+			got, err := checkAfterGraphChallenge(t, func(context.Context, string, ...string) ([]byte, error) {
+				return []byte(tc.details), tc.cause
+			}, func(*http.Request) (*http.Response, error) {
+				t.Fatal("must not query tenants without an ARM token")
+				return nil, nil
+			})
+			if got != (AccountHealth{}) || !errors.Is(err, tc.cause) || errors.Is(err, ErrAccountUnavailable) != tc.unavailable {
+				t.Fatalf("expected unavailable=%t with ARM acquisition cause, got %#v, %v", tc.unavailable, got, err)
+			}
+		})
+	}
+}
+
+func TestARMFallbackRequiresMatchingIdentityClaims(t *testing.T) {
+	for _, token := range []string{
+		"opaque",
+		strings.TrimSuffix(graphToken(`{"tid":"tenant-1","oid":"principal-1"}`), ".signature"),
+		graphToken(`{"oid":"principal-1"}`),
+		graphToken(`{"tid":"tenant-1","oid":" "}`),
+		graphToken(`{"tid":"tenant-2","oid":"principal-1"}`),
+		graphToken(`{"tid":"tenant-1","oid":"principal-2"}`),
+	} {
+		t.Run(token, func(t *testing.T) {
+			got, err := checkAfterGraphChallenge(t, accountTokenCLI(token).run, func(*http.Request) (*http.Response, error) {
+				t.Fatal("must not use a token with missing or mismatched identity")
+				return nil, nil
+			})
+			if got != (AccountHealth{}) || err == nil || errors.Is(err, ErrAccountUnavailable) {
+				t.Fatalf("unusable identity must leave health unverified: %#v, %v", got, err)
+			}
+		})
+	}
+}
+
+func TestARMFallbackRequiresVerifiedTenantMembership(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		status   int
+		body     string
+		location string
+	}{
+		{name: "tenant absent", status: 200, body: `{"value":[{"tenantId":"other"}]}`},
+		{name: "unreadable list", status: 200, body: `not JSON`},
+		{name: "empty list", status: 200, body: `{"value":[]}`},
+		{name: "permission denied", status: 403, body: `{"error":{"code":"AuthorizationFailed"}}`},
+		{name: "throttled", status: 429, body: `{"error":{"code":"TooManyRequests"}}`},
+		{name: "untrusted next link", status: 200, body: `{"value":[],"nextLink":"https://other.management.azure.com/tenants"}`},
+		{name: "untrusted redirect", status: 302, location: "https://other.management.azure.com/tenants"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			token := graphToken(`{"tid":"tenant-1","oid":"principal-1"}`)
+			got, err := checkAfterGraphChallenge(t, accountTokenCLI(token).run, func(req *http.Request) (*http.Response, error) {
+				if req.URL.String() != tenantListURL {
+					t.Fatalf("unexpected authenticated request to %s", req.URL)
+				}
+				resp := accountResponse(tc.status, tc.body)
+				if tc.location != "" {
+					resp.Header.Set("Location", tc.location)
+				}
+				return resp, nil
+			})
+			if got != (AccountHealth{}) || err == nil || errors.Is(err, ErrAccountUnavailable) {
+				t.Fatalf("unverified tenant membership must not prove health or sign-in failure: %#v, %v", got, err)
+			}
+		})
+	}
+}
+
+func checkAfterGraphChallenge(t *testing.T, armToken Runner, armHTTP accountRoundTripper) (AccountHealth, error) {
+	t.Helper()
+	cli := NewCLI(func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		switch strings.Join(args, " ") {
+		case "account get-access-token --resource https://graph.microsoft.com/ --tenant tenant-1 --output json":
+			return json.Marshal(map[string]string{"accessToken": graphToken(`{"tid":"tenant-1","oid":"principal-1"}`)})
+		case "account get-access-token --resource " + arm.Resource + " --tenant tenant-1 --output json":
+			return armToken(ctx, name, args...)
+		default:
+			t.Fatalf("unexpected Azure CLI arguments: %v", args)
+			return nil, nil
+		}
+	})
+	return cli.checkAccount(WithTenant(context.Background(), "tenant-1"), accountHTTPClient(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Host == "graph.microsoft.com" {
+			return accountResponse(http.StatusUnauthorized, `{"error":{"code":"InvalidAuthenticationToken","message":"Continuous access evaluation resulted in challenge with result: InteractionRequired and code: TokenCreatedWithOutdatedPolicies"}}`), nil
+		}
+		return armHTTP(req)
+	}))
 }
 
 func TestCheckAccountRejectsReadableTokenIdentityMismatch(t *testing.T) {

@@ -114,6 +114,10 @@ func (c *policyRequirementsARM) Get(_ context.Context, path string, target any) 
 	}
 }
 
+func (c *policyRequirementsARM) Post(context.Context, string, any, any) error {
+	return fmt.Errorf("unexpected POST request")
+}
+
 func (c *policyRequirementsARM) Put(context.Context, string, any, any) error {
 	return fmt.Errorf("unexpected activation submission")
 }

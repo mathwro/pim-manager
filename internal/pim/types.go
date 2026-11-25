@@ -30,9 +30,12 @@ const (
 )
 
 type Scope struct {
-	ID          string
-	DisplayName string
-	Type        ScopeType
+	ID               string
+	DisplayName      string
+	Type             ScopeType
+	SubscriptionName string
+	// ParentID is the containing scope when known (child or descendant discovery).
+	ParentID string
 }
 
 type ActivationPolicy struct {

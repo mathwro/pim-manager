@@ -151,6 +151,7 @@ func principalChangedError(previous, current string) error {
 func (m Model) refreshAccountAndWorkflow() (tea.Model, tea.Cmd) {
 	var commands []tea.Cmd
 	m.recordActivity("Refreshing account and assignments", false)
+	m.resetARMTokens()
 	if cmd := m.startAccountCheck(true); cmd != nil {
 		commands = append(commands, cmd)
 	}

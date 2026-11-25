@@ -1,0 +1,989 @@
+package tui
+
+import (
+	"context"
+	"errors"
+	"slices"
+	"strings"
+	"testing"
+
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/mathwro/pim-manager/internal/azureauth"
+	"github.com/mathwro/pim-manager/internal/pim"
+)
+
+type childScopeTestProvider struct {
+	*scriptedProvider
+	childrenByScope    map[string][]pim.Scope
+	descendantsByScope map[string][]pim.Scope
+	walkByScope        map[string][]pim.Scope
+	policiesByScope    map[string]pim.ActivationPolicy
+	activeScopes       map[string]bool
+	childCalls         []string
+	descCalls          []string
+	walkCalls          []string
+	walkIndexed        [][]pim.Scope
+	prepareScopes      []string
+	childErr           error
+	descErr            error
+	walkErr            error
+	prepareErr         error
+}
+
+func (p *childScopeTestProvider) DiscoverChildScopes(_ context.Context, parent pim.Scope) ([]pim.Scope, error) {
+	p.childCalls = append(p.childCalls, parent.ID)
+	if p.childErr != nil {
+		return nil, p.childErr
+	}
+	return p.children(parent.ID), nil
+}
+
+// children returns scripted children with ParentID set, as the provider does.
+func (p *childScopeTestProvider) children(parentID string) []pim.Scope {
+	children := slices.Clone(p.childrenByScope[parentID])
+	for index := range children {
+		children[index].ParentID = parentID
+	}
+	return children
+}
+
+func (p *childScopeTestProvider) IndexDescendantScopes(_ context.Context, root pim.Scope) ([]pim.Scope, error) {
+	p.descCalls = append(p.descCalls, root.ID)
+	return p.descendantsByScope[root.ID], p.descErr
+}
+
+// WalkDescendantScopes returns walkByScope when scripted, else the whole
+// scripted child tree like a complete eligibility walk.
+func (p *childScopeTestProvider) WalkDescendantScopes(_ context.Context, root pim.Scope, indexed []pim.Scope) ([]pim.Scope, error) {
+	p.walkCalls = append(p.walkCalls, root.ID)
+	p.walkIndexed = append(p.walkIndexed, indexed)
+	if scopes, ok := p.walkByScope[root.ID]; ok {
+		return scopes, p.walkErr
+	}
+	var out []pim.Scope
+	for queue := []string{root.ID}; len(queue) > 0; queue = queue[1:] {
+		for _, child := range p.children(queue[0]) {
+			out = append(out, child)
+			queue = append(queue, child.ID)
+		}
+	}
+	return out, p.walkErr
+}
+
+func (p *childScopeTestProvider) PrepareTargetScope(ctx context.Context, assignment pim.EligibleAssignment) (pim.EligibleAssignment, error) {
+	prepared, err := p.Prepare(ctx, []pim.EligibleAssignment{assignment})
+	if err != nil {
+		return pim.EligibleAssignment{}, err
+	}
+	out := prepared[0]
+	out.Active = p.activeScopes[out.AzureScope]
+	return out, nil
+}
+func (p *childScopeTestProvider) Prepare(_ context.Context, assignments []pim.EligibleAssignment) ([]pim.EligibleAssignment, error) {
+	if p.prepareErr != nil {
+		return nil, p.prepareErr
+	}
+	out := make([]pim.EligibleAssignment, len(assignments))
+	copy(out, assignments)
+	for index := range out {
+		p.prepareScopes = append(p.prepareScopes, out[index].AzureScope)
+		if policy, ok := p.policiesByScope[out[index].AzureScope]; ok {
+			out[index].ActivationPolicy = policy
+		}
+	}
+	return out, nil
+}
+
+func runScopeCommands(model Model, cmd tea.Cmd) Model {
+	if cmd == nil {
+		return model
+	}
+	msg := cmd()
+	switch typed := msg.(type) {
+	case tea.BatchMsg:
+		for _, child := range typed {
+			model = runScopeCommands(model, child)
+		}
+	case assignmentsDiscoveredMsg, assignmentsPreparedMsg, activationCompletedMsg, tenantsCheckedMsg, authenticationCheckedMsg, activationItemStartedMsg, activationItemResultMsg, childScopesDiscoveredMsg, descendantScopesDiscoveredMsg, scopedAssignmentPreparedMsg:
+		next, follow := model.Update(msg)
+		model = runScopeCommands(next.(Model), follow)
+	}
+	return model
+}
+
+func TestNarrowScopeDrillsManagementGroupToResourceGroupAndActivatesChildScope(t *testing.T) {
+	mgScope := "/providers/Microsoft.Management/managementGroups/mg-root"
+	subScope := "/subscriptions/sub-1"
+	rgScope := "/subscriptions/sub-1/resourceGroups/rg-app"
+
+	provider := &childScopeTestProvider{
+		scriptedProvider: &scriptedProvider{
+			discoveries: [][]pim.EligibleAssignment{{{
+				ID:                    "owner-mg",
+				Source:                pim.AssignmentSourceAzureResource,
+				Kind:                  pim.AssignmentKindAzureRole,
+				DisplayName:           "Owner",
+				PrincipalID:           "group-principal",
+				RoleDefinitionID:      mgScope + "/providers/Microsoft.Authorization/roleDefinitions/owner",
+				AzureScope:            mgScope,
+				EligibilityScheduleID: "schedule-mg",
+				Scope:                 pim.Scope{ID: mgScope, DisplayName: "Tenant Root Group", Type: pim.ScopeTypeManagementGroup},
+			}}},
+			results: []pim.ActivationResult{{Status: pim.ActivationStatusActivated, Message: "Provisioned"}},
+		},
+		childrenByScope: map[string][]pim.Scope{
+			mgScope: {
+				{ID: subScope, DisplayName: "Production", Type: pim.ScopeTypeSubscription},
+			},
+			subScope: {
+				{ID: rgScope, DisplayName: "rg-app", Type: pim.ScopeTypeResourceGroup},
+			},
+		},
+		policiesByScope: map[string]pim.ActivationPolicy{
+			mgScope: {MaximumDurationISO: "PT8H"},
+			rgScope: {MaximumDurationISO: "PT2H", JustificationRequired: true, AuthenticationContext: "c1"},
+		},
+	}
+
+	model := NewModel(Runtime{
+		AzureResources: provider,
+		Tenants: tenantProviderFunc(func(context.Context) ([]azureauth.Tenant, error) {
+			return []azureauth.Tenant{{ID: "tenant-1", DisplayName: "Contoso"}}, nil
+		}),
+		ARMAuthentication: func(_ context.Context, _ bool, authCtx string) (azureauth.ARMAuthentication, error) {
+			return azureauth.ARMAuthentication{
+				AccessToken: "pinned-arm-token",
+				PrincipalID: "user-principal",
+				Satisfied:   authCtx == "c1",
+			}, nil
+		},
+	})
+	model = runScopeCommands(model, model.Init())
+
+	// Open Azure Resources and complete initial discovery + parent policy prep.
+	next, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = runScopeCommands(next.(Model), cmd)
+	if model.screen != ScreenAssignments {
+		t.Fatalf("expected ScreenAssignments, got %s", model.screen)
+	}
+
+	// Press 's' to open scope narrowing on the Management Group assignment.
+	next, cmd = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	model = runScopeCommands(next.(Model), cmd)
+	if model.screen != ScreenScope {
+		t.Fatalf("expected ScreenScope, got %s", model.screen)
+	}
+	if !strings.Contains(model.View(), "Production") {
+		t.Fatalf("expected child subscription in scope picker view: %q", model.View())
+	}
+
+	// Move down to "Production" subscription (index 1, after index 0 = current scope) and press Right to drill into Resource Groups.
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyDown})
+	model = next.(Model)
+	next, cmd = model.Update(tea.KeyMsg{Type: tea.KeyRight})
+	model = runScopeCommands(next.(Model), cmd)
+	if !strings.Contains(model.View(), "rg-app") {
+		t.Fatalf("expected child resource group after drilling into subscription: %q", model.View())
+	}
+
+	// Move down to "rg-app" (index 1) and press Enter to choose it as the activation scope.
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyDown})
+	model = next.(Model)
+	next, cmd = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = runScopeCommands(next.(Model), cmd)
+
+	if model.screen != ScreenAssignments {
+		t.Fatalf("expected return to ScreenAssignments after choosing scope, got %s", model.screen)
+	}
+	selected := model.assignmentList.selected()
+	if len(selected) != 1 {
+		t.Fatalf("expected narrowed assignment to be selected, got %#v", selected)
+	}
+	if selected[0].AzureScope != rgScope || selected[0].Scope.ID != rgScope || selected[0].Scope.Type != pim.ScopeTypeResourceGroup {
+		t.Fatalf("expected narrowed scope %s, got %#v", rgScope, selected[0])
+	}
+	if selected[0].ActivationPolicy.MaximumDurationISO != "PT2H" || !selected[0].ActivationPolicy.JustificationRequired || selected[0].ActivationPolicy.AuthenticationContext != "c1" {
+		t.Fatalf("expected child scope policy to be prepared and applied, got %#v", selected[0].ActivationPolicy)
+	}
+	if !strings.Contains(model.View(), "rg-app") {
+		t.Fatalf("expected narrowed scope visible on assignment list: %q", model.View())
+	}
+
+	// Continue to activation form -> enter justification -> review -> activate.
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = next.(Model)
+	if model.screen != ScreenActivation {
+		t.Fatalf("expected ScreenActivation, got %s", model.screen)
+	}
+	model = sendRunes(model, "Scoped deployment fix")
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = next.(Model)
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = next.(Model)
+	if model.screen != ScreenConfirmation {
+		t.Fatalf("expected ScreenConfirmation, got %s (err=%v)", model.screen, model.err)
+	}
+	if !strings.Contains(model.View(), "rg-app") {
+		t.Fatalf("expected narrowed scope in confirmation view: %q", model.View())
+	}
+
+	next, cmd = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = runScopeCommands(next.(Model), cmd)
+	if model.screen != ScreenSummary {
+		t.Fatalf("expected ScreenSummary, got %s (err=%v)", model.screen, model.err)
+	}
+	if len(provider.activated) != 1 {
+		t.Fatalf("expected 1 activation request, got %d", len(provider.activated))
+	}
+	req := provider.activated[0]
+	if req.Assignment.AzureScope != rgScope {
+		t.Fatalf("expected activation AzureScope %s, got %s", rgScope, req.Assignment.AzureScope)
+	}
+	if req.Assignment.EligibilityScheduleID != "schedule-mg" {
+		t.Fatalf("expected parent EligibilityScheduleID preserved, got %s", req.Assignment.EligibilityScheduleID)
+	}
+	if req.Assignment.PrincipalID != "user-principal" {
+		t.Fatalf("expected group-derived principal rewritten to user-principal, got %s", req.Assignment.PrincipalID)
+	}
+	if req.DurationISO != "PT2H" {
+		t.Fatalf("expected default duration from child scope policy PT2H, got %s", req.DurationISO)
+	}
+}
+func TestScopePickerSupportsNavigationFilterResetAndLayoutBounds(t *testing.T) {
+	mgScope := "/providers/Microsoft.Management/managementGroups/mg-root"
+	subScope := "/subscriptions/sub-1"
+	rgAlpha := "/subscriptions/sub-1/resourceGroups/rg-alpha"
+	rgBeta := "/subscriptions/sub-1/resourceGroups/rg-beta"
+
+	provider := &childScopeTestProvider{
+		scriptedProvider: &scriptedProvider{
+			discoveries: [][]pim.EligibleAssignment{{
+				{
+					ID:                    "owner-mg",
+					Source:                pim.AssignmentSourceAzureResource,
+					Kind:                  pim.AssignmentKindAzureRole,
+					DisplayName:           "Owner",
+					RoleDefinitionID:      mgScope + "/providers/Microsoft.Authorization/roleDefinitions/owner",
+					AzureScope:            mgScope,
+					EligibilityScheduleID: "schedule-mg",
+					Scope:                 pim.Scope{ID: mgScope, DisplayName: "Root MG", Type: pim.ScopeTypeManagementGroup},
+				},
+				{
+					ID:                    "reader-rg",
+					Source:                pim.AssignmentSourceAzureResource,
+					Kind:                  pim.AssignmentKindAzureRole,
+					DisplayName:           "Reader",
+					RoleDefinitionID:      rgAlpha + "/providers/Microsoft.Authorization/roleDefinitions/reader",
+					AzureScope:            rgAlpha,
+					EligibilityScheduleID: "schedule-rg",
+					Scope:                 pim.Scope{ID: rgAlpha, DisplayName: "rg-alpha", Type: pim.ScopeTypeResourceGroup},
+				},
+			}},
+		},
+		childrenByScope: map[string][]pim.Scope{
+			mgScope:  {{ID: subScope, DisplayName: "Prod Sub", Type: pim.ScopeTypeSubscription}},
+			subScope: {{ID: rgAlpha, DisplayName: "rg-alpha", Type: pim.ScopeTypeResourceGroup}, {ID: rgBeta, DisplayName: "rg-beta", Type: pim.ScopeTypeResourceGroup}},
+		},
+		policiesByScope: map[string]pim.ActivationPolicy{
+			mgScope:  {MaximumDurationISO: "PT8H"},
+			rgAlpha:  {MaximumDurationISO: "PT4H"},
+			rgBeta:   {MaximumDurationISO: "PT1H", JustificationRequired: true},
+			subScope: {MaximumDurationISO: "PT3H"},
+		},
+	}
+
+	model := NewModel(Runtime{AzureResources: provider})
+	model.selectedTenant = azureauth.Tenant{ID: "tenant-1", DisplayName: "Contoso"}
+	next, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = runScopeCommands(next.(Model), cmd)
+
+	// Leaf Resource Group assignment (index 1) must ignore 's'.
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyDown})
+	model = next.(Model)
+	next, cmd = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	model = next.(Model)
+	if cmd != nil || model.screen != ScreenAssignments {
+		t.Fatalf("expected leaf Resource Group assignment not to open scope picker, screen=%s", model.screen)
+	}
+
+	// Move back to MG assignment (index 0), open scope picker, drill to sub, filter for "beta", select rg-beta.
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyUp})
+	model = next.(Model)
+	next, cmd = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	model = runScopeCommands(next.(Model), cmd)
+
+	for _, size := range []struct{ width, height int }{{96, 30}, {80, 24}, {48, 24}} {
+		resized, _ := model.Update(tea.WindowSizeMsg{Width: size.width, Height: size.height})
+		assertActivityFrameFits(t, resized.(Model).View(), size.width, size.height)
+	}
+
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyDown})
+	model = next.(Model)
+	next, cmd = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'l'}})
+	model = runScopeCommands(next.(Model), cmd)
+
+	// Filter child scopes with '/'
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	model = next.(Model)
+	model = sendRunes(model, "beta")
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = next.(Model)
+
+	options := model.currentScopeOptions()
+	if len(options) != 2 || options[1].ID != rgBeta {
+		t.Fatalf("expected parent + rg-beta in filtered options, got %#v", options)
+	}
+
+	// Press Left/'h' to go back up to MG level, then drill again and pick rg-beta.
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyLeft})
+	model = next.(Model)
+	if len(model.scopePicker.stack) != 1 {
+		t.Fatalf("expected stack popped to 1 level, got %d", len(model.scopePicker.stack))
+	}
+	next, cmd = model.Update(tea.KeyMsg{Type: tea.KeyRight})
+	model = runScopeCommands(next.(Model), cmd)
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyDown})
+	model = next.(Model)
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyDown})
+	model = next.(Model)
+	next, cmd = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = runScopeCommands(next.(Model), cmd)
+
+	if model.assignmentList.items[0].AzureScope != rgBeta {
+		t.Fatalf("expected scope narrowed to %s, got %s", rgBeta, model.assignmentList.items[0].AzureScope)
+	}
+
+	// Inspect details ('i') shows both Target scope ID and original Eligible scope.
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'i'}})
+	model = next.(Model)
+	detailsView := model.View()
+	if !strings.Contains(detailsView, "Root MG") || !strings.Contains(detailsView, "rg-beta") {
+		t.Fatalf("expected details view to show both narrowed target scope and original eligible scope: %q", detailsView)
+	}
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	model = next.(Model)
+
+	// Re-open scope picker on narrowed assignment -> starts from original Root MG -> press Enter on [Eligible] index 0 to reset.
+	next, cmd = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	model = runScopeCommands(next.(Model), cmd)
+	next, cmd = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = runScopeCommands(next.(Model), cmd)
+
+	if model.assignmentList.items[0].AzureScope != mgScope || model.assignmentList.selectedIDs["owner-mg"] {
+		t.Fatalf("expected scope reset to original MG and deselected, got %#v selected=%#v", model.assignmentList.items[0], model.assignmentList.selectedIDs)
+	}
+}
+
+func TestScopePickerIgnoresStaleResponsesAfterTenantSwitch(t *testing.T) {
+	mgScope := "/providers/Microsoft.Management/managementGroups/mg-root"
+	provider := &childScopeTestProvider{
+		scriptedProvider: &scriptedProvider{
+			discoveries: [][]pim.EligibleAssignment{{{
+				ID:          "owner-mg",
+				Source:      pim.AssignmentSourceAzureResource,
+				Kind:        pim.AssignmentKindAzureRole,
+				DisplayName: "Owner",
+				AzureScope:  mgScope,
+				Scope:       pim.Scope{ID: mgScope, DisplayName: "Root MG", Type: pim.ScopeTypeManagementGroup},
+			}}},
+		},
+		childrenByScope: map[string][]pim.Scope{
+			mgScope: {{ID: "/subscriptions/sub-1", DisplayName: "Prod", Type: pim.ScopeTypeSubscription}},
+		},
+		policiesByScope: map[string]pim.ActivationPolicy{
+			mgScope: {MaximumDurationISO: "PT8H"},
+		},
+	}
+	model := NewModel(Runtime{
+		AzureResources: provider,
+		Tenants: tenantProviderFunc(func(context.Context) ([]azureauth.Tenant, error) {
+			return []azureauth.Tenant{{ID: "tenant-1", DisplayName: "One"}, {ID: "tenant-2", DisplayName: "Two"}}, nil
+		}),
+	})
+	model = runScopeCommands(model, model.Init())
+	next, _ := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = next.(Model)
+	next, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = runScopeCommands(next.(Model), cmd)
+
+	// Start scope loading, capture pending cmd before executing it, then switch tenants.
+	next, staleCmd := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	model = next.(Model)
+	model.selectTenant(1)
+
+	model = runScopeCommands(model, staleCmd)
+	if model.screen != ScreenHome || len(model.scopePicker.stack) != 0 {
+		t.Fatalf("expected stale child-scope response ignored after tenant switch, screen=%s stack=%d", model.screen, len(model.scopePicker.stack))
+	}
+}
+
+func TestAzureResourcesSearchesDeepDescendantsAndPreparesOnlyTheChosenTarget(t *testing.T) {
+	mgRoot := "/providers/Microsoft.Management/managementGroups/mg-root"
+	mgPlatform := "/providers/Microsoft.Management/managementGroups/mg-platform"
+	subDeep := "/subscriptions/sub-deep-prod"
+	rgDeep := "/subscriptions/sub-deep-prod/resourceGroups/rg-payments"
+	otherSub := "/subscriptions/sub-unselected"
+
+	provider := &childScopeTestProvider{
+		scriptedProvider: &scriptedProvider{
+			discoveries: [][]pim.EligibleAssignment{{{
+				ID:                    "owner-root",
+				Source:                pim.AssignmentSourceAzureResource,
+				Kind:                  pim.AssignmentKindAzureRole,
+				DisplayName:           "Owner",
+				RoleDefinitionID:      mgRoot + "/providers/Microsoft.Authorization/roleDefinitions/owner",
+				AzureScope:            mgRoot,
+				EligibilityScheduleID: "schedule-root",
+				Scope:                 pim.Scope{ID: mgRoot, DisplayName: "Tenant Root Group", Type: pim.ScopeTypeManagementGroup},
+			}, {
+				ID:                    "reader-other",
+				Source:                pim.AssignmentSourceAzureResource,
+				Kind:                  pim.AssignmentKindAzureRole,
+				DisplayName:           "Reader",
+				RoleDefinitionID:      otherSub + "/providers/Microsoft.Authorization/roleDefinitions/reader",
+				AzureScope:            otherSub,
+				EligibilityScheduleID: "schedule-other",
+				Scope:                 pim.Scope{ID: otherSub, DisplayName: "Unselected Sub", Type: pim.ScopeTypeSubscription},
+			}}},
+		},
+		childrenByScope: map[string][]pim.Scope{
+			mgRoot: {{ID: mgPlatform, DisplayName: "Platform MG", Type: pim.ScopeTypeManagementGroup}},
+		},
+		descendantsByScope: map[string][]pim.Scope{
+			mgRoot: {
+				{ID: mgPlatform, DisplayName: "Platform MG", Type: pim.ScopeTypeManagementGroup},
+				{ID: subDeep, DisplayName: "Payments Production", Type: pim.ScopeTypeSubscription},
+				{ID: rgDeep, DisplayName: "rg-payments", Type: pim.ScopeTypeResourceGroup},
+			},
+		},
+		policiesByScope: map[string]pim.ActivationPolicy{
+			subDeep: {MaximumDurationISO: "PT3H", JustificationRequired: true},
+		},
+	}
+
+	model := NewModel(Runtime{AzureResources: provider})
+	model.selectedTenant = azureauth.Tenant{ID: "tenant-1"}
+	next, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = runScopeCommands(next.(Model), cmd)
+
+	// Press 's' immediately from top menu and search directly for deep subscription several MG levels down.
+	next, cmd = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	model = runScopeCommands(next.(Model), cmd)
+	if model.screen != ScreenScope {
+		t.Fatalf("expected ScreenScope immediately without waiting for policies, got %s", model.screen)
+	}
+
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	model = next.(Model)
+	model = sendRunes(model, "Payments Prod")
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = next.(Model)
+
+	// Auto-focuses first matching descendant (index 1) so Enter selects it directly without navigating intermediate MGs.
+	next, cmd = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = runScopeCommands(next.(Model), cmd)
+
+	if model.screen != ScreenAssignments {
+		t.Fatalf("expected return to ScreenAssignments, got %s (err=%v)", model.screen, model.err)
+	}
+	if model.assignmentList.items[0].AzureScope != subDeep {
+		t.Fatalf("expected deep subscription %s selected directly from top menu, got %s", subDeep, model.assignmentList.items[0].AzureScope)
+	}
+	// Discovery prefetches the two eligible scopes; selecting the target prepares only that scope.
+	if want := []string{mgRoot, otherSub, subDeep}; !slices.Equal(provider.prepareScopes, want) {
+		t.Fatalf("expected base prefetch then Prepare for chosen target %s, got %v", subDeep, provider.prepareScopes)
+	}
+}
+
+func TestScopePickerShowsDisambiguatedSubscriptionOnResourceGroups(t *testing.T) {
+	mgRoot := "/providers/Microsoft.Management/managementGroups/mg-root"
+	subDev := "/subscriptions/sub-dev"
+	subProd := "/subscriptions/sub-prod"
+	rgDev := subDev + "/resourceGroups/rg-shared"
+	rgProd := subProd + "/resourceGroups/rg-shared"
+
+	provider := &childScopeTestProvider{
+		scriptedProvider: &scriptedProvider{
+			discoveries: [][]pim.EligibleAssignment{{{
+				ID:          "owner-root",
+				Source:      pim.AssignmentSourceAzureResource,
+				Kind:        pim.AssignmentKindAzureRole,
+				DisplayName: "Owner",
+				AzureScope:  mgRoot,
+				Scope:       pim.Scope{ID: mgRoot, DisplayName: "Tenant Root Group", Type: pim.ScopeTypeManagementGroup},
+			}}},
+		},
+		descendantsByScope: map[string][]pim.Scope{
+			mgRoot: {
+				{ID: rgDev, DisplayName: "rg-shared", Type: pim.ScopeTypeResourceGroup, SubscriptionName: "gnsn-pbuildinglab-development"},
+				{ID: rgProd, DisplayName: "rg-shared", Type: pim.ScopeTypeResourceGroup, SubscriptionName: "gnsn-pbuildinglab-production"},
+			},
+		},
+	}
+
+	model := NewModel(Runtime{AzureResources: provider})
+	model.selectedTenant = azureauth.Tenant{ID: "tenant-1"}
+	next, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = runScopeCommands(next.(Model), cmd)
+	next, _ = model.Update(tea.WindowSizeMsg{Width: 120, Height: 30})
+	model = next.(Model)
+
+	next, cmd = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	model = runScopeCommands(next.(Model), cmd)
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	model = sendRunes(next.(Model), "rg-shared")
+
+	view := model.View()
+	if !strings.Contains(view, "RG: rg-shared (gnsn-pbuildinglab-development)") || !strings.Contains(view, "RG: rg-shared (gnsn-pbuildinglab-production)") {
+		t.Fatalf("expected resource groups to show subscription names in scope picker, got:\n%s", view)
+	}
+}
+
+type pickerReplies struct {
+	child childScopesDiscoveredMsg
+	index descendantScopesDiscoveredMsg
+	prep  scopedAssignmentPreparedMsg
+}
+
+func (r *pickerReplies) collect(cmd tea.Cmd) {
+	if cmd == nil {
+		return
+	}
+	switch msg := cmd().(type) {
+	case tea.BatchMsg:
+		for _, part := range msg {
+			r.collect(part)
+		}
+	case childScopesDiscoveredMsg:
+		r.child = msg
+	case descendantScopesDiscoveredMsg:
+		r.index = msg
+	case scopedAssignmentPreparedMsg:
+		r.prep = msg
+	}
+}
+
+func openPendingPicker(t *testing.T, provider *childScopeTestProvider) (Model, pickerReplies) {
+	t.Helper()
+	root := pim.Scope{ID: "/providers/Microsoft.Management/managementGroups/root", Type: pim.ScopeTypeManagementGroup}
+	m := NewModel(Runtime{AzureResources: provider})
+	m.selectedTenant.ID = "tenant-a"
+	m.activeSection = SectionAzureResources
+	m.screen = ScreenAssignments
+	m.assignmentList = newAssignmentList([]pim.EligibleAssignment{{ID: "owner", AzureScope: root.ID, Scope: root}})
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("s")})
+	var replies pickerReplies
+	replies.collect(cmd)
+	if next.(Model).screen != ScreenScope || replies.child.parent.ID != root.ID || replies.index.rootID != root.ID {
+		t.Fatal("picker did not start both hierarchy requests")
+	}
+	return next.(Model), replies
+}
+
+func pickerUpdate(m Model, msg tea.Msg) Model {
+	next, _ := m.Update(msg)
+	return next.(Model)
+}
+
+func TestScopeSearchTracksFocusAcrossEitherReplyOrder(t *testing.T) {
+	root := "/providers/Microsoft.Management/managementGroups/root"
+	direct := pim.Scope{ID: "/subscriptions/z", DisplayName: "Z-prod", Type: pim.ScopeTypeSubscription}
+	deep := pim.Scope{ID: "/subscriptions/a", DisplayName: "A-prod", Type: pim.ScopeTypeSubscription}
+	for _, first := range []string{"children", "descendants"} {
+		t.Run(first, func(t *testing.T) {
+			m, replies := openPendingPicker(t, &childScopeTestProvider{
+				childrenByScope:    map[string][]pim.Scope{root: {direct}},
+				descendantsByScope: map[string][]pim.Scope{root: {deep, direct}},
+			})
+			m = sendRunes(m, "/prod")
+			m = pickerUpdate(m, tea.KeyMsg{Type: tea.KeyEnter})
+			var earlier, later tea.Msg = replies.child, replies.index
+			moves := 1
+			if first == "descendants" {
+				earlier, later = later, earlier
+				moves = 2
+			}
+			m = pickerUpdate(m, earlier)
+			for range moves {
+				m = pickerUpdate(m, tea.KeyMsg{Type: tea.KeyDown})
+			}
+			m = pickerUpdate(m, later)
+			if m.scopePicker.query != "prod" {
+				t.Fatalf("reply cleared applied search: %q", m.scopePicker.query)
+			}
+			next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+			m = runScopeCommands(next.(Model), cmd)
+			if m.screen != ScreenAssignments || m.assignmentList.items[0].AzureScope != direct.ID {
+				t.Fatalf("Enter did not select the highlighted scope: %s %s", m.screen, m.assignmentList.items[0].AzureScope)
+			}
+		})
+	}
+}
+
+func TestScopeSearchUsesPastedRunesAndSpace(t *testing.T) {
+	m, _ := openPendingPicker(t, &childScopeTestProvider{})
+	m = sendRunes(m, "/")
+	m = pickerUpdate(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("rg-payments"), Paste: true})
+	m = pickerUpdate(m, tea.KeyMsg{Type: tea.KeySpace})
+	m = pickerUpdate(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("部署"), Paste: true})
+	if m.scopePicker.query != "rg-payments 部署" {
+		t.Fatalf("search did not use literal text: %q", m.scopePicker.query)
+	}
+}
+
+func TestScopeDrillReturnsToValidParentFocus(t *testing.T) {
+	m, replies := openPendingPicker(t, &childScopeTestProvider{})
+	branch := pim.Scope{ID: "/subscriptions/one", DisplayName: "Prod one", Type: pim.ScopeTypeSubscription}
+	other := pim.Scope{ID: "/subscriptions/two", DisplayName: "Prod two", Type: pim.ScopeTypeSubscription}
+	replies.child.children = []pim.Scope{branch}
+	replies.index.descendants = []pim.Scope{branch, other}
+	m = pickerUpdate(m, replies.child)
+	m = pickerUpdate(m, replies.index)
+	m = sendRunes(m, "/prod")
+	m = pickerUpdate(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m = pickerUpdate(m, tea.KeyMsg{Type: tea.KeyDown})
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRight})
+	m = runScopeCommands(next.(Model), cmd)
+	if len(m.scopePicker.stack) != 2 || m.scopePicker.stack[1].parent.ID != other.ID {
+		t.Fatal("did not drill into the second search result")
+	}
+	m = pickerUpdate(m, tea.KeyMsg{Type: tea.KeyLeft})
+	if cursor := m.scopeCursor(); cursor < 0 || cursor >= len(m.currentScopeOptions()) {
+		t.Fatalf("drill left an invalid parent focus: %d", cursor)
+	}
+	next, cmd = m.Update(tea.KeyMsg{Type: tea.KeyRight})
+	runScopeCommands(next.(Model), cmd)
+}
+
+func TestScopePartialIndexKeepsKnownMatchesAndWarnsOnMiss(t *testing.T) {
+	m, replies := openPendingPicker(t, &childScopeTestProvider{walkErr: errors.New("subtree throttled")})
+	replies.child.children = []pim.Scope{{ID: "/subscriptions/direct", DisplayName: "Direct"}}
+	replies.index.descendants = []pim.Scope{{ID: "/subscriptions/nested", DisplayName: "Nested"}}
+	m = pickerUpdate(m, replies.child)
+	next, walk := m.Update(replies.index)
+	m = runScopeCommands(next.(Model), walk)
+	m = sendRunes(m, "/nested")
+	if opts := m.currentScopeOptions(); len(opts) != 2 || opts[1].ID != "/subscriptions/nested" {
+		t.Fatalf("lost a successful subtree: %+v", opts)
+	}
+	m = pickerUpdate(m, tea.KeyMsg{Type: tea.KeyCtrlU})
+	m = sendRunes(m, "direct")
+	if opts := m.currentScopeOptions(); len(opts) != 2 || opts[1].ID != "/subscriptions/direct" {
+		t.Fatalf("partial index hid a known immediate child: %+v", opts)
+	}
+	m = pickerUpdate(m, tea.KeyMsg{Type: tea.KeyCtrlU})
+	m = sendRunes(m, "absent")
+	view := strings.ToLower(m.View())
+	if !strings.Contains(view, "incomplete") || !strings.Contains(view, "subtree throttled") || strings.Contains(view, "no scopes match") {
+		t.Fatalf("search reported a definitive miss after a partial failure:\n%s", view)
+	}
+}
+
+func TestScopeRejectedTargetKeepsBackgroundIndexing(t *testing.T) {
+	for _, reason := range []string{"active", "policy error"} {
+		t.Run(reason, func(t *testing.T) {
+			sub := pim.Scope{ID: "/subscriptions/direct", Type: pim.ScopeTypeSubscription}
+			provider := &childScopeTestProvider{activeScopes: map[string]bool{sub.ID: true}}
+			if reason == "policy error" {
+				provider.prepareErr = errors.New("policy failed")
+			}
+			m, replies := openPendingPicker(t, provider)
+			replies.child.children = []pim.Scope{sub}
+			replies.index.descendants = []pim.Scope{{ID: "/subscriptions/nested", DisplayName: "Nested"}}
+			m = pickerUpdate(m, replies.child)
+			m = pickerUpdate(m, tea.KeyMsg{Type: tea.KeyDown})
+			next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+			m = runScopeCommands(next.(Model), cmd)
+			if m.screen != ScreenScope || m.scopePicker.err == nil {
+				t.Fatal("target was not rejected")
+			}
+			m = pickerUpdate(m, replies.index)
+			m = sendRunes(m, "/nested")
+			if opts := m.currentScopeOptions(); len(opts) != 2 || opts[1].ID != "/subscriptions/nested" {
+				t.Fatalf("index stopped after rejected target: %+v", opts)
+			}
+		})
+	}
+}
+
+func TestScopeRejectsWrongReplyBeforeCancelingCurrentWork(t *testing.T) {
+	m, replies := openPendingPicker(t, &childScopeTestProvider{})
+	badChild, badIndex := replies.child, replies.index
+	badChild.parent.ID, badIndex.rootID = "/wrong-root", "/wrong-root"
+	m = pickerUpdate(m, badChild)
+	m = pickerUpdate(m, badIndex)
+	if !m.scopePicker.loading || !m.scopePicker.descLoading {
+		t.Fatal("unrelated scope reply consumed a pending request")
+	}
+	target := pim.Scope{ID: "/subscriptions/right", Type: pim.ScopeTypeSubscription}
+	replies.child.children = []pim.Scope{target}
+	m = pickerUpdate(m, replies.child)
+	m = pickerUpdate(m, tea.KeyMsg{Type: tea.KeyDown})
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	replies.collect(cmd)
+	m = next.(Model)
+	for _, field := range []string{"scope", "assignment"} {
+		bad := replies.prep
+		if field == "scope" {
+			bad.assignment.AzureScope, bad.assignment.Scope.ID = "/wrong-target", "/wrong-target"
+		} else {
+			bad.assignment.ID = "another role"
+		}
+		m = pickerUpdate(m, bad)
+		if m.screen != ScreenScope || !m.scopePicker.preparing {
+			t.Fatalf("accepted a preparation for the wrong %s", field)
+		}
+	}
+	m = pickerUpdate(m, replies.prep)
+	if m.screen != ScreenAssignments || m.assignmentList.items[0].AzureScope != target.ID {
+		t.Fatal("legitimate completion was discarded")
+	}
+}
+
+func TestScopeRejectsPreResetRepliesAfterReopeningSameRoot(t *testing.T) {
+	m, stale := openPendingPicker(t, &childScopeTestProvider{})
+	base := m.scopePicker.base
+	m.clearTenantWorkflow()
+	m.activeSection, m.screen = SectionAzureResources, ScreenAssignments
+	m.assignmentList = newAssignmentList([]pim.EligibleAssignment{base})
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("s")})
+	var current pickerReplies
+	current.collect(cmd)
+	m = pickerUpdate(next.(Model), stale.child)
+	m = pickerUpdate(m, stale.index)
+	if !m.scopePicker.loading || !m.scopePicker.descLoading {
+		t.Fatal("reopened picker accepted a pre-reset reply for the same tenant and root")
+	}
+	m = pickerUpdate(m, current.child)
+	next, walk := m.Update(current.index)
+	m = runScopeCommands(next.(Model), walk)
+	if m.scopePicker.loading || m.scopePicker.descLoading {
+		t.Fatal("reopened picker ignored its own replies")
+	}
+}
+
+func TestScopeRenamedMatchDoesNotRetargetEnter(t *testing.T) {
+	m, replies := openPendingPicker(t, &childScopeTestProvider{})
+	original := pim.Scope{ID: "/subscriptions/one", DisplayName: "old prod"}
+	replies.child.children = []pim.Scope{original}
+	replies.index.descendants = []pim.Scope{
+		{ID: original.ID, DisplayName: "archived"},
+		{ID: "/subscriptions/two", DisplayName: "other prod"},
+	}
+	m = pickerUpdate(m, replies.child)
+	m = sendRunes(m, "/prod")
+	m = pickerUpdate(m, tea.KeyMsg{Type: tea.KeyEnter})
+	m = pickerUpdate(m, replies.index)
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd != nil || next.(Model).screen != ScreenScope || next.(Model).scopePicker.preparing {
+		t.Fatal("Enter chose a different target after the highlighted row stopped matching")
+	}
+}
+
+func TestScopeSelectsDescendantWithoutImmediateChildren(t *testing.T) {
+	for _, status := range []string{"pending", "failed"} {
+		t.Run(status, func(t *testing.T) {
+			m, replies := openPendingPicker(t, &childScopeTestProvider{childErr: errors.New("children unavailable")})
+			if status == "failed" {
+				m = pickerUpdate(m, replies.child)
+			}
+			deep := pim.Scope{ID: "/subscriptions/deep", DisplayName: "Payments"}
+			replies.index.descendants = []pim.Scope{deep}
+			m = pickerUpdate(m, replies.index)
+			m = sendRunes(m, "/payments")
+			m = pickerUpdate(m, tea.KeyMsg{Type: tea.KeyEnter})
+			next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+			m = runScopeCommands(next.(Model), cmd)
+			if m.screen != ScreenAssignments || m.assignmentList.items[0].AzureScope != deep.ID {
+				t.Fatal("descendant selection depended on the children request")
+			}
+		})
+	}
+}
+
+func TestScopeIndexFeedsWalkAndServesIndexedSubscriptionChildren(t *testing.T) {
+	root := "/providers/Microsoft.Management/managementGroups/root"
+	sub := pim.Scope{ID: "/subscriptions/s1", DisplayName: "Prod", Type: pim.ScopeTypeSubscription, ParentID: root}
+	rg := pim.Scope{ID: "/subscriptions/s1/resourceGroups/rg-app", DisplayName: "rg-app", Type: pim.ScopeTypeResourceGroup, ParentID: sub.ID}
+	provider := &childScopeTestProvider{
+		childrenByScope:    map[string][]pim.Scope{root: {sub}},
+		descendantsByScope: map[string][]pim.Scope{root: {sub, rg}},
+	}
+	m, replies := openPendingPicker(t, provider)
+	m = pickerUpdate(m, replies.child)
+	next, walk := m.Update(replies.index)
+	m = next.(Model)
+	if !m.scopePicker.descLoading {
+		t.Fatal("index reply ended indexing before the eligibility walk")
+	}
+
+	m = pickerUpdate(m, tea.KeyMsg{Type: tea.KeyDown})
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRight})
+	m = runScopeCommands(next.(Model), cmd)
+	if slices.Contains(provider.childCalls, sub.ID) {
+		t.Fatal("drill re-fetched children of a subscription Resource Graph already indexed")
+	}
+	if opts := m.currentScopeOptions(); len(opts) != 2 || opts[1].ID != rg.ID {
+		t.Fatalf("drill did not show indexed resource groups: %+v", opts)
+	}
+
+	m = runScopeCommands(m, walk)
+	if len(provider.walkIndexed) != 1 || len(provider.walkIndexed[0]) != 2 {
+		t.Fatalf("walk did not receive the Resource Graph index: %+v", provider.walkIndexed)
+	}
+	if m.scopePicker.descLoading {
+		t.Fatal("walk reply did not finish indexing")
+	}
+}
+
+func TestScopeFailedIndexWalksUnprunedAndDrillsOverNetwork(t *testing.T) {
+	root := "/providers/Microsoft.Management/managementGroups/root"
+	sub := pim.Scope{ID: "/subscriptions/s1", DisplayName: "Prod", Type: pim.ScopeTypeSubscription, ParentID: root}
+	provider := &childScopeTestProvider{
+		childrenByScope:    map[string][]pim.Scope{root: {sub}},
+		descendantsByScope: map[string][]pim.Scope{root: {sub}},
+		descErr:            errors.New("resource graph page failed"),
+	}
+	m, replies := openPendingPicker(t, provider)
+	m = pickerUpdate(m, replies.child)
+	next, walk := m.Update(replies.index)
+	m = next.(Model)
+	m = pickerUpdate(m, tea.KeyMsg{Type: tea.KeyDown})
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRight})
+	m = runScopeCommands(next.(Model), cmd)
+	if !slices.Contains(provider.childCalls, sub.ID) {
+		t.Fatal("partial index must not stand in for a subscription's children")
+	}
+	runScopeCommands(m, walk)
+	if len(provider.walkIndexed) != 1 || provider.walkIndexed[0] != nil {
+		t.Fatalf("a failed index must not prune the walk: %+v", provider.walkIndexed)
+	}
+}
+
+func TestScopeCompleteIndexIsReusedWhenReopened(t *testing.T) {
+	root := pim.Scope{ID: "/providers/Microsoft.Management/managementGroups/root", DisplayName: "Root", Type: pim.ScopeTypeManagementGroup}
+	child := pim.Scope{ID: "/providers/Microsoft.Management/managementGroups/team", DisplayName: "Team", Type: pim.ScopeTypeManagementGroup, ParentID: root.ID}
+	hidden := pim.Scope{ID: "/subscriptions/pim-only", DisplayName: "PIM only", Type: pim.ScopeTypeSubscription, ParentID: child.ID}
+	owner := pim.EligibleAssignment{ID: "owner", Source: pim.AssignmentSourceAzureResource, DisplayName: "Owner", AzureScope: root.ID, Scope: root}
+	provider := &childScopeTestProvider{
+		scriptedProvider:   &scriptedProvider{discoveries: [][]pim.EligibleAssignment{{owner}, {owner}}},
+		childrenByScope:    map[string][]pim.Scope{root.ID: {child}},
+		descendantsByScope: map[string][]pim.Scope{root.ID: {child}},
+		walkByScope:        map[string][]pim.Scope{root.ID: {child, hidden}},
+	}
+	model := NewModel(Runtime{AzureResources: provider})
+	model.selectedTenant = azureauth.Tenant{ID: "tenant-1"}
+	next, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = runScopeCommands(next.(Model), cmd)
+	next, cmd = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	model = runScopeCommands(next.(Model), cmd)
+	model = pickerUpdate(model, tea.KeyMsg{Type: tea.KeyEsc})
+	childCalls, descCalls, walkCalls := len(provider.childCalls), len(provider.descCalls), len(provider.walkCalls)
+
+	next, cmd = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	model = runScopeCommands(next.(Model), cmd)
+	if len(provider.childCalls) != childCalls || len(provider.descCalls) != descCalls || len(provider.walkCalls) != walkCalls {
+		t.Fatalf("reopening re-fetched the hierarchy: child %v desc %v walk %v", provider.childCalls, provider.descCalls, provider.walkCalls)
+	}
+	if model.scopePicker.descLoading || model.scopePicker.loading {
+		t.Fatal("cached hierarchy still shows loading")
+	}
+	if opts := model.currentScopeOptions(); len(opts) != 2 || opts[1].ID != child.ID {
+		t.Fatalf("cached root children missing: %+v", opts)
+	}
+	model = sendRunes(model, "/pim only")
+	if opts := model.currentScopeOptions(); len(opts) != 2 || opts[1].ID != hidden.ID {
+		t.Fatalf("cached search lost walk-only scopes: %+v", opts)
+	}
+
+	for range 3 { // close search, clear query, leave picker
+		model = pickerUpdate(model, tea.KeyMsg{Type: tea.KeyEsc})
+	}
+	if model.screen != ScreenAssignments {
+		t.Fatalf("expected assignments screen before refresh, got %s", model.screen)
+	}
+	next, cmd = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	model = runScopeCommands(next.(Model), cmd)
+	next, cmd = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	runScopeCommands(next.(Model), cmd)
+	if len(provider.descCalls) != descCalls+1 || len(provider.walkCalls) != walkCalls+1 {
+		t.Fatalf("refresh kept the cached hierarchy: desc %v walk %v", provider.descCalls, provider.walkCalls)
+	}
+}
+
+func azurePrefetchModel(provider *childScopeTestProvider, assignments []pim.EligibleAssignment) (Model, tea.Cmd) {
+	m := NewModel(Runtime{AzureResources: provider})
+	m.selectedTenant = azureauth.Tenant{ID: "tenant-1"}
+	m.activeSection = SectionAzureResources
+	m.screen = ScreenAssignments
+	next, cmd := m.Update(assignmentsDiscoveredMsg{assignments: assignments, tenantID: "tenant-1", checkID: m.discoveryCheck, section: SectionAzureResources})
+	return next.(Model), cmd
+}
+
+func TestAzureDiscoveryPrefetchesPoliciesInBackground(t *testing.T) {
+	sub := pim.Scope{ID: "/subscriptions/sub-1", DisplayName: "Prod", Type: pim.ScopeTypeSubscription}
+	assignment := pim.EligibleAssignment{ID: "reader", Source: pim.AssignmentSourceAzureResource, DisplayName: "Reader", AzureScope: sub.ID, Scope: sub}
+	provider := &childScopeTestProvider{policiesByScope: map[string]pim.ActivationPolicy{sub.ID: {MaximumDurationISO: "PT1H"}}}
+	m, cmd := azurePrefetchModel(provider, []pim.EligibleAssignment{assignment})
+	m = runScopeCommands(m, cmd)
+	if len(provider.prepareScopes) != 1 || m.preparingPolicies || m.err != nil {
+		t.Fatalf("discovery did not prefetch policies: prepares=%v preparing=%t err=%v", provider.prepareScopes, m.preparingPolicies, m.err)
+	}
+	m = pickerUpdate(m, tea.KeyMsg{Type: tea.KeySpace})
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = runScopeCommands(next.(Model), cmd)
+	if m.screen != ScreenActivation || len(provider.prepareScopes) != 1 {
+		t.Fatalf("Enter after prefetch should open the form without reloading: screen=%s prepares=%v", m.screen, provider.prepareScopes)
+	}
+}
+
+func TestAzurePrefetchFailureStaysQuietUntilRequested(t *testing.T) {
+	sub := pim.Scope{ID: "/subscriptions/sub-1", DisplayName: "Prod", Type: pim.ScopeTypeSubscription}
+	assignment := pim.EligibleAssignment{ID: "reader", Source: pim.AssignmentSourceAzureResource, DisplayName: "Reader", AzureScope: sub.ID, Scope: sub}
+	provider := &childScopeTestProvider{prepareErr: errors.New("policy throttled")}
+	m, cmd := azurePrefetchModel(provider, []pim.EligibleAssignment{assignment})
+	m = runScopeCommands(m, cmd)
+	if m.err != nil || m.preparingPolicies {
+		t.Fatalf("background prefetch failure surfaced as a user error: %v", m.err)
+	}
+	m = pickerUpdate(m, tea.KeyMsg{Type: tea.KeySpace})
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = runScopeCommands(next.(Model), cmd)
+	if m.screen != ScreenAssignments || m.err == nil || !strings.Contains(m.err.Error(), "policy throttled") {
+		t.Fatalf("requested load did not report the policy error: screen=%s err=%v", m.screen, m.err)
+	}
+}
+
+func TestAzureEnterJoinsInFlightPrefetch(t *testing.T) {
+	sub := pim.Scope{ID: "/subscriptions/sub-1", DisplayName: "Prod", Type: pim.ScopeTypeSubscription}
+	assignment := pim.EligibleAssignment{ID: "reader", Source: pim.AssignmentSourceAzureResource, DisplayName: "Reader", AzureScope: sub.ID, Scope: sub}
+	provider := &childScopeTestProvider{policiesByScope: map[string]pim.ActivationPolicy{sub.ID: {MaximumDurationISO: "PT1H"}}}
+	m, prefetch := azurePrefetchModel(provider, []pim.EligibleAssignment{assignment})
+	m = pickerUpdate(m, tea.KeyMsg{Type: tea.KeySpace})
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = runScopeCommands(next.(Model), cmd)
+	if len(provider.prepareScopes) != 0 || !m.waitingForPolicies {
+		t.Fatalf("Enter restarted an in-flight prefetch instead of waiting for it: %v", provider.prepareScopes)
+	}
+	m = runScopeCommands(m, prefetch)
+	if m.screen != ScreenActivation || len(provider.prepareScopes) != 1 {
+		t.Fatalf("joined prefetch did not open the form: screen=%s prepares=%v err=%v", m.screen, provider.prepareScopes, m.err)
+	}
+}
+
+func TestRefreshDropsCachedARMTokens(t *testing.T) {
+	resets := 0
+	m := NewModel(Runtime{AzureResources: &childScopeTestProvider{}, ResetARMTokens: func() { resets++ }})
+	m.selectedTenant = azureauth.Tenant{ID: "tenant-1"}
+	m.activeSection = SectionAzureResources
+	m.screen = ScreenAssignments
+	m = pickerUpdate(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	if resets == 0 {
+		t.Fatal("refresh kept cached ARM read tokens")
+	}
+	resets = 0
+	m.clearAccountWorkflow()
+	if resets == 0 {
+		t.Fatal("account invalidation kept cached ARM read tokens")
+	}
+}

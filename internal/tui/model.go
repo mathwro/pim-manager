@@ -27,6 +27,7 @@ const (
 	ScreenGraphConnect Screen = "graph_connect"
 	ScreenHome         Screen = "home"
 	ScreenAssignments  Screen = "assignments"
+	ScreenScope        Screen = "scope"
 	ScreenDetails      Screen = "details"
 	ScreenActivation   Screen = "activation"
 	ScreenConfirmation Screen = "confirmation"
@@ -55,6 +56,8 @@ type Runtime struct {
 	GraphConnected      func(context.Context) bool
 	GraphAuthentication func(context.Context, bool, string) (azureauth.ARMAuthentication, error)
 	ResetGraph          func()
+	// ResetARMTokens drops cached read-only ARM tokens (refresh, account or principal change).
+	ResetARMTokens func()
 }
 
 type AssignmentProvider interface {
@@ -135,10 +138,15 @@ type Model struct {
 	policiesReady          bool
 	preparingPolicies      bool
 	waitingForPolicies     bool
-	err                    error
-	helpVisible            bool
-	width                  int
-	height                 int
+	// policyTargets maps assignment IDs to the scopes of the in-flight Azure policy load.
+	policyTargets map[string]string
+	// policyPrefetch marks that in-flight load as a background prefetch nobody waits on.
+	policyPrefetch bool
+	scopePicker    scopePickerState
+	err            error
+	helpVisible    bool
+	width          int
+	height         int
 }
 
 type activationFormField int
@@ -154,7 +162,10 @@ type discoveryKey struct {
 }
 
 type discoveryEntry struct {
-	assignments   []pim.EligibleAssignment
+	assignments  []pim.EligibleAssignment
+	basePolicies map[string]pim.EligibleAssignment
+	// scopeIndexes holds complete descendant hierarchies by root scope key.
+	scopeIndexes  map[string][]pim.Scope
 	policiesReady bool
 	generation    int
 }
@@ -304,7 +315,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.resizeComponents()
 		return m, nil
 	case spinner.TickMsg:
-		if !m.loading && !m.checkingAuthentication && !m.checkingTenants && !m.checkingAccount && !m.preparingPolicies && !m.waitingForPolicies && !m.graphConnecting {
+		if !m.loading && !m.checkingAuthentication && !m.checkingTenants && !m.checkingAccount && !m.preparingPolicies && !m.waitingForPolicies && !m.graphConnecting && !m.scopePicker.loading && !m.scopePicker.preparing && !m.scopePicker.descLoading {
 			return m, nil
 		}
 		var cmd tea.Cmd
@@ -321,6 +332,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.accountChecked(typed)
 	case graphConnectedMsg:
 		return m.graphConnected(typed)
+	case childScopesDiscoveredMsg:
+		return m.handleChildScopesDiscovered(typed)
+	case descendantScopesDiscoveredMsg:
+		return m.handleDescendantScopesDiscovered(typed)
+	case scopedAssignmentPreparedMsg:
+		return m.handleScopedAssignmentPrepared(typed)
 	case assignmentsDiscoveredMsg:
 		key := discoveryKey{tenantID: typed.tenantID, section: typed.section}
 		if typed.checkID != m.discoveryCheck || typed.tenantID != m.selectedTenant.ID || typed.section != m.activeSection {
@@ -341,11 +358,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.recordActivity(fmt.Sprintf("Assignments ready: %d", len(typed.assignments)), false)
 		entry := discoveryEntry{assignments: typed.assignments, policiesReady: true, generation: typed.checkID}
+		if typed.section == SectionAzureResources {
+			m.syncBaseAssignments(typed.assignments)
+			entry.basePolicies = m.scopePicker.basePolicies
+		} else {
+			m.scopePicker.basePolicies = nil
+		}
 		m.assignmentList = newAssignmentList(typed.assignments)
 		m.listCursor = 0
 		m.policiesReady = true
 		m.preparingPolicies = false
-		if preparer, ok := m.providerForSection(typed.section).(assignmentPreparer); ok {
+		if preparer, ok := m.providerForSection(typed.section).(assignmentPreparer); ok && typed.section != SectionAzureResources {
 			entry.policiesReady = false
 			m.policiesReady = false
 			m.preparingPolicies = true
@@ -366,39 +389,74 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmd := m.startAccountCheck(false)
 			return m, cmd
 		}
+		if typed.section == SectionAzureResources {
+			// Filtered per-role policy requests are small, so load them before the user asks.
+			cmd := m.prepareAzureAssignmentsIfNeeded(typed.assignments, false)
+			m.policyPrefetch = cmd != nil
+			return m, cmd
+		}
 		return m, nil
 	case assignmentsPreparedMsg:
 		entry, ok := m.discoveryCache[typed.key]
-		if !ok || entry.generation != typed.generation || typed.key.tenantID != m.selectedTenant.ID || typed.key.section != m.activeSection {
+		if !ok || m.discoveryCancelKey != typed.key || entry.generation != typed.generation || typed.key.tenantID != m.selectedTenant.ID || typed.key.section != m.activeSection {
 			return m, nil
 		}
+		background := m.policyPrefetch
 		m.cancelDiscovery(false)
 		m.endOperation("policies")
 		if typed.err != nil {
-			m.recordActivity("Activation requirements failed", true)
 			if accountUnavailableError(typed.err) {
+				m.recordActivity("Activation requirements failed", true)
 				m.markAccountUnavailable(typed.err)
 				return m, nil
 			}
-			delete(m.discoveryCache, typed.key)
 			m.preparingPolicies = false
 			m.waitingForPolicies = false
+			if background {
+				// Nobody asked yet; the next inspection or selection retries and reports it.
+				m.recordActivity("Activation requirements prefetch failed; loading on demand", false)
+				return m, nil
+			}
+			m.recordActivity("Activation requirements failed", true)
+			if typed.key.section != SectionAzureResources {
+				delete(m.discoveryCache, typed.key)
+				m.policiesReady = false
+			}
 			m.err = typed.err
 			return m, nil
 		}
 		m.recordActivity("Activation requirements ready", false)
-		entry.assignments = typed.assignments
-		entry.policiesReady = true
-		m.discoveryCache[typed.key] = entry
-		selected := m.assignmentList.selectedIDs
-		m.assignmentList = newAssignmentList(typed.assignments)
-		for id, enabled := range selected {
-			if enabled {
-				m.assignmentList.selectedIDs[id] = true
+		if typed.key.section == SectionAzureResources {
+			byID := make(map[string]*pim.EligibleAssignment, len(typed.assignments))
+			for i := range typed.assignments {
+				prepared := &typed.assignments[i]
+				byID[prepared.ID] = prepared
+				m.updateBaseAssignmentPolicy(prepared)
 			}
+			for i := range m.assignmentList.items {
+				target := &m.assignmentList.items[i]
+				if prepared := byID[target.ID]; prepared != nil && sameAzureScope(target.AzureScope, prepared.AzureScope) {
+					target.ActivationPolicy = prepared.ActivationPolicy
+				}
+			}
+			entry.assignments = m.assignmentList.items
+			m.discoveryCache[typed.key] = entry
+		} else {
+			entry.assignments = typed.assignments
+			entry.policiesReady = true
+			m.discoveryCache[typed.key] = entry
+			selected := m.assignmentList.selectedIDs
+			m.assignmentList = newAssignmentList(typed.assignments)
+			for id, enabled := range selected {
+				if enabled {
+					m.assignmentList.selectedIDs[id] = true
+				}
+			}
+			m.clampCursor()
 		}
-		m.clampCursor()
-		m.policiesReady = true
+		if typed.key.section != SectionAzureResources {
+			m.policiesReady = true
+		}
 		m.preparingPolicies = false
 		m.err = nil
 		if m.waitingForPolicies {
@@ -645,7 +703,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 	}
-	if key.String() == "r" && !m.acceptingText() && !m.checkingAuthentication && m.screen != ScreenGraphConnect && m.screen != ScreenTenants && m.screen != ScreenSummary && m.screen != ScreenProgress {
+	if key.String() == "r" && !m.acceptingText() && !m.checkingAuthentication && m.screen != ScreenGraphConnect && m.screen != ScreenTenants && m.screen != ScreenSummary && m.screen != ScreenProgress && m.screen != ScreenScope {
 		return m.refreshAccountAndWorkflow()
 	}
 
@@ -658,6 +716,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.updateGraphConnect(key)
 	case ScreenAssignments:
 		return m.updateAssignments(key)
+	case ScreenScope:
+		return m.updateScope(key)
 	case ScreenDetails:
 		return m.updateDetails(key)
 	case ScreenActivation:
@@ -684,6 +744,8 @@ func (m Model) View() string {
 		content = m.viewGraphConnect()
 	case ScreenAssignments:
 		content = m.viewAssignments()
+	case ScreenScope:
+		content = m.viewScope()
 	case ScreenDetails:
 		content = m.viewDetails()
 	case ScreenActivation:
@@ -773,6 +835,10 @@ func (m Model) updateAssignments(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.waitingForPolicies {
 		if key.Type == tea.KeyEsc {
 			m.waitingForPolicies = false
+			if m.activeSection == SectionAzureResources {
+				m.cancelDiscovery(false)
+				m.preparingPolicies = false
+			}
 		}
 		return m, nil
 	}
@@ -813,7 +879,8 @@ func (m Model) updateAssignments(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case tea.KeySpace:
 		m.toggleFocusedAssignment()
 	case tea.KeyEnter:
-		if len(m.assignmentList.selected()) == 0 {
+		selected := m.assignmentList.selected()
+		if len(selected) == 0 {
 			m.err = fmt.Errorf("select at least one assignment to continue")
 			return m, nil
 		}
@@ -825,6 +892,9 @@ func (m Model) updateAssignments(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			m.err = errors.New("activation requirements are unavailable; press r to retry discovery")
 			return m, nil
+		}
+		if cmd := m.prepareAzureAssignmentsIfNeeded(selected, true); cmd != nil {
+			return m, cmd
 		}
 		return m.openActivationForm()
 	case tea.KeyRunes:
@@ -839,12 +909,17 @@ func (m Model) updateAssignments(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "k":
 			m.moveAssignment(-1)
 		case "i":
-			if len(m.assignmentList.filtered(m.query)) > 0 {
+			if focused, ok := m.focusedAssignment(); ok {
 				m.screen = ScreenDetails
 				m.detailsViewport.GotoTop()
+				if cmd := m.prepareAzureAssignmentsIfNeeded([]pim.EligibleAssignment{focused}, false); cmd != nil {
+					return m, cmd
+				}
 			}
 		case "a":
 			m.toggleAllFiltered()
+		case "s":
+			return m.openScopePicker()
 		}
 	}
 	return m, nil
@@ -1144,9 +1219,10 @@ func (m Model) beginDiscovery(section Section, refresh bool) (tea.Model, tea.Cmd
 		}
 		m.loading = false
 		m.err = nil
+		m.scopePicker.basePolicies = entry.basePolicies
 		m.assignmentList = newAssignmentList(entry.assignments)
 		m.policiesReady = entry.policiesReady
-		m.preparingPolicies = !entry.policiesReady
+		m.preparingPolicies = !entry.policiesReady || m.discoveryCancelKey == key
 		m.waitingForPolicies = false
 		m.recordActivity(fmt.Sprintf("Cached assignments ready: %d", len(entry.assignments)), false)
 		return m, accountCheck
@@ -1171,17 +1247,23 @@ func (m Model) beginDiscovery(section Section, refresh bool) (tea.Model, tea.Cmd
 }
 
 func (m Model) openActivationForm() (tea.Model, tea.Cmd) {
+	if err := m.prepareActivationForm(); err != nil {
+		m.err = err
+		return m, nil
+	}
 	m.formField = formFieldJustification
-	m.prepareActivationForm()
 	m.screen = ScreenActivation
 	m.err = nil
 	return m.focusJustification()
 }
 
-func (m *Model) prepareActivationForm() {
+func (m *Model) prepareActivationForm() error {
 	selected := m.assignmentList.selected()
 	durations := make(map[string]string, len(selected))
 	for _, assignment := range selected {
+		if m.activeSection == SectionAzureResources && strings.TrimSpace(assignment.ActivationPolicy.MaximumDurationISO) == "" {
+			return fmt.Errorf("activation requirements are unavailable for %s; press r to retry discovery", displayName(assignment))
+		}
 		value := strings.TrimSpace(m.form.durations[assignment.ID])
 		if value == "" {
 			value = assignment.ActivationPolicy.MaximumDurationISO
@@ -1192,6 +1274,7 @@ func (m *Model) prepareActivationForm() {
 	if m.durationIndex >= len(selected) {
 		m.durationIndex = max(0, len(selected)-1)
 	}
+	return nil
 }
 
 func (m Model) focusJustification() (tea.Model, tea.Cmd) {
@@ -1239,7 +1322,7 @@ func (m *Model) syncForm() {
 }
 
 func (m Model) acceptingText() bool {
-	return m.searchMode || m.screen == ScreenActivation
+	return m.searchMode || m.scopePicker.searchMode || m.screen == ScreenActivation
 }
 
 func (m *Model) selectTenant(index int) {
@@ -1267,8 +1350,19 @@ func (m *Model) selectTenant(index int) {
 	m.tenantErr = nil
 }
 
+// resetARMTokens drops cached read-only ARM tokens so the next lookup asks
+// Azure CLI again; activation always fetches its own checked token.
+func (m *Model) resetARMTokens() {
+	if m.runtime.ResetARMTokens != nil {
+		m.runtime.ResetARMTokens()
+	}
+}
+
 func (m *Model) clearTenantWorkflow() {
 	m.cancelGraphConnection(true)
+	m.resetARMTokens()
+	m.cancelScopePicker()
+	m.scopePicker = scopePickerState{checkID: m.scopePicker.checkID, descCheckID: m.scopePicker.descCheckID}
 	m.cancelAuthentication()
 	m.cancelActivation()
 	m.cancelDiscovery(true)
@@ -1427,12 +1521,14 @@ func (m *Model) cancelDiscovery(deletePending bool) {
 		m.discoveryCancel()
 		m.discoveryCancel = nil
 	}
-	if deletePending {
+	if deletePending && !m.discoveryCache[m.discoveryCancelKey].policiesReady {
 		delete(m.discoveryCache, m.discoveryCancelKey)
 	}
 	m.endOperation("discovery")
 	m.endOperation("policies")
 	m.discoveryCancelKey = discoveryKey{}
+	m.policyTargets = nil
+	m.policyPrefetch = false
 }
 
 func (m Model) prepareAssignments(ctx context.Context, preparer assignmentPreparer, key discoveryKey, generation int, assignments []pim.EligibleAssignment) tea.Cmd {
@@ -1440,6 +1536,67 @@ func (m Model) prepareAssignments(ctx context.Context, preparer assignmentPrepar
 		prepared, err := preparer.Prepare(ctx, assignments)
 		return assignmentsPreparedMsg{assignments: prepared, key: key, generation: generation, err: err}
 	}
+}
+
+func sameAzureScope(a, b string) bool {
+	return strings.EqualFold(strings.TrimRight(a, "/"), strings.TrimRight(b, "/"))
+}
+
+func (m *Model) prepareAzureAssignmentsIfNeeded(targets []pim.EligibleAssignment, wait bool) tea.Cmd {
+	if m.activeSection != SectionAzureResources {
+		return nil
+	}
+	preparer, ok := m.providerForSection(m.activeSection).(assignmentPreparer)
+	if !ok {
+		return nil
+	}
+	var missing []pim.EligibleAssignment
+	for _, item := range targets {
+		if strings.TrimSpace(item.ActivationPolicy.MaximumDurationISO) == "" {
+			missing = append(missing, item)
+		}
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	key := discoveryKey{tenantID: m.selectedTenant.ID, section: m.activeSection}
+	if m.preparingPolicies && m.discoveryCancelKey == key && m.coversPolicyTargets(missing) {
+		// Join the in-flight load instead of restarting it; the caller now owns its outcome.
+		m.policyPrefetch = false
+		m.waitingForPolicies = m.waitingForPolicies || wait
+		m.err = nil
+		return m.spinner.Tick
+	}
+	entry, ok := m.discoveryCache[key]
+	if !ok {
+		entry = discoveryEntry{assignments: m.assignmentList.items, basePolicies: m.scopePicker.basePolicies, policiesReady: true}
+	}
+	m.cancelDiscovery(false)
+	m.discoveryCheck++
+	entry.generation = m.discoveryCheck
+	m.discoveryCache[key] = entry
+	m.preparingPolicies = true
+	m.waitingForPolicies = wait
+	m.err = nil
+	m.beginOperation("policies")
+	m.recordActivity("Loading activation requirements", false)
+	ctx, cancel := context.WithCancel(azureauth.WithTenant(context.Background(), m.selectedTenant.ID))
+	m.discoveryCancel = cancel
+	m.discoveryCancelKey = key
+	m.policyTargets = make(map[string]string, len(missing))
+	for _, item := range missing {
+		m.policyTargets[item.ID] = scopeIDKey(item.AzureScope)
+	}
+	return tea.Batch(m.prepareAssignments(ctx, preparer, key, entry.generation, missing), m.spinner.Tick)
+}
+
+func (m Model) coversPolicyTargets(items []pim.EligibleAssignment) bool {
+	for _, item := range items {
+		if scope, ok := m.policyTargets[item.ID]; !ok || scope != scopeIDKey(item.AzureScope) {
+			return false
+		}
+	}
+	return true
 }
 
 func (m *Model) snapshotBatchInputs(selected []pim.EligibleAssignment, justification string, durations map[string]string) {
