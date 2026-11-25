@@ -6,7 +6,7 @@
 
 Running `pim-manager` opens an interactive Bubble Tea TUI. It validates the existing Azure CLI session and, when multiple tenants are available, asks which tenant to use before showing the PIM areas. Azure Resources handles eligible Azure RBAC assignments across management groups, subscriptions, and resource groups. Entra Roles handles eligible directory roles, and Groups handles eligible PIM group member and owner assignments through a separate session-only Microsoft Graph browser connection.
 
-In the Azure Resources assignment list, press `/` to search by role, subscription or management group name or ID, or resource group scope. Search is case-insensitive and accepts part of a name or ID.
+In the Azure Resources assignment list, press `/` to search by role, subscription or management group name or ID, or resource group scope. Search is case-insensitive and accepts part of a name or ID. For management group and subscription eligibilities, press `s` to narrow activation to a child management group, subscription, or resource group (`eligibleChildResources`); use Right/`l` to drill into children, Left/`h` to go back up, `/` to filter, and Enter to choose the target scope (or select `[Eligible]` at the root to reset).
 
 Press `i` to inspect an assignment. Details scroll with arrow keys or `j`/`k`, keeping long identifiers and policy diagnostics accessible above the activity dock; press Esc to return.
 

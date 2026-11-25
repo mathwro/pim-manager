@@ -337,6 +337,136 @@ func TestDiscoverCancelsQueuedScopedActiveLookupsAfterError(t *testing.T) {
 	}
 }
 
+func TestDiscoverKeepsParentSelectableWhenOnlyChildScopeIsActive(t *testing.T) {
+	parentScope := "/subscriptions/sub-1"
+	childScope := "/subscriptions/sub-1/resourceGroups/rg-prod"
+	eligibilityPath := "/providers/Microsoft.Authorization/roleEligibilityScheduleInstances?$filter=asTarget%28%29&api-version=2020-10-01"
+	activePath := parentScope + "/providers/Microsoft.Authorization/roleAssignmentScheduleInstances?$filter=asTarget%28%29&api-version=2020-10-01"
+	end := time.Now().UTC().Add(time.Hour)
+	armClient := newProviderFakeARM(map[string]any{
+		eligibilityPath: eligibilityResponse{Value: []roleEligibilityScheduleInstance{{
+			ID: "eligibility-parent",
+			Properties: roleEligibilityProperties{
+				Scope:                     parentScope,
+				RoleDefinitionID:          parentScope + "/providers/Microsoft.Authorization/roleDefinitions/owner",
+				RoleEligibilityScheduleID: "schedule-parent",
+			},
+		}}},
+		activePath: activeAssignmentResponse{Value: []roleAssignmentScheduleInstance{{
+			Properties: roleAssignmentScheduleProperties{
+				Scope:                           childScope,
+				LinkedRoleEligibilityScheduleID: "schedule-parent",
+				AssignmentType:                  "Activated",
+				Status:                          "Provisioned",
+				EndDateTime:                     &end,
+			},
+		}}},
+	})
+
+	assignments, err := NewProvider(armClient).Discover(context.Background())
+	if err != nil {
+		t.Fatalf("Discover returned error: %v", err)
+	}
+	if len(assignments) != 1 {
+		t.Fatalf("expected 1 assignment, got %d", len(assignments))
+	}
+	if assignments[0].Active {
+		t.Fatalf("expected parent scope to remain selectable when only child scope %s is active, got Active=true", childScope)
+	}
+}
+
+func TestDiscoverChildScopesFiltersAndFollowsPagination(t *testing.T) {
+	mgScope := "/providers/Microsoft.Management/managementGroups/mg-root"
+	mgFirst := mgScope + "/providers/Microsoft.Authorization/eligibleChildResources?api-version=2020-10-01"
+	mgNext := "https://management.azure.com" + mgScope + "/providers/Microsoft.Authorization/eligibleChildResources?$skiptoken=page2"
+	subScope := "/subscriptions/sub-1/"
+	subFiltered := "/subscriptions/sub-1/providers/Microsoft.Authorization/eligibleChildResources?$filter=resourceType+eq+%27resourcegroup%27&api-version=2020-10-01"
+
+	armClient := newProviderFakeARM(map[string]any{
+		mgFirst: childResourceResponse{
+			Value: []eligibleChildResource{
+				{ID: "/providers/Microsoft.Management/managementGroups/mg-child", Name: "Child MG", Type: "managementgroup"},
+			},
+			NextLink: mgNext,
+		},
+		mgNext: childResourceResponse{
+			Value: []eligibleChildResource{
+				{ID: "/subscriptions/sub-1", Name: "Prod Subscription", Type: "subscription"},
+			},
+		},
+		subFiltered: childResourceResponse{
+			Value: []eligibleChildResource{
+				{ID: "/subscriptions/sub-1/resourceGroups/rg-app", Name: "rg-app", Type: "resourcegroup"},
+			},
+		},
+	})
+	provider := NewProvider(armClient)
+
+	mgChildren, err := provider.DiscoverChildScopes(context.Background(), pim.Scope{
+		ID:   mgScope,
+		Type: pim.ScopeTypeManagementGroup,
+	})
+	if err != nil {
+		t.Fatalf("DiscoverChildScopes(MG) returned error: %v", err)
+	}
+	wantMG := []pim.Scope{
+		{ID: "/providers/Microsoft.Management/managementGroups/mg-child", DisplayName: "Child MG", Type: pim.ScopeTypeManagementGroup},
+		{ID: "/subscriptions/sub-1", DisplayName: "Prod Subscription", Type: pim.ScopeTypeSubscription},
+	}
+	if !slices.Equal(mgChildren, wantMG) {
+		t.Fatalf("unexpected MG children: got %#v, want %#v", mgChildren, wantMG)
+	}
+
+	subChildren, err := provider.DiscoverChildScopes(context.Background(), pim.Scope{
+		ID:   subScope,
+		Type: pim.ScopeTypeSubscription,
+	})
+	if err != nil {
+		t.Fatalf("DiscoverChildScopes(Subscription) returned error: %v", err)
+	}
+	wantSub := []pim.Scope{
+		{ID: "/subscriptions/sub-1/resourceGroups/rg-app", DisplayName: "rg-app", Type: pim.ScopeTypeResourceGroup},
+	}
+	if !slices.Equal(subChildren, wantSub) {
+		t.Fatalf("unexpected Subscription children: got %#v, want %#v", subChildren, wantSub)
+	}
+	if armClient.pinCalls != 2 {
+		t.Fatalf("expected one token pin per DiscoverChildScopes call, got %d", armClient.pinCalls)
+	}
+}
+func TestDiscoverChildScopesSkipsIndividualResourcesAndPropagatesErrors(t *testing.T) {
+	subScope := "/subscriptions/sub-1"
+	subFiltered := subScope + "/providers/Microsoft.Authorization/eligibleChildResources?$filter=resourceType+eq+%27resourcegroup%27&api-version=2020-10-01"
+	armClient := newProviderFakeARM(map[string]any{
+		subFiltered: childResourceResponse{Value: []eligibleChildResource{
+			{ID: "/subscriptions/sub-1/resourceGroups/rg-1/providers/Microsoft.Storage/storageAccounts/sa1", Name: "sa1", Type: "Microsoft.Storage/storageAccounts"},
+			{ID: "/subscriptions/sub-1/resourceGroups/rg-1", Name: "rg-1", Type: "resourcegroup"},
+		}},
+	})
+	provider := NewProvider(armClient)
+	children, err := provider.DiscoverChildScopes(context.Background(), pim.Scope{ID: subScope, Type: pim.ScopeTypeSubscription})
+	if err != nil {
+		t.Fatalf("DiscoverChildScopes returned error: %v", err)
+	}
+	if len(children) != 1 || children[0].ID != "/subscriptions/sub-1/resourceGroups/rg-1" {
+		t.Fatalf("expected only resource group child scope, got %#v", children)
+	}
+
+	rgChildren, err := provider.DiscoverChildScopes(context.Background(), pim.Scope{ID: "/subscriptions/sub-1/resourceGroups/rg-1", Type: pim.ScopeTypeResourceGroup})
+	if err != nil || len(rgChildren) != 0 {
+		t.Fatalf("expected resource group leaf to return no child scopes without ARM call, got %#v err=%v", rgChildren, err)
+	}
+	if armClient.pinCalls != 1 {
+		t.Fatalf("expected resource group leaf not to pin token, pins=%d", armClient.pinCalls)
+	}
+
+	failing := &providerFakeARM{errs: map[string]error{subFiltered: errors.New("throttled")}}
+	_, err = NewProvider(failing).DiscoverChildScopes(context.Background(), pim.Scope{ID: subScope, Type: pim.ScopeTypeSubscription})
+	if err == nil || !strings.Contains(err.Error(), "list eligible child scopes at "+subScope) || !strings.Contains(err.Error(), "throttled") {
+		t.Fatalf("expected wrapped child scope error, got %v", err)
+	}
+}
+
 type providerFakeARM struct {
 	mu          sync.Mutex
 	responses   map[string]any
@@ -394,6 +524,8 @@ func (f *providerFakeARM) Get(ctx context.Context, path string, out any) error {
 		*target = response.(activeAssignmentResponse)
 	case *policyAssignmentResponse:
 		*target = response.(policyAssignmentResponse)
+	case *childResourceResponse:
+		*target = response.(childResourceResponse)
 	default:
 		return fmt.Errorf("unsupported response target %T", out)
 	}

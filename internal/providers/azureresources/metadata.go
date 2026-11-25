@@ -25,6 +25,7 @@ type roleAssignmentScheduleInstance struct {
 }
 
 type roleAssignmentScheduleProperties struct {
+	Scope                           string     `json:"scope"`
 	LinkedRoleEligibilityScheduleID string     `json:"linkedRoleEligibilityScheduleId"`
 	AssignmentType                  string     `json:"assignmentType"`
 	Status                          string     `json:"status"`
@@ -280,11 +281,11 @@ func (p Provider) policiesForScope(ctx context.Context, scope string) ([]roleMan
 }
 
 func applyActiveState(assignments []pim.EligibleAssignment, active []roleAssignmentScheduleInstance, now time.Time) {
-	bySchedule := make(map[string]roleAssignmentScheduleInstance, len(active))
+	bySchedule := make(map[string][]roleAssignmentScheduleInstance, len(active))
 	for _, instance := range active {
 		key := resourceName(instance.Properties.LinkedRoleEligibilityScheduleID)
 		if key != "" && isCurrentActivation(instance, now) {
-			bySchedule[key] = instance
+			bySchedule[key] = append(bySchedule[key], instance)
 		}
 	}
 	for index := range assignments {
@@ -292,12 +293,16 @@ func applyActiveState(assignments []pim.EligibleAssignment, active []roleAssignm
 		if key == "" {
 			continue
 		}
-		instance, ok := bySchedule[key]
-		if !ok {
-			continue
+		targetScope := scopePathPrefix(assignments[index].AzureScope)
+		for _, instance := range bySchedule[key] {
+			instanceScope := scopePathPrefix(instance.Properties.Scope)
+			if instanceScope != "" && !strings.EqualFold(instanceScope, targetScope) {
+				continue
+			}
+			assignments[index].Active = true
+			assignments[index].ActiveUntil = instance.Properties.EndDateTime
+			break
 		}
-		assignments[index].Active = true
-		assignments[index].ActiveUntil = instance.Properties.EndDateTime
 	}
 }
 

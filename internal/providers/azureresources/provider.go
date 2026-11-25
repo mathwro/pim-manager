@@ -65,6 +65,16 @@ type expandedRoleDefinition struct {
 	DisplayName string `json:"displayName"`
 	Type        string `json:"type"`
 }
+type childResourceResponse struct {
+	Value    []eligibleChildResource `json:"value"`
+	NextLink string                  `json:"nextLink"`
+}
+
+type eligibleChildResource struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	Type string `json:"type"`
+}
 
 func (p Provider) discoverEligibilities(ctx context.Context) ([]pim.EligibleAssignment, error) {
 	filter := url.QueryEscape("asTarget()")
@@ -122,6 +132,71 @@ func (p Provider) Prepare(ctx context.Context, assignments []pim.EligibleAssignm
 		return nil, err
 	}
 	return prepared, nil
+}
+func (p Provider) DiscoverChildScopes(ctx context.Context, parent pim.Scope) ([]pim.Scope, error) {
+	prefix := scopePathPrefix(parent.ID)
+	if prefix == "" || parent.Type == pim.ScopeTypeResourceGroup {
+		return nil, nil
+	}
+	ctx, err := p.arm.PinAccessToken(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("authenticate Azure child scope discovery: %w", err)
+	}
+	query := fmt.Sprintf("api-version=%s", arm.AuthorizationAPIVersion)
+	if parent.Type == pim.ScopeTypeSubscription {
+		query = fmt.Sprintf("$filter=%s&%s", url.QueryEscape("resourceType eq 'resourcegroup'"), query)
+	}
+	path := fmt.Sprintf("%s/providers/Microsoft.Authorization/eligibleChildResources?%s", prefix, query)
+	var children []pim.Scope
+	for path != "" {
+		var response childResourceResponse
+		if err := p.arm.Get(ctx, path, &response); err != nil {
+			return nil, fmt.Errorf("list eligible child scopes at %s: %w", prefix, err)
+		}
+		for _, item := range response.Value {
+			id := scopePathPrefix(item.ID)
+			if id == "" {
+				continue
+			}
+			scopeType := mapChildScopeType(item.Type, id)
+			if scopeType == "" {
+				continue
+			}
+			name := strings.TrimSpace(item.Name)
+			if name == "" {
+				name = resourceName(id)
+			}
+			children = append(children, pim.Scope{
+				ID:          id,
+				DisplayName: name,
+				Type:        scopeType,
+			})
+		}
+		path = response.NextLink
+	}
+	return children, nil
+}
+
+func mapChildScopeType(apiType string, scope string) pim.ScopeType {
+	switch strings.ToLower(strings.TrimSpace(apiType)) {
+	case "managementgroup", "management group", "microsoft.management/managementgroups":
+		return pim.ScopeTypeManagementGroup
+	case "subscription", "microsoft.resources/subscriptions", "microsoft.subscription/subscriptions":
+		return pim.ScopeTypeSubscription
+	case "resourcegroup", "resource group", "microsoft.resources/subscriptions/resourcegroups":
+		return pim.ScopeTypeResourceGroup
+	}
+	lower := strings.ToLower(scope)
+	switch {
+	case strings.Contains(lower, "/providers/microsoft.management/managementgroups/"):
+		return pim.ScopeTypeManagementGroup
+	case strings.Contains(lower, "/resourcegroups/") && strings.Count(lower, "/") <= 4:
+		return pim.ScopeTypeResourceGroup
+	case strings.HasPrefix(lower, "/subscriptions/") && strings.Count(lower, "/") == 2:
+		return pim.ScopeTypeSubscription
+	default:
+		return ""
+	}
 }
 
 func normalizeEligibility(item roleEligibilityScheduleInstance) pim.EligibleAssignment {

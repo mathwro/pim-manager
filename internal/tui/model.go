@@ -27,6 +27,7 @@ const (
 	ScreenGraphConnect Screen = "graph_connect"
 	ScreenHome         Screen = "home"
 	ScreenAssignments  Screen = "assignments"
+	ScreenScope        Screen = "scope"
 	ScreenDetails      Screen = "details"
 	ScreenActivation   Screen = "activation"
 	ScreenConfirmation Screen = "confirmation"
@@ -135,6 +136,7 @@ type Model struct {
 	policiesReady          bool
 	preparingPolicies      bool
 	waitingForPolicies     bool
+	scopePicker            scopePickerState
 	err                    error
 	helpVisible            bool
 	width                  int
@@ -304,7 +306,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.resizeComponents()
 		return m, nil
 	case spinner.TickMsg:
-		if !m.loading && !m.checkingAuthentication && !m.checkingTenants && !m.checkingAccount && !m.preparingPolicies && !m.waitingForPolicies && !m.graphConnecting {
+		if !m.loading && !m.checkingAuthentication && !m.checkingTenants && !m.checkingAccount && !m.preparingPolicies && !m.waitingForPolicies && !m.graphConnecting && !m.scopePicker.loading && !m.scopePicker.preparing {
 			return m, nil
 		}
 		var cmd tea.Cmd
@@ -321,6 +323,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.accountChecked(typed)
 	case graphConnectedMsg:
 		return m.graphConnected(typed)
+	case childScopesDiscoveredMsg:
+		return m.handleChildScopesDiscovered(typed)
+	case scopedAssignmentPreparedMsg:
+		return m.handleScopedAssignmentPrepared(typed)
 	case assignmentsDiscoveredMsg:
 		key := discoveryKey{tenantID: typed.tenantID, section: typed.section}
 		if typed.checkID != m.discoveryCheck || typed.tenantID != m.selectedTenant.ID || typed.section != m.activeSection {
@@ -341,6 +347,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.recordActivity(fmt.Sprintf("Assignments ready: %d", len(typed.assignments)), false)
 		entry := discoveryEntry{assignments: typed.assignments, policiesReady: true, generation: typed.checkID}
+		m.syncBaseAssignments(typed.assignments)
 		m.assignmentList = newAssignmentList(typed.assignments)
 		m.listCursor = 0
 		m.policiesReady = true
@@ -390,6 +397,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		entry.assignments = typed.assignments
 		entry.policiesReady = true
 		m.discoveryCache[typed.key] = entry
+		m.syncBaseAssignments(typed.assignments)
 		selected := m.assignmentList.selectedIDs
 		m.assignmentList = newAssignmentList(typed.assignments)
 		for id, enabled := range selected {
@@ -645,7 +653,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 	}
-	if key.String() == "r" && !m.acceptingText() && !m.checkingAuthentication && m.screen != ScreenGraphConnect && m.screen != ScreenTenants && m.screen != ScreenSummary && m.screen != ScreenProgress {
+	if key.String() == "r" && !m.acceptingText() && !m.checkingAuthentication && m.screen != ScreenGraphConnect && m.screen != ScreenTenants && m.screen != ScreenSummary && m.screen != ScreenProgress && m.screen != ScreenScope {
 		return m.refreshAccountAndWorkflow()
 	}
 
@@ -658,6 +666,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.updateGraphConnect(key)
 	case ScreenAssignments:
 		return m.updateAssignments(key)
+	case ScreenScope:
+		return m.updateScope(key)
 	case ScreenDetails:
 		return m.updateDetails(key)
 	case ScreenActivation:
@@ -684,6 +694,8 @@ func (m Model) View() string {
 		content = m.viewGraphConnect()
 	case ScreenAssignments:
 		content = m.viewAssignments()
+	case ScreenScope:
+		content = m.viewScope()
 	case ScreenDetails:
 		content = m.viewDetails()
 	case ScreenActivation:
@@ -845,6 +857,8 @@ func (m Model) updateAssignments(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		case "a":
 			m.toggleAllFiltered()
+		case "s":
+			return m.openScopePicker()
 		}
 	}
 	return m, nil
@@ -1144,6 +1158,7 @@ func (m Model) beginDiscovery(section Section, refresh bool) (tea.Model, tea.Cmd
 		}
 		m.loading = false
 		m.err = nil
+		m.syncBaseAssignments(entry.assignments)
 		m.assignmentList = newAssignmentList(entry.assignments)
 		m.policiesReady = entry.policiesReady
 		m.preparingPolicies = !entry.policiesReady
@@ -1239,7 +1254,7 @@ func (m *Model) syncForm() {
 }
 
 func (m Model) acceptingText() bool {
-	return m.searchMode || m.screen == ScreenActivation
+	return m.searchMode || m.scopePicker.searchMode || m.screen == ScreenActivation
 }
 
 func (m *Model) selectTenant(index int) {
@@ -1269,6 +1284,8 @@ func (m *Model) selectTenant(index int) {
 
 func (m *Model) clearTenantWorkflow() {
 	m.cancelGraphConnection(true)
+	m.cancelScopePicker()
+	m.scopePicker = scopePickerState{}
 	m.cancelAuthentication()
 	m.cancelActivation()
 	m.cancelDiscovery(true)
